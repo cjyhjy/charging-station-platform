@@ -1,4 +1,4 @@
-openapi: 3.0.3
+﻿openapi: 3.0.3
 info:
   title: Charging Station Platform API
   version: 0.1.0
@@ -224,6 +224,56 @@ paths:
                 $ref: '#/components/schemas/IdentityResponseEnvelope'
         '401':
           $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags: [auth]
+      operationId: deleteCurrentAccount
+      summary: Request account deletion
+      description: Anonymizes the account, revokes all sessions, and keeps retained business records anonymized.
+      responses:
+        '204':
+          description: Account anonymized and sessions revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /me/profile:
+    get:
+      tags: [auth]
+      operationId: getProfile
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [auth]
+      operationId: updateProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdateRequest'
+      responses:
+        '200':
+          description: Updated user profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /stations:
     get:
@@ -538,6 +588,60 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /admin/users/{userId}/freeze:
+    post:
+      tags: [admin]
+      operationId: freezeUser
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: User account disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountStatusResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/users/{userId}/unfreeze:
+    post:
+      tags: [admin]
+      operationId: unfreezeUser
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: User account enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountStatusResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /admin/stations:
     get:
       tags: [admin]
@@ -1007,6 +1111,61 @@ components:
         updatedAt:
           type: string
           format: date-time
+    Profile:
+      type: object
+      required: [id, phoneMasked, displayName, status, registeredAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        phoneMasked:
+          type: string
+        displayName:
+          type: string
+        avatarUrl:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        registeredAt:
+          type: string
+          format: date-time
+    ProfileUpdateRequest:
+      type: object
+      minProperties: 1
+      properties:
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 20
+        avatarUrl:
+          type: string
+    AccountStatus:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+    ProfileResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/Profile'}
+    AccountStatusResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/AccountStatus'}
     UserSummary:
       type: object
       required: [id, displayName, status, balanceCent]
