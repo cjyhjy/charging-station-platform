@@ -83,12 +83,24 @@ common_env=(
     "NCS_REDIS_ADDR=${redis_addr}"
     "NCS_REDIS_DB=${redis_db}"
     "NCS_REDIS_REQUIRED=true"
+    # The migration gate runs the API binary, which validates its configuration before it does
+    # anything - including the gateway token that has no default. Leaving it out of this array meant
+    # `-migrate-only` refused to start unless the caller happened to export the token, so the stack
+    # could not migrate a fresh database at all; the documented default never reached it.
+    "NCS_CHARGER_GATEWAY_TOKEN=${gateway_token}"
 )
 
+step "migration gate"
+env "${common_env[@]}" "${run_dir}/ncs-api" -migrate-only 2>&1 | tail -1
+
 if [[ "${seed}" == "true" ]]; then
-    # Development seed data (users, station, chargers). The seed is idempotent and refuses nothing, so
-    # the guard is here: seeding a database whose name does not look disposable is how a production
-    # database ends up with demo users.
+    # The seed runs AFTER the migration gate on purpose. Loading it first is what a fresh disposable
+    # database used to hit: dev_seed.sql inserts into user_accounts, wallet_accounts, stations and the
+    # rest, so on a database whose schema does not exist yet every statement fails with "relation ...
+    # does not exist" and the stack never comes up. The schema has to exist before the rows.
+    #
+    # The seed is idempotent and refuses nothing, so the guard is here: seeding a database whose name
+    # does not look disposable is how a production database ends up with demo users.
     database_name="$(python3 - "$NCS_POSTGRES_DSN" <<'READDB'
 import sys, urllib.parse
 print(urllib.parse.urlparse(sys.argv[1]).path.lstrip('/') or '')
@@ -99,11 +111,10 @@ READDB
         *) fail "--seed refused: database \"${database_name}\" does not look disposable" ;;
     esac
     step "seed development data into ${database_name}"
-    psql "${NCS_POSTGRES_DSN}" -q -f "${backend_dir}/seeds/dev_seed.sql"
+    # ON_ERROR_STOP is what makes a failed seed visible: without it psql prints the error, exits 0 and
+    # the stack starts against a half-seeded database.
+    psql "${NCS_POSTGRES_DSN}" -q -v ON_ERROR_STOP=1 -f "${backend_dir}/seeds/dev_seed.sql"
 fi
-
-step "migration gate"
-env "${common_env[@]}" "${run_dir}/ncs-api" -migrate-only 2>&1 | tail -1
 
 step "start mock gateway, API, publisher and worker"
 env "${common_env[@]}" NCS_MOCK_GATEWAY_ADDR="127.0.0.1:${gateway_port}" \
