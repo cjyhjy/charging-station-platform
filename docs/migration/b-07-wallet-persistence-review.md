@@ -20,25 +20,28 @@ A-04 交付的钱包适配器有两个会在生产里赔钱的缺陷，本次一
 
 **不新增任何表、不新增迁移（结论：0009 不需要，见"迁移结论"）、不改 `internal/wallet`、不改 `api/openapi.yaml`。**
 
-**待决策一项**：退款目标订单不存在时，A 线把错误映射成 HTTP 状态码的那两行改动归属 A 线文件，需要审批人裁定（见文末"待决策"）。B 线侧已经能区分这个错误，接口层目前会落到 503/code 3。
+**待决策一项（已裁定并落地）**：退款目标订单不存在时的 404 需要 A 线两行改动，已获授权完成——`internal/wallet` 增加 `ErrOrderNotFound` 哨兵、`writeWalletError` 增加 `case → 404 / code 4`，B 线适配器改用该哨兵（见文末"A 线改动（已获授权）"）。该改动独立成一个提交，便于集成负责人单独 cherry-pick 或拆分。
 
 ## 变更范围
 
 - 修改文件：
   - `backend/internal/repository/postgres/wallet.go`（适配器修复）
   - `backend/internal/repository/postgres/integration_test.go`（测试基建：跨进程测试库互斥锁）
+  - `backend/internal/wallet/service.go`（**A 线，已获授权**：`ErrOrderNotFound` 哨兵）
+  - `backend/internal/wallet/http.go`（**A 线，已获授权**：`writeWalletError` 增加 404 映射）
 - 新增文件：
   - `backend/internal/repository/postgres/wallet_b07_integration_test.go`（B-07 回归矩阵）
   - `backend/internal/repository/postgres/wallet_b07_schema_contract_test.go`（模式契约测试，"不需要 0009"的可执行结论）
+  - `backend/internal/wallet/http_test.go`（**A 线，已获授权**：退款 404/409 的端到端映射断言）
 - 明确未修改的另一条线目录：
-  - `backend/internal/wallet/`（A-04 的端口与 HTTP 层，一行未动）
-  - `backend/api/openapi.yaml`
+  - `backend/internal/wallet/` 除上述三个获授权文件外一行未动（端口 `Store`、`Service` 校验逻辑、路由均未改）
+  - `backend/api/openapi.yaml`（退款 404 的响应文档属共享文件，见"A 线改动"的后续项）
   - `backend/migrations/`（无新增、无修改；`0008` 属 A-01，未出现在本分支）
   - `backend/internal/repository/postgres/` 之外的一切
 
 ## 契约和数据
 
-- 新增或修改 API：无（本模块不改接口；退款 404 的映射见"待决策"）
+- 新增或修改 API：无新增接口；退款接口新增 404 响应语义（订单不存在），见"A 线改动（已获授权）"。`api/openapi.yaml` 未改动（共享文件）
 - PostgreSQL 迁移：无。适配器用到的列/索引/约束全部已存在于 `0001`/`0004` 交付的模式中，由 `wallet_b07_schema_contract_test.go` 逐条断言
 - Redis Key/Stream：无
 - 幂等和并发策略：
@@ -95,7 +98,7 @@ ERROR: duplicate key value violates unique constraint "wallet_transactions_idemp
 | 1 | P0：并发首次充值/退款不得丢余额 | 已修 | `TestB07TopUpConcurrentFirstCreditKeepsEveryCent`；R1 反验证 |
 | 2 | P1：幂等窗口之后的重放不得 500 | 已修 | `TestB07TopUpReplayAfterCacheExpired`、`TestB07TopUpReplayAfterCachePurged`、`TestB07RefundReplayAfterCachePurged`；R2 反验证 |
 | 3 | `sql.ErrNoRows` 映射 | 已改 | 幂等抢占的 `SELECT` 落空 → `wallet.ErrIdempotencyInProgress`（409），不再是"订单不可退款"；**该分支无法确定性触发，见"未验证"** |
-| 4 | 退款目标订单不存在 → 404 | **部分**：适配器已区分（`errOrderNotFound`），HTTP 映射待 A 线决策 | `TestB07RefundMissingOrderIsNotRefundable`；R5 反验证 |
+| 4 | 退款目标订单不存在 → 404 | 已修（A 线两行已获授权） | 适配器返回 `wallet.ErrOrderNotFound`；`internal/wallet/http.go` 映射 404/code 4。测试：`TestB07RefundMissingOrderIsNotRefundable`（B 线）、`TestRefundMissingOrderIs404`（HTTP 端到端）；R5、R9 反验证 |
 | 5 | 退款不同幂等键语义定稿（文档+测试） | 已定稿 | 本文"退款幂等键语义" + `TestB07RefundDifferentKeyAfterRefundIsRejected`；R3 反验证 |
 
 ## 退款幂等键语义（定稿）
@@ -140,7 +143,8 @@ refund:<orderNo>:<Idempotency-Key>
 | R2 | `ledgerResult` 账本优先查 → 恒返回"未入账" | 充值：`ERROR: duplicate key value violates unique constraint "wallet_transactions_idempotency_key_key" (SQLSTATE 23505)` → FAIL；退款：`RefundOrder() after the cache was purged error = wallet: order has no settled amount to refund, want the first result` → FAIL |
 | R3 | 退款账本键 `refund:<orderNo>:<key>` → `refund:<orderNo>` | `second refund with a new key = <nil>, want ErrOrderNotRefundable` → FAIL（新 key 的退款被静默判为成功，正是键格式要堵的洞）；同 key 重放用例仍 PASS |
 | R4 | 订单状态校验（`COMPLETED` 且 `paid_cents > 0`） | `refund of an unsettled order = ERROR: ... violates check constraint "wallet_transactions_amount_cents_check" (SQLSTATE 23514), want ErrOrderNotRefundable` → FAIL；A-04 的 `TestRefundOrderReversesPayment` 同时 FAIL（说明该守卫是共享行为） |
-| R5 | 退款订单不存在的区分（`errOrderNotFound`） | `missing order error = sql: no rows in result set, want errOrderNotFound` → FAIL |
+| R5 | 退款订单不存在的区分（适配器） | `missing order error = sql: no rows in result set, want wallet.ErrOrderNotFound` → FAIL |
+| R9 | HTTP 层 404 映射（新增 case） | `status = 503, want 404 (body {"success":false,"code":3,"message":"wallet is temporarily unavailable"})` → FAIL；同时 `TestRefundNotRefundableStays409` 仍 PASS，说明两种失败模式互不掩盖 |
 | R6 | 外键 23503 → `ErrWalletNotFound` | `TopUp() for an unknown user = ERROR: ... violates foreign key constraint "wallet_accounts_user_id_fkey" (SQLSTATE 23503), want ErrWalletNotFound` → FAIL |
 | R7 | 模式契约的可检出性 | 由常驻测试 `TestB07SchemaContractDetectsMissingFacts` 承担：在回滚的事务里删掉唯一索引、CHECK 约束、账本幂等列，契约检查必须逐条报出（PASS 即为"能检出"） |
 | R8 | 跨进程测试库互斥锁 | 无锁：同形状的两进程并发 → `Run() migrations error = load applied migrations: ERROR: relation "schema_migrations" does not exist (SQLSTATE 42P01)`，另一个进程 `relation "user_accounts" does not exist`；加锁后同形状两进程 → 双双 `ok` |
@@ -177,7 +181,7 @@ refund:<orderNo>:<Idempotency-Key>
 ## 未验证 / 未覆盖
 
 - 幂等抢占的 `sql.ErrNoRows` 分支没有确定性测试（原因见上）。
-- HTTP 层的退款 404 没有端到端断言：需要 A 线两行改动（见"待决策"）。
+- `api/openapi.yaml` 尚未给退款接口登记 404 响应（共享文件，属集成负责人；见"A 线改动"）。
 - 单线程用例（账本链、分页、作用域隔离、不可退款）在回退修复后仍然 PASS，属预期：它们保护的是语义不变式，不是并发缺陷本身；因此它们**不**声称覆盖 P0/P1。
 - 未做压测级并发（8 路）；更大队列下的表现未测。
 - 未验证旧 C++ 系统侧行为（本模块不涉及）。
@@ -215,6 +219,13 @@ ok  github.com/heguangV/charging-station-platform/backend/internal/repository/po
 ```
 
 ```text
+$ go test -count=1 -v -run 'TestRefundMissingOrderIs404|TestRefundNotRefundableStays409' ./internal/wallet
+--- PASS: TestRefundMissingOrderIs404 (0.00s)
+--- PASS: TestRefundNotRefundableStays409 (0.00s)
+ok  github.com/heguangV/charging-station-platform/backend/internal/wallet  0.043s
+```
+
+```text
 $ NCS_TEST_PG_DSN=postgres://ncs_test@127.0.0.1:55439/ncs_a03?sslmode=disable \
   NCS_REDIS_TEST_ADDR=127.0.0.1:6379 NCS_REDIS_TEST_DB=14 go test -count=1 -race ./...
 ?   .../cmd/api                [no test files]
@@ -247,15 +258,21 @@ ok  .../internal/worker        2.096s
 - 回滚方式：`git revert` 本模块提交即可；无迁移、无数据改写，回滚不涉及数据修复。已发生的账本与钱包余额不受回滚影响（修复只影响新写入的算术方式）。
 - 是否影响旧 C++ 系统：否。
 
-## 待决策（需审批人裁定）
+## A 线改动（已获授权）
 
-退款目标订单不存在时要求 404，但把错误映射成状态码的 `writeWalletError` 在 `internal/wallet/http.go`（A-04 的 A 线文件），本模块遵守"不改 `internal/wallet`"的边界，因此没有动它。
+退款目标订单不存在时要求 404，而把错误映射成状态码的 `writeWalletError` 在 `internal/wallet/http.go`。本模块原本遵守"不改 `internal/wallet`"的边界，只把适配器侧的错误区分做好；审批人已裁定授权该 A 线改动，故已落地：
 
-- 现状：B 线已能区分（`errOrderNotFound`），但接口层没有对应 case，会落到 `default` → 503/code 3。**这不是 404。**
-- 需要的 A 线改动（两行）：`internal/wallet` 增加 `ErrOrderNotFound` 哨兵 + `writeWalletError` 增加一个 `case → 404 / code 4`（或新代码）。B 线把 `errOrderNotFound` 换成该哨兵即可，无需其它改动。
-- 备选：接受 409/code 18（与"无可退款金额"同码），放弃 404 语义；不建议，因为调用方无法据此区分"订单不存在"与"订单已退过款"。
+| 文件 | 改动 | 行数 |
+| ---- | ---- | ---- |
+| `internal/wallet/service.go` | 新增哨兵 `ErrOrderNotFound`（注释说明它与 `ErrOrderNotRefundable` 为何必须区分） | +4 |
+| `internal/wallet/http.go` | `writeWalletError` 增加 `case errors.Is(err, ErrOrderNotFound)` → `404 / httpapi.CodeResourceNotFound(4)` / "order not found" | +2 |
+| `internal/wallet/http_test.go` | 新增端到端断言：`TestRefundMissingOrderIs404`（404/code 4）、`TestRefundNotRefundableStays409`（409/code 18） | 新文件 |
+| `internal/repository/postgres/wallet.go`（B 线） | 退款订单不存在时返回 `wallet.ErrOrderNotFound`，删掉临时私有 `errOrderNotFound` | 语义等价替换 |
 
-请裁定由谁改这两行；裁定后本模块可在半小时内补上端到端断言。
+- 端口未改：`Store`、`RefundCommand`、`Service` 的校验逻辑、路由注册均未动。
+- 反验证（R9）：把新增的 `case` 删掉后，`TestRefundMissingOrderIs404` 回报 `status = 503 ... code 3`，即"没有映射时就是 503"；`TestRefundNotRefundableStays409` 仍 PASS，说明两者互不掩盖。
+- 后续项（共享文件，属集成负责人）：`backend/api/openapi.yaml` 尚未为 `POST /api/v1/admin/orders/{orderNo}/refund` 登记 404 响应体，本模块按边界未改。
+- 交付方式：该 A 线改动独立成一个提交（`feat(wallet): map a missing refund order to 404`），便于单独 cherry-pick、拆分或回退。
 
 ## 审批结论
 
