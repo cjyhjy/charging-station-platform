@@ -13,8 +13,11 @@
 #   NCS_HTTPS_PORT        HTTPS 监听端口
 #   NCS_STATIC_ROOT       H5 静态资源根目录
 #   NCS_API_UPSTREAM      Go API 地址，例如 127.0.0.1:8080
-#   NCS_TLS_CERT          TLS 证书路径
-#   NCS_TLS_KEY           TLS 私钥路径
+#   NCS_TLS_CERT          TLS 证书路径（生产固定挂载 /etc/ncs/tls/fullchain.pem）
+#   NCS_TLS_KEY           TLS 私钥路径（生产固定挂载 /etc/ncs/tls/privkey.pem）
+#
+# 证书与私钥**不入 Git**，也不通过普通环境变量传递内容：只传路径，文件由部署环境挂载，
+# 权限 0600、属主 root:ncs（见 backend/deploy/README.md 的密钥与证书一节）。
 #   NCS_GATEWAY_ALLOW     设备网关来源网段（allow 指令参数，例如 10.20.30.0/24）
 #   NCS_OPS_ALLOW         运维/本机网段（allow 指令参数，例如 127.0.0.1）
 #   NCS_ACCESS_LOG        访问日志路径

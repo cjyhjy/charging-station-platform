@@ -1,0 +1,28 @@
+# Daily full backup (B-06 rule: systemd timer, not cron).
+#
+# Writes a custom-format dump, verifies it with pg_restore --list, records a checksum manifest, and
+# prunes local dumps beyond 7 days. The RPO does not come from this unit - it comes from the WAL
+# archive below - and the manifest says so.
+[Unit]
+Description=NCS PostgreSQL daily backup
+Documentation=file:/opt/ncs/backend/deploy/README.md
+After=postgresql.service ncs-migrate.service
+
+[Service]
+Type=oneshot
+User=ncs
+Group=ncs
+# The backup role is not the superuser: it only needs read access (pg_read_all_data) and, for the WAL
+# archive, REPLICATION.
+EnvironmentFile=/etc/ncs/backend.env
+ExecStart=/opt/ncs/backend/scripts/backup-postgres.sh
+# Remote copy after the local one, with its own credentials file. Remove this line in a deployment
+# that has no off-site destination.
+ExecStartPost=/opt/ncs/backend/scripts/push-backup-remote.sh --dump ${NCS_BACKUP_DIR}/$(date -u +%Y%m%d)*.dump
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/ncs

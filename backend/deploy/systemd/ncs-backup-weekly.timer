@@ -1,0 +1,12 @@
+[Unit]
+Description=NCS PostgreSQL weekly backup timer
+
+[Timer]
+# Sunday 04:10, after the daily run.
+OnCalendar=Sun *-*-* 04:10:00
+RandomizedDelaySec=900
+Persistent=true
+Unit=ncs-backup-weekly.service
+
+[Install]
+WantedBy=timers.target

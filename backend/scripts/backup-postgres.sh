@@ -2,14 +2,18 @@
 #
 # PostgreSQL backup (B-06).
 #
-# The approved production baseline is: 30 days of retention and an RPO of at most 15 minutes. This
-# script takes one custom-format dump and prunes dumps older than the retention window, so running it
-# from a systemd timer every 15 minutes meets the RPO by construction: at most one interval of writes
-# can be lost. A tighter RPO needs WAL archiving (continuous recovery); the dump interval is the
-# honest bound this script can promise, and docs/operations-guide.md says so.
+# The approved baseline (B-06 ruling):
+#
+#   本机备份       保留 7 天     —— 这个脚本（每日 systemd timer）
+#   周备份         保留 12 周    —— 同一个脚本的 --weekly（每周 timer）
+#   异地对象存储   保留 30 天    —— push-backup-remote.sh（加密后上传，见 deploy/README.md）
+#
+# RPO 由 WAL 归档保证（ncs-backup-wal.service 持续流式接收，见 pg_receivewal 单元），dump 是逻辑
+# 备份与可移植恢复的补充：它每日一次，因此它自己的数据丢失上界是一天，脚本会把这个数字打印出来，
+# 不假装 dump 就是 15 分钟 RPO 的来源。
 #
 # Usage:
-#   NCS_POSTGRES_DSN=postgres://... backend/scripts/backup-postgres.sh [--dir DIR] [--retention-days N]
+#   NCS_POSTGRES_DSN=postgres://... backend/scripts/backup-postgres.sh [--dir DIR] [--retention-days N] [--weekly]
 #   NCS_BACKUP_ALLOW_NON_DISPOSABLE=true   only if the target really is not disposable
 #
 # The dump is written to a temporary file and renamed only after pg_restore can read its table of
@@ -18,15 +22,25 @@ set -euo pipefail
 
 : "${NCS_POSTGRES_DSN:?set NCS_POSTGRES_DSN to the database to back up}"
 backup_dir="${NCS_BACKUP_DIR:-/var/backups/ncs/postgres}"
-retention_days="${NCS_BACKUP_RETENTION_DAYS:-30}"
+retention_days="${NCS_BACKUP_RETENTION_DAYS:-7}"
+retention_weeks="${NCS_BACKUP_WEEKLY_RETENTION_WEEKS:-12}"
+weekly="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dir) backup_dir="$2"; shift 2 ;;
         --retention-days) retention_days="$2"; shift 2 ;;
+        --weekly) weekly="true"; shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+if [[ "${weekly}" == "true" ]]; then
+    # Weekly snapshots live beside the daily ones and are pruned by week: they exist so a corruption
+    # discovered late is still recoverable after the daily window has rolled over.
+    retention_days="$(( retention_weeks * 7 ))"
+    backup_dir="${backup_dir}/weekly"
+fi
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { printf '\n=== %s ===\n' "$*"; }
@@ -95,4 +109,10 @@ echo
 echo "backup:   ${target}"
 echo "size:     ${size_bytes} bytes, ${duration}s, ${entries} objects"
 echo "sha256:   ${checksum}"
-echo "retention: ${retention_days} days (RPO is the backup interval, not this window)"
+if [[ "${weekly}" == "true" ]]; then
+    echo "retention: weekly snapshots kept ${retention_weeks} weeks"
+else
+    echo "retention: local dumps kept ${retention_days} days (the RPO is bounded by the WAL archive, not by this dump)"
+fi
+echo "verify:   backend/scripts/verify-backup.sh --dump ${target}"
+echo "remote:   backend/scripts/push-backup-remote.sh --dump ${target}   (encrypts, then uploads; 30-day retention at the destination)"

@@ -1,0 +1,11 @@
+[Unit]
+Description=NCS backup integrity check timer
+
+[Timer]
+OnCalendar=*-*-* 05:30:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=ncs-backup-verify.service
+
+[Install]
+WantedBy=timers.target

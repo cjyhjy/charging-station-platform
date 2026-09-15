@@ -1,0 +1,12 @@
+[Unit]
+Description=NCS PostgreSQL daily backup timer
+
+[Timer]
+# 03:20 local time, with a small randomised delay so several hosts do not start together.
+OnCalendar=*-*-* 03:20:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=ncs-backup.service
+
+[Install]
+WantedBy=timers.target

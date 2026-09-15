@@ -14,7 +14,11 @@
 | `docker-compose.yml` | 可选的一体化编排（含迁移门禁与 mock-gateway profile） |
 | `../scripts/local-stack.sh` | 本地联调：一条命令起全栈（可选带 Nginx） |
 | `../scripts/nginx-render.sh` | 渲染 Nginx 模板并校验；`--drill` 在本机跑通一遍 |
-| `../scripts/backup-postgres.sh` / `restore-postgres.sh` | 备份（自定义格式、30 天保留）与恢复 |
+| `systemd/ncs-backup*.service|.timer`、`ncs-restore-drill.*`、`ncs-backup-wal.service` | 备份编排：每日全量、周快照、每日校验、每周恢复演练、持续 WAL 归档 |
+| `../scripts/backup-postgres.sh` / `restore-postgres.sh` | 备份（自定义格式、本机 7 天 / 周快照 12 周）与恢复 |
+| `../scripts/verify-backup.sh` | 备份完整性校验（checksum + `pg_restore --list`，可选真恢复） |
+| `../scripts/wal-archive.sh` | WAL 归档（`pg_receivewal`，RPO 的来源） |
+| `../scripts/push-backup-remote.sh` | 异地推送（先加密再上传，独立凭据，目的地保留 30 天） |
 | `../scripts/drill-backup-restore.sh` | **RPO/RTO 实测演练**（必须实际运行，不能只写在文档里） |
 | `../scripts/fault-drill.sh` | 依赖故障演练：切断 PostgreSQL/Redis，断言 `/readyz` 翻转与恢复 |
 | `../scripts/loadtest-orders.sh` | 并发与重复提交压测（断言一次动作只产生一次效果） |
@@ -66,14 +70,31 @@ cd backend/deploy && cp systemd/ncs-backend.env.example .env && docker compose u
 与 `compose` 子命令不可用），因此 compose 路径只做了结构校验与文档说明，**没有作为验收证据**；
 验收以 systemd 与脚本路径为准。使用 compose 前请确认 `docker compose version` 可用。
 
-## 密钥与证书注入
+## 密钥与证书注入（B-06 裁决 ②）
 
-- `NCS_CHARGER_GATEWAY_TOKEN`：设备网关服务令牌，**无默认值**，缺失时 API 拒绝启动；只注入设备
-  网关与 Go API，**不得下发给 H5**。
-- `NCS_POSTGRES_DSN` 中的口令：生产用密钥管理或受限权限文件（`/etc/ncs/backend.env`，0600）。
-- TLS：`NCS_TLS_CERT` / `NCS_TLS_KEY` 由部署环境提供（生产证书），本地演练用
-  `backend/scripts/nginx-render.sh --drill` 生成的自签证书。
-- 日志中不得输出口令、完整令牌或支付数据；API/Worker/Publisher 的日志只记录 ID 与结果。
+- **证书不入 Git**，也不通过普通环境变量传递内容；只传路径，文件由部署环境挂载：
+
+```text
+/etc/ncs/tls/fullchain.pem   0600 root:ncs
+/etc/ncs/tls/privkey.pem     0600 root:ncs
+NCS_TLS_CERT=/etc/ncs/tls/fullchain.pem
+NCS_TLS_KEY=/etc/ncs/tls/privkey.pem
+```
+
+- `/etc/ncs/backend.env` 由 systemd `EnvironmentFile` 加载，权限 **0600**、属主 **root:ncs**：
+
+```bash
+install -m 0600 -o root -g ncs backend/deploy/systemd/ncs-backend.env.example /etc/ncs/backend.env
+```
+
+- **数据库口令、Redis 口令、设备网关令牌只能写入该文件或外部密钥系统**（Vault/KMS/云密钥服务）。
+  三者都不得出现在命令行参数、镜像、仓库、CI 日志或 Nginx 配置里。
+- `NCS_CHARGER_GATEWAY_TOKEN`：**无默认值**，缺失时 API 拒绝启动；只注入设备网关与 Go API，
+  **不得下发给 H5 或普通 Agent**；H5 只能拿用户会话令牌。
+- `NCS_PUBLIC_HOST`：真实域名由部署环境注入，**不设默认域名**；模板与代码都不写死。
+- 日志中不得输出口令、完整令牌或支付数据；API/Worker/Publisher 的日志只记录 ID 与结果，
+  Nginx 访问日志只记录 trace ID 与状态码。
+- 本地演练用自签证书（`backend/scripts/nginx-render.sh --drill` 自动生成），仅用于验证配置，不入库。
 
 ## 端口与域名（裁决口径）
 
@@ -87,6 +108,46 @@ NCS_PUBLIC_HOST：真实域名由部署环境注入，模板与代码都不写�
 
 `/metrics` **不登记 OpenAPI**（内部运维端点）；`/readyz` 保留在 OpenAPI 中但属系统运维接口，
 H5 与普通 Agent 都不得调用，也不应把它当作业务健康判断。
+
+## 指标端点（B-06 裁决 ④）
+
+三个进程各自暴露 Prometheus 文本格式指标，**只监听本机或内网**，端口可用环境变量覆盖，默认值如下：
+
+| 进程 | 默认地址 | 环境变量 |
+|---|---|---|
+| Go API | `127.0.0.1:9090` | `NCS_METRICS_ADDR` |
+| Worker | `127.0.0.1:9091` | `NCS_METRICS_ADDR` |
+| Publisher | `127.0.0.1:9092` | `NCS_METRICS_ADDR` |
+
+填非环回、非私网地址时进程**拒绝启动**（`observability: metrics address must be a loopback or private
+address`），除非显式设置 `NCS_METRICS_ALLOW_PUBLIC_BIND=true`。`/metrics` **不登记 OpenAPI**；API 的
+业务监听地址默认 `127.0.0.1:8080`，Nginx 侧对 `/metrics` 保留 allow/deny（运维网段之外 403）。
+
+裁决要求的指标与实现系列的对应（**按名字核对，不要凭猜**）：
+
+| 裁决要求的指标 | 实际系列 | 出现时机 |
+|---|---|---|
+| 消费成功数 | `ncs_worker_events_total{event_type,outcome="succeeded",stream}` | 首次消费成功后 |
+| 消费失败数 | `...{outcome="retried"}`（可重试，保留 Pending）、`...{outcome="dead_lettered"}`（进入死信）、`...{outcome="lease_held"}`（租约被他人持有） | 首次出现该类结果后 |
+| Pending 数 | `ncs_stream_pending{stream}` | 启动采样后（进程启动即存在） |
+| 重试数 | `ncs_worker_retries_total{attempt}` | 首次重试后 |
+| 死信数 | `ncs_worker_dead_lettered_total{reason}`（写入）、`ncs_stream_dead_letter_length`（流长度） | 前者首次死信后，后者启动即存在 |
+| Stream 延迟 | `ncs_stream_lag{stream}` | 启动采样后 |
+| Outbox 未发布数量 | `ncs_pg_outbox_unpublished` | 启动采样后（API 与 Publisher 都暴露） |
+| Publisher 失锁次数 | `ncs_publisher_lock_losses_total` | 启动即存在（0） |
+| Worker 最近成功时间 | `ncs_worker_last_success_timestamp_seconds` | 启动即存在（0 = 尚未成功过） |
+| Publisher 最近成功时间 | `ncs_publisher_last_publish_timestamp_seconds` | 启动即存在（0 = 尚未发布过） |
+| PostgreSQL / Redis 连接状态 | `ncs_dependency_up{dependency="postgres"\|"redis"}` | 启动即存在（0，首轮采样后更新） |
+
+补充系列：`ncs_publisher_published_total`、`ncs_publisher_pass_failures_total`、`ncs_publisher_standby`
+（1 = 正在等待另一实例释放 advisory lock）、`ncs_api_requests_total{method,route,status}`、
+`ncs_api_request_duration_seconds`（histogram）、`ncs_api_requests_in_flight`、`ncs_pg_migrations_version`、
+`ncs_redis_capability_failures_total`。
+
+**为什么有些系列一开始不在**：计数器的标签来自流量（事件类型、outcome、attempt、reason），预造这些
+标签会造出永远不动的"幽灵 0"，看起来像发生过却从未发生的流量。固定标签的系列（依赖状态、各 stream 的
+Pending/Lag/Length、死信长度、未发布数、迁移版本、Publisher 计数与时间戳）在进程启动时就以初值 0 创建，
+因此"抓不到"只可能意味着进程真的没跑。
 
 ## 指标与告警
 
@@ -128,23 +189,68 @@ scrape_configs:
 | Redis | 可恢复基础设施，不保存唯一业务事实 |
 | 账务与订单 | 必须依靠 PostgreSQL 恢复 |
 
+### 编排（裁决 ③：systemd timer，不用 cron）
+
+| 任务 | 单元 | 频率 | 保留 |
+|---|---|---|---|
+| 全量逻辑备份 | `ncs-backup.service` / `ncs-backup.timer` | 每日 03:20（±10 分钟抖动） | 本机 **7 天** |
+| 周备份快照 | `ncs-backup-weekly.service` / `.timer` | 每周日 04:10 | **12 周** |
+| 完整性校验 | `ncs-backup-verify.service` / `.timer` | 每日 05:30 | — |
+| 恢复演练（实测 RPO/RTO） | `ncs-restore-drill.service` / `.timer` | 每周日 06:00 | 报告随日志保留 |
+| WAL 归档（RPO 的来源） | `ncs-backup-wal.service`（常驻，非 timer） | 持续流式 | 由归档目录与磁盘配额决定 |
+| 异地推送 | `ncs-backup.service` 的 `ExecStartPost` | 每日，随全量备份 | 对象存储 **30 天** |
+
 ```bash
-# 每 15 分钟一次（RPO = 备份间隔），保留 30 天
-NCS_POSTGRES_DSN=... backend/scripts/backup-postgres.sh
-# systemd timer 示例
-systemd-run --on-calendar="*:0/15" --unit=ncs-backup \
-    env NCS_POSTGRES_DSN=... backend/scripts/backup-postgres.sh
+systemctl enable --now ncs-backup.timer ncs-backup-weekly.timer ncs-backup-verify.timer ncs-restore-drill.timer ncs-backup-wal.service
+systemctl list-timers 'ncs-*'
 
-# 恢复
-backend/scripts/restore-postgres.sh --dump /var/backups/ncs/postgres/<dump> --dsn postgres://.../ncs_restore
-
-# 实测演练（B-06 要求：必须跑一次，不能只写文档）
-NCS_TEST_PG_DSN=... backend/scripts/drill-backup-restore.sh
+# 手工操作
+NCS_POSTGRES_DSN=... backend/scripts/backup-postgres.sh              # 每日全量（7 天保留）
+NCS_POSTGRES_DSN=... backend/scripts/backup-postgres.sh --weekly     # 周快照（12 周保留）
+NCS_BACKUP_DIR=/var/backups/ncs/postgres backend/scripts/verify-backup.sh [--restore]
+NCS_POSTGRES_DSN=... backend/scripts/restore-postgres.sh --dump <dump> --dsn postgres://.../ncs_restore
+NCS_TEST_PG_DSN=... backend/scripts/drill-backup-restore.sh          # 实测 RPO/RTO
+NCS_POSTGRES_DSN=... NCS_BACKUP_WAL_DIR=/var/backups/ncs/wal backend/scripts/wal-archive.sh [--once]
 ```
 
-RPO 的诚实边界：dump 间隔就是数据丢失上界（≤15 分钟满足目标）；需要更小的 RPO 必须启用 WAL
-归档做 PITR，本部署**未启用**，演练报告也会把这条限制打印出来。恢复演练在同一实例上执行，测量的是
-数据库工作量而不是跨主机拷贝，报告同样会说明。
+### 异地备份必须满足（裁决 ③）
+
+```text
+加密传输        rclone 使用 https/S3 远端（TLS）；不通过明文通道外发
+加密存储        push-backup-remote.sh 先用 openssl AES-256-CBC/PBKDF2 加密，再上传 .dump.enc
+独立凭据        对象存储凭据只存在于 NCS_BACKUP_REMOTE_CONFIG（默认 /etc/ncs/backup-remote.env，0600），
+                与数据库口令、Redis 口令、设备网关令牌完全分离
+版本保留        目的地开启对象版本保留；误删本地或误删远端当前版本都可回滚
+禁止超级用户    备份任务使用专用角色（见下），不是超级用户
+凭据不进仓库    /etc/ncs/backup-remote.env、/etc/ncs/backup.key 都不在仓库中，也不打印
+```
+
+专用备份角色（最小权限，替代超级用户）：
+
+```sql
+-- 逻辑备份读取全部数据；WAL 归档需要 REPLICATION，两者都不需要超级用户。
+CREATE ROLE ncs_backup LOGIN PASSWORD '<from the secret store>';
+GRANT pg_read_all_data TO ncs_backup;
+ALTER ROLE ncs_backup REPLICATION;
+-- 连接权限
+GRANT CONNECT ON DATABASE ncs_prod TO ncs_backup;
+```
+
+`NCS_POSTGRES_DSN` 在备份单元中指向该角色；API/Worker/Publisher 的 DSN 仍用各自的业务角色。
+
+### RPO/RTO 的真实来源
+
+```text
+RPO ≤ 15 分钟   ncs-backup-wal.service 持续流式归档 WAL（pg_receivewal），因此丢失窗口远小于 15 分钟；
+                逻辑备份是每日一次，自身的数据丢失上界是一天，脚本会打印这句话，不冒充 RPO 来源
+RTO ≤ 60 分钟   restore-postgres.sh 的实测耗时（drill 报告给出具体秒数）
+恢复顺序        WAL 归档 + 最近一次全量备份/dump → 重放 WAL 到目标时间点（PITR）
+```
+
+**已实测与未实测（不隐藏）**：dump 备份、校验、恢复与 RPO/RTO 演练已在本机实测（见模块审批单）；
+WAL 归档已实测建立复制槽并流式连接（`wal_level=replica`，角色具备 REPLICATION）。**PITR 重放本身未演练**——
+本机没有预置第二个 PostgreSQL 实例，因此恢复演练走的是 dump 路径；异地对象存储路径因本机没有对象存储与
+rclone，只交付配置与脚本，未作为证据。
 
 ## 故障演练
 
