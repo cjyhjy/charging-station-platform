@@ -189,9 +189,16 @@ Pending/Lag/Length、死信长度、未发布数、迁移版本、Publisher 计�
 `ncs_pg_outbox_oldest_unpublished_seconds`（最老未发布记录等待秒数，空 Outbox 时为 0），
 由 API、Worker、Publisher 的探针一并暴露。
 
-**当前状态**：规则文件的阈值、持续时长与级别与批准表一致，结构可被规则加载器解析；
-但**告警规则尚未在真实触发条件下验证**（本机没有 Prometheus/Alertmanager），
-上线前必须做一次实际触发验证（例如人为停掉 Publisher 看两条 Outbox 规则按预期升级）。
+**当前状态**：规则文件的阈值、持续时长与级别与批准表一致，结构可被规则加载器解析。
+本机已完成两轮实际验证（记录见 `docs/migration/b-06-golive-verification.md`）：
+
+- 静态与秒级回归：`promtool check rules` 通过；`promtool test rules backend/deploy/monitoring/ncs-alerts.test.yml`
+  用合成样本覆盖全部 12 条规则的阈值边界与 `for` 时长，并包含"完全健康（空库）时零告警"的对照；
+- 实机触发：真实 Prometheus 加载本文件（sha256 未改动）并以故障值抓取，12 条规则按各自的 `for`
+  时长依次转入 firing，且投递链路（Prometheus → Alertmanager → webhook 接收器）收到通知。
+
+上线前仍须在生产监控栈上重跑一次（本机实例与生产拓扑不同），并且**必须补 Alertmanager 配置与真实接收器**：
+仓库目前只有规则、没有任何路由/接收器配置，规则 firing 只会停留在 Prometheus 里。
 
 抓取配置示例（Prometheus）：
 
