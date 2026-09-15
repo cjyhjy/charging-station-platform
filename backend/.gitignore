@@ -1,0 +1,13 @@
+# Go build output.
+#
+# A bare `go build ./cmd/worker` run from this directory writes the binary here, and one of those
+# binaries was accidentally committed during B-06. Builds belong in a scratch directory
+# (`go build -o /tmp/... ./cmd/...`) or are caught here.
+/api
+/worker
+/outbox-publisher
+/mock-gateway
+/ncs-api
+/ncs-worker
+/ncs-outbox-publisher
+/ncs-mock-gateway

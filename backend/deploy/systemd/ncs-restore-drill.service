@@ -1,0 +1,23 @@
+# Weekly restore drill: measures RPO and RTO on a scratch database and prints the report. The ruling
+# asks for a drill rather than a paragraph, and a weekly cadence is what keeps the procedure true.
+#
+# NCS_TEST_PG_DSN must point at the disposable instance the drill may create and drop databases on.
+[Unit]
+Description=NCS restore drill (measured RPO/RTO)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=ncs
+Group=ncs
+Environment=NCS_TEST_PG_DSN=
+EnvironmentFile=/etc/ncs/backend.env
+ExecStart=/opt/ncs/backend/scripts/drill-backup-restore.sh
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/ncs /tmp

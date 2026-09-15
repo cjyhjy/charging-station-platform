@@ -67,6 +67,65 @@ const (
 	// MetricCollectorErrorsTotal counts sampling failures, so a broken collector is
 	// visible instead of silently reporting stale gauges.
 	MetricCollectorErrorsTotal = "ncs_observability_collector_errors_total"
+
+	// API process metrics (B-06). The API is the process an operator looks at first when a
+	// request fails, so it reports its own traffic and the state of its dependencies rather
+	// than leaving that to the worker's metrics.
+	//
+	// MetricRequestsTotal counts finished requests, labelled by method, the registered route
+	// pattern and the status class. The route pattern is used instead of the request path
+	// deliberately: a path label would create one series per order number and turn the metrics
+	// endpoint into a memory leak.
+	MetricRequestsTotal = "ncs_api_requests_total"
+	// MetricRequestDuration is a histogram of request latency in seconds.
+	MetricRequestDuration = "ncs_api_request_duration_seconds"
+	// MetricRequestsInFlight is the number of requests being served right now.
+	MetricRequestsInFlight = "ncs_api_requests_in_flight"
+	// MetricDependencyUp is 1 while a dependency answers, 0 while it does not. It is what the
+	// readiness probe and the alert "the API is up but its database is not" are built on.
+	MetricDependencyUp = "ncs_dependency_up"
+	// MetricOutboxOldestUnpublished is the age in seconds of the oldest unpublished outbox row, or 0
+	// when the outbox is empty.
+	//
+	// The backlog count alone cannot distinguish "one row waiting for the next pass" from "the oldest
+	// row has been stuck for twenty minutes": an alert on the age is what catches a publisher that is
+	// running but not making progress, and it is the approved threshold table's second dimension.
+	MetricOutboxOldestUnpublished = "ncs_pg_outbox_oldest_unpublished_seconds"
+	// MetricMigrationsVersion is the highest applied migration version. A worker that cannot
+	// reach the expected version refuses to start, so an operator needs to see the number the
+	// database actually holds.
+	MetricMigrationsVersion = "ncs_pg_migrations_version"
+	// MetricOutboxUnpublished is the number of outbox rows not yet published. It is the backlog
+	// between a committed business transaction and the stream, and the first thing to grow when
+	// the publisher is down.
+	MetricOutboxUnpublished = "ncs_pg_outbox_unpublished"
+
+	// MetricWorkerLastSuccess is the Unix time of the last delivery the worker finished
+	// successfully. A process can be alive, connected and consuming nothing; this is the series that
+	// turns that state into an alert instead of a log line somebody has to notice.
+	MetricWorkerLastSuccess = "ncs_worker_last_success_timestamp_seconds"
+	// MetricPublisherLastPublish is the Unix time of the last publish pass that wrote at least one
+	// row, so a publisher that is up but idle on an empty outbox stays distinguishable from one that
+	// is stuck.
+	MetricPublisherLastPublish = "ncs_publisher_last_publish_timestamp_seconds"
+	// MetricPublisherLockLossesTotal counts the times the publisher found it no longer held the
+	// advisory lock. Each one is a window in which another publisher may have become active, so a
+	// non-zero value is an event to look at rather than a routine counter.
+	MetricPublisherLockLossesTotal = "ncs_publisher_lock_losses_total"
+	// MetricPublisherStandby is 1 while this publisher is waiting for the lock another instance holds.
+	MetricPublisherStandby = "ncs_publisher_standby"
+	// MetricPublisherPublishedTotal counts the outbox rows this process published.
+	MetricPublisherPublishedTotal = "ncs_publisher_published_total"
+	// MetricPublisherPassFailuresTotal counts publish passes that returned an error. The rows stay
+	// unpublished and are retried, so this counter is what separates "the outbox is empty" from
+	// "the outbox cannot be written to".
+	MetricPublisherPassFailuresTotal = "ncs_publisher_pass_failures_total"
+)
+
+// Dependency label values for MetricDependencyUp.
+const (
+	DependencyPostgres = "postgres"
+	DependencyRedis    = "redis"
 )
 
 // Kind distinguishes a monotonic counter from an instantaneous gauge.
@@ -114,9 +173,10 @@ func formatFloat(value float64) string {
 // grow with traffic. An unbounded label such as an event id or a charger id would defeat
 // that, which is why none is used.
 type Registry struct {
-	mu       sync.Mutex
-	counters map[string]*entry
-	gauges   map[string]*entry
+	mu         sync.Mutex
+	counters   map[string]*entry
+	gauges     map[string]*entry
+	histograms map[string]*histogramSeries
 }
 
 type entry struct {
@@ -128,8 +188,9 @@ type entry struct {
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		counters: make(map[string]*entry),
-		gauges:   make(map[string]*entry),
+		counters:   make(map[string]*entry),
+		gauges:     make(map[string]*entry),
+		histograms: make(map[string]*histogramSeries),
 	}
 }
 
@@ -158,6 +219,27 @@ func (r *Registry) AddCounter(name string, labels map[string]string, delta float
 	if current.value < 0 {
 		current.value = 0
 	}
+}
+
+// IncGauge adds delta to a gauge, creating it at zero first.
+//
+// A gauge can move in both directions - requests in flight rise and fall - so unlike a counter it is
+// not clamped at zero. Clamping would hide a bookkeeping error, and a gauge stuck at 0 while
+// requests are in flight is a number an operator would act on.
+func (r *Registry) IncGauge(name string, labels map[string]string, delta float64) {
+	if name == "" {
+		return
+	}
+	key := seriesKey(name, labels)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.gauges[key]
+	if !ok {
+		current = &entry{name: name, labels: copyLabels(labels)}
+		r.gauges[key] = current
+	}
+	current.value += delta
 }
 
 // DeleteGauge removes a gauge series.
@@ -237,11 +319,11 @@ func (r *Registry) Snapshot() []Sample {
 	return samples
 }
 
-// Len reports how many series are tracked.
+// Len reports how many series are tracked, counting one histogram family as one series.
 func (r *Registry) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.counters) + len(r.gauges)
+	return len(r.counters) + len(r.gauges) + len(r.histograms)
 }
 
 // Reset clears every series. It exists for tests and for a manual ops reset.
@@ -250,6 +332,7 @@ func (r *Registry) Reset() {
 	defer r.mu.Unlock()
 	r.counters = make(map[string]*entry)
 	r.gauges = make(map[string]*entry)
+	r.histograms = make(map[string]*histogramSeries)
 }
 
 func seriesKey(name string, labels map[string]string) string {

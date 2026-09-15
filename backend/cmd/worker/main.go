@@ -20,6 +20,7 @@ import (
 	"github.com/heguangV/charging-station-platform/backend/internal/repository/postgres"
 	redisrepo "github.com/heguangV/charging-station-platform/backend/internal/repository/redis"
 	"github.com/heguangV/charging-station-platform/backend/internal/worker"
+	"github.com/heguangV/charging-station-platform/backend/migrations"
 )
 
 // This executable wires the B-line event workers: charge and order lifecycle events
@@ -67,9 +68,37 @@ func main() {
 	}()
 
 	// The metrics registry is the single source of the reliability facts this process
-	// reports: worker counters and sampled stream state land in the same place, so one log
-	// line describes the whole pipeline.
+	// reports: worker counters and sampled stream state land in the same place, so one scrape -
+	// and one log line - describes the whole pipeline.
 	registry := observability.NewRegistry()
+	successClock := observability.NewSuccessClock(registry, observability.MetricWorkerLastSuccess)
+	// The ruling lists the metrics a scrape must find; the fixed ones are created here so a fresh
+	// process does not look like a build that exports nothing.
+	observability.RegisterProcessMetrics(registry, observability.ProcessMetricsConfig{
+		Worker:  true,
+		Streams: streamNames(),
+	})
+
+	// The worker's counters are only visible from the worker, so it serves its own endpoint. The
+	// address defaults to loopback and is validated before it is bound: a public bind has to be
+	// asked for explicitly (B-06 ruling on ops endpoints).
+	metrics, err := observability.StartMetricsServer(observability.MetricsServerConfig{
+		Addr:            envOr(metricsAddrEnv, defaultMetricsAddr),
+		Registry:        registry,
+		Logger:          logger,
+		AllowPublicBind: truthyEnv(metricsAllowPublicEnv),
+	})
+	if err != nil {
+		logger.Error("start metrics endpoint", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metrics.Shutdown(shutdownCtx); err != nil {
+			logger.Error("shutdown metrics endpoint", "error", err)
+		}
+	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -122,6 +151,23 @@ func main() {
 	}
 	defer func() { _ = db.Close() }()
 
+	// Migration gate: this process writes tables a migration introduces, and it does not run
+	// migrations itself. Starting against an older schema would fail later, in the middle of a
+	// device flow, instead of here where the fix is one command.
+	expectedSchema, err := postgres.HighestMigrationVersion(migrations.FS)
+	if err != nil {
+		logger.Error("read migration set", "error", err)
+		os.Exit(1)
+	}
+	if err := postgres.AssertSchemaVersion(ctx, db, expectedSchema); err != nil {
+		logger.Error("schema is out of date; run the migration gate first", "error", err,
+			"expected_schema_version", expectedSchema)
+		os.Exit(1)
+	}
+	if version, err := postgres.SchemaVersion(ctx, db); err == nil {
+		logger.Info("schema version verified", "schema_version", version, "expected", expectedSchema)
+	}
+
 	consumptionStore, err := postgres.NewConsumptionStore(db)
 	if err != nil {
 		logger.Error("create consumption store", "error", err)
@@ -171,7 +217,10 @@ func main() {
 		os.Exit(1)
 	}
 	runner.SetDeadLetterGuard(deadLetterGuard)
-	runner.SetObserver(registry)
+	// The success clock is wrapped around the registry so the timestamp travels the same path as
+	// the counters: a worker that is connected but consuming nothing is then visible as a stale
+	// timestamp rather than as silence.
+	runner.SetObserver(successClock.MarkObserver(registry))
 	// The workers share this process's trace-aware logger.
 	runner.SetLogger(logger)
 	runner.SetOnStart(func(stream worker.StreamConfig) {
@@ -200,6 +249,19 @@ func main() {
 		os.Exit(1)
 	}
 	collector.SetDegradationSampler(degradationSampler)
+
+	// Dependency sampling runs for as long as the process does. It has its own context so shutdown
+	// stops it deterministically instead of waiting for the next tick.
+	metricsProbeCtx, stopMetricsProbe := context.WithCancel(ctx)
+	metricsProbeDone := make(chan struct{})
+	go func() {
+		defer close(metricsProbeDone)
+		probeDependencies(metricsProbeCtx, db, capabilities.Ready, registry, logger)
+	}()
+	defer func() {
+		stopMetricsProbe()
+		<-metricsProbeDone
+	}()
 
 	// The startup snapshot is taken once the runner reports that every consumer group exists.
 	// Sampling before that cannot report a meaningful backlog: lag is undefined without a group, so a
@@ -232,6 +294,47 @@ const shutdownSampleTimeout = 5 * time.Second
 // The sampler gets its own cancellable context rather than the process signal context. A worker
 // failure cancels the runner but not the signal, so a sampler that only ever stops on a signal
 // would leave the process unable to exit - a state a supervisor cannot tell from a hung process.
+// streamNames lists the streams this worker consumes, for the per-stream gauges. It is derived from
+// the same frozen list the consumers are built from, so the two cannot drift.
+func streamNames() []string {
+	return []string{event.StreamOrderEvent, event.StreamChargeEvent, event.StreamChargerCommand}
+}
+
+// probeDependencies keeps the process's view of PostgreSQL and Redis current.
+//
+// The worker has no readiness endpoint (nothing routes traffic to it), but a scrape still has to be
+// able to answer "is this process able to work right now": a worker whose PostgreSQL connection is
+// gone is holding messages it cannot apply, which is exactly the state the gauges describe.
+func probeDependencies(ctx context.Context, db *sql.DB, redisPing func(context.Context) error, registry *observability.Registry, logger *slog.Logger) {
+	observability.ProbeDependencies(ctx, observability.ProbeConfig{
+		PostgresUp:      func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
+		RedisUp:         func(ctx context.Context) bool { return redisPing(ctx) == nil },
+		SchemaVersion:   func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
+		OutboxBacklog:   func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
+		OutboxOldestAge: func(ctx context.Context) (float64, error) { return postgres.OldestUnpublishedOutboxAge(ctx, db) },
+		Registry:        registry,
+		Logger:          logger,
+		Interval:        dependencyProbeInterval,
+	})
+}
+
+// The ops endpoint defaults (B-06 ruling): the API is 9090, the worker 9091, the publisher 9092, all
+// on loopback, all overridable, none of them hardcoded to a public interface.
+const (
+	metricsAddrEnv          = "NCS_METRICS_ADDR"
+	metricsAllowPublicEnv   = "NCS_METRICS_ALLOW_PUBLIC_BIND"
+	defaultMetricsAddr      = "127.0.0.1:9091"
+	dependencyProbeInterval = 5 * time.Second
+)
+
+func truthyEnv(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func servePipeline(ctx context.Context, runner *worker.Runner, collector *observability.Collector, sampleInterval time.Duration, logger *slog.Logger) error {
 	reportingCtx, stopReporting := context.WithCancel(ctx)
 	reportingDone := make(chan struct{})

@@ -1,0 +1,164 @@
+# NCS Go 后端本地/单机编排（B-06 交付物，草稿）
+#
+# 用途：一键起 PostgreSQL、Redis、Go API、Worker、Publisher、Nginx（含 H5 静态通路），
+#       用于本地联调与故障演练；生产部署用 systemd 单元（见 deploy/systemd/）。
+#
+# 用法：
+#   cd backend/deploy
+#   cp .env.example .env    # 填 NCS_CHARGER_GATEWAY_TOKEN 等
+#   docker compose up -d
+#   docker compose --profile mock up -d mock-gateway     # 开发用模拟设备网关
+#
+# 迁移：api 容器启动时由进程内的迁移 runner 执行（0001..0007），无需手工 psql。
+
+name: ncs-backend
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${NCS_DB_USER:-ncs}
+      POSTGRES_PASSWORD: ${NCS_DB_PASSWORD:?set NCS_DB_PASSWORD}
+      POSTGRES_DB: ${NCS_DB_NAME:-ncs_dev}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NCS_DB_USER:-ncs} -d ${NCS_DB_NAME:-ncs_dev}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # 数据库不对外暴露端口：只有同网络的进程可以访问（架构文档第 7 节安全边界）。
+    expose:
+      - "5432"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    expose:
+      - "6379"
+
+  # 迁移门禁：先应用顺序迁移并核对版本，成功退出后 API / Worker / Publisher 才启动。
+  migrate:
+    build:
+      context: ../..
+      dockerfile: backend/deploy/Dockerfile
+      args:
+        NCS_TARGET: cmd/api
+    command: ["-migrate-only"]
+    restart: "no"
+    environment:
+      NCS_POSTGRES_DSN: postgres://${NCS_DB_USER:-ncs}:${NCS_DB_PASSWORD}@postgres:5432/${NCS_DB_NAME:-ncs_dev}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ../..
+      dockerfile: backend/deploy/Dockerfile
+      args:
+        NCS_TARGET: cmd/api
+    restart: unless-stopped
+    environment:
+      NCS_POSTGRES_DSN: postgres://${NCS_DB_USER:-ncs}:${NCS_DB_PASSWORD}@postgres:5432/${NCS_DB_NAME:-ncs_dev}?sslmode=disable
+      NCS_REDIS_ADDR: redis:6379
+      NCS_REDIS_REQUIRED: "true"
+      NCS_CHARGER_GATEWAY_TOKEN: ${NCS_CHARGER_GATEWAY_TOKEN:?set NCS_CHARGER_GATEWAY_TOKEN}
+      NCS_HTTP_ADDR: 0.0.0.0:8080
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # 运行时镜像用 alpine（含 busybox wget）；若改用 distroless 静态镜像，容器内没有 shell，
+      # 健康检查只能由编排平台按 HTTP 探针执行（见 deploy/README.md 的两种运行方式说明）。
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    expose:
+      - "8080"
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: backend/deploy/Dockerfile
+      args:
+        NCS_TARGET: cmd/worker
+    restart: unless-stopped
+    environment:
+      NCS_POSTGRES_DSN: postgres://${NCS_DB_USER:-ncs}:${NCS_DB_PASSWORD}@postgres:5432/${NCS_DB_NAME:-ncs_dev}?sslmode=disable
+      NCS_REDIS_ADDR: redis:6379
+      NCS_REDIS_REQUIRED: "true"
+      NCS_CHARGER_GATEWAY_URL: ${NCS_CHARGER_GATEWAY_URL:-http://mock-gateway:8090}
+      NCS_CHARGER_GATEWAY_TIMEOUT: 5s
+      NCS_WORKER_CONSUMER: worker-compose
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+      mock-gateway:
+        condition: service_started
+
+  outbox-publisher:
+    build:
+      context: ../..
+      dockerfile: backend/deploy/Dockerfile
+      args:
+        NCS_TARGET: cmd/outbox-publisher
+    restart: unless-stopped
+    environment:
+      NCS_POSTGRES_DSN: postgres://${NCS_DB_USER:-ncs}:${NCS_DB_PASSWORD}@postgres:5432/${NCS_DB_NAME:-ncs_dev}?sslmode=disable
+      NCS_REDIS_ADDR: redis:6379
+      NCS_REDIS_REQUIRED: "true"
+      NCS_OUTBOX_INTERVAL: 500ms
+      NCS_OUTBOX_BATCH: 100
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  mock-gateway:
+    profiles: ["mock"]
+    build:
+      context: ../..
+      dockerfile: backend/deploy/Dockerfile
+      args:
+        NCS_TARGET: cmd/mock-gateway
+    restart: unless-stopped
+    environment:
+      NCS_MOCK_GATEWAY_ADDR: 0.0.0.0:8090
+    expose:
+      - "8090"
+
+  nginx:
+    image: nginx:1.24-alpine
+    restart: unless-stopped
+    ports:
+      - "${NCS_NGINX_HTTP_PORT:-8088}:80"
+      - "${NCS_NGINX_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ../..:/repo:ro
+      - ./nginx/rendered:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - h5-static:/srv/h5:ro
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  redis-data:
+  h5-static:

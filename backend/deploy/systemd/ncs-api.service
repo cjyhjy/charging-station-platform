@@ -1,0 +1,38 @@
+# NCS Go API（B-06 交付物，草稿）
+#
+# 安装：
+#   install -m 0755 ncs-api /usr/local/bin/ncs-api
+#   install -m 0644 systemd/ncs-api.service /etc/systemd/system/
+#   install -m 0640 systemd/ncs-backend.env.example /etc/ncs/backend.env   # 填真实密钥后 chmod 0600
+#   systemctl daemon-reload && systemctl enable --now ncs-api
+[Unit]
+Description=NCS Go API (charging platform)
+Documentation=file:/opt/ncs/docs/backend-architecture.md
+After=network-online.target ncs-migrate.service postgresql.service redis-server.service
+Wants=network-online.target
+Requires=ncs-migrate.service
+
+[Service]
+Type=simple
+User=ncs
+Group=ncs
+EnvironmentFile=/etc/ncs/backend.env
+ExecStart=/usr/local/bin/ncs-api
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# API 启动时执行顺序迁移（0001..0007）后开始监听：迁移门禁由进程内 runner 完成，
+# 因此 Worker/Publisher 依赖本单元先就绪。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/log/ncs
+
+[Install]
+WantedBy=multi-user.target
