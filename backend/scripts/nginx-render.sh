@@ -44,7 +44,7 @@ step() { printf '\n=== %s ===\n' "$*"; }
 render() {
     # Every variable the template uses, and nothing else.
     envsubst '${NCS_PUBLIC_HOST} ${NCS_HTTP_PORT} ${NCS_HTTPS_PORT} ${NCS_STATIC_ROOT} ${NCS_API_UPSTREAM} \
-${NCS_TLS_CERT} ${NCS_TLS_KEY} ${NCS_GATEWAY_ALLOW} ${NCS_OPS_ALLOW} ${NCS_ACCESS_LOG} ${NCS_ERROR_LOG}' \
+${NCS_TLS_CERT} ${NCS_TLS_KEY} ${NCS_METRICS_UPSTREAM} ${NCS_GATEWAY_ALLOW} ${NCS_OPS_ALLOW} ${NCS_ACCESS_LOG} ${NCS_ERROR_LOG}' \
         < "${template}"
 }
 
@@ -72,6 +72,8 @@ if [[ "${drill}" == "true" ]]; then
     export NCS_HTTPS_PORT="8443"
     export NCS_STATIC_ROOT="${static_root}"
     export NCS_API_UPSTREAM="${NCS_API_UPSTREAM:-127.0.0.1:8080}"
+export NCS_METRICS_UPSTREAM="${NCS_METRICS_UPSTREAM:-127.0.0.1:9090}"
+    export NCS_METRICS_UPSTREAM="${NCS_METRICS_UPSTREAM:-127.0.0.1:9090}"
     export NCS_TLS_CERT="${cert}" NCS_TLS_KEY="${key}"
     export NCS_GATEWAY_ALLOW="10.20.30.0/24"
     export NCS_OPS_ALLOW="10.99.0.0/16"

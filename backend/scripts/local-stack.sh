@@ -138,7 +138,7 @@ done
 [[ "$(curl -s -o /dev/null -w '%{http_code}' "${api_url}/readyz")" == "200" ]] || fail "the API never reported ready; see ${run_dir}/api.log"
 
 step "smoke"
-curl -fsS "${api_url}/metrics" >/dev/null && echo "metrics reachable"
+curl -fsS "http://127.0.0.1:9090/metrics" >/dev/null && echo "metrics reachable"
 login_body="$(curl -s -X POST "${api_url}/api/v1/auth/user/login" -H 'Content-Type: application/json' \
     -d '{"account":"13800000001","password":"Dev-Password-01"}')"
 if [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("success"))' <<<"${login_body}" 2>/dev/null)" == "True" ]]; then
@@ -158,7 +158,7 @@ if [[ "${with_nginx}" == "true" ]]; then
     # Local development allows loopback for the ops endpoints; the restrictive ranges are what the
     # nginx drill proves (backend/scripts/nginx-render.sh --drill).
     export NCS_PUBLIC_HOST="localhost" NCS_HTTP_PORT="$(( nginx_port + 1 ))" NCS_HTTPS_PORT="${nginx_port}"
-    export NCS_STATIC_ROOT="${static_root}" NCS_API_UPSTREAM="${http_addr}"
+    export NCS_STATIC_ROOT="${static_root}" NCS_API_UPSTREAM="${http_addr}" NCS_METRICS_UPSTREAM="127.0.0.1:9090"
     export NCS_TLS_CERT="${run_dir}/certs/ncs.crt" NCS_TLS_KEY="${run_dir}/certs/ncs.key"
     export NCS_GATEWAY_ALLOW="127.0.0.1" NCS_OPS_ALLOW="127.0.0.1"
     export NCS_ACCESS_LOG="${run_dir}/nginx-prefix/logs/access.log" NCS_ERROR_LOG="${run_dir}/nginx-prefix/logs/error.log"
