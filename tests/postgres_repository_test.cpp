@@ -20,6 +20,70 @@
 
 namespace
 {
+void checkRetention(ncs::infrastructure::postgres::PostgresRepository& repository,
+                    const ncs::core::application::BackupRecord& prototype)
+{
+    using namespace ncs::infrastructure::postgres::detail;
+    struct RollbackFixture
+    {
+    };
+    constexpr std::int64_t day = 86400;
+    constexpr std::int64_t now = (2000 * 7 + 6) * day + 3600;
+    try
+    {
+        repository.withTransaction(
+            [&]
+            {
+                // Isolate metadata and roll it back; never touch the real dump artifact.
+                execute(transactionContext.database, "DELETE FROM backup_record");
+                const auto add =
+                    [&](const std::string& name, std::int64_t at, const std::string& status)
+                {
+                    auto record = prototype;
+                    record.backupNo = name;
+                    record.createdAt = at;
+                    record.status = status;
+                    record.storagePath.clear();
+                    repository.addBackup(record);
+                };
+                for (int age = 0; age <= 8; ++age)
+                {
+                    add("daily" + std::to_string(age), now - age * day, "SUCCEEDED");
+                    add("duplicate" + std::to_string(age), now - age * day - 1, "SUCCEEDED");
+                }
+                for (int age : {14, 21, 28})
+                    add("weekly" + std::to_string(age), now - age * day, "SUCCEEDED");
+                add("failed_boundary", now - 7 * day, "FAILED");
+                add("failed_expired", now - 7 * day - 1, "FAILED");
+                add("failed_recent", now, "FAILED");
+                repository.cleanupAdminRecords(now);
+                for (int age = 0; age <= 8; ++age)
+                    if (repository.backup("daily" + std::to_string(age)).has_value() !=
+                            (age <= 7) ||
+                        repository.backup("duplicate" + std::to_string(age)))
+                        throw std::runtime_error("daily/weekly retention union mismatch");
+                if (!repository.backup("weekly14") || !repository.backup("weekly21") ||
+                    repository.backup("weekly28") || !repository.backup("failed_boundary") ||
+                    !repository.backup("failed_recent") || repository.backup("failed_expired"))
+                    throw std::runtime_error("weekly limit or failed retention boundary mismatch");
+                execute(transactionContext.database, "DELETE FROM backup_record");
+                for (int week = 0; week < 8; ++week)
+                    add("sparse" + std::to_string(week), now - week * 7 * day, "SUCCEEDED");
+                repository.cleanupAdminRecords(now);
+                for (int week = 0; week < 8; ++week)
+                    if (repository.backup("sparse" + std::to_string(week)).has_value() !=
+                        (week < 7))
+                        throw std::runtime_error("sparse daily representatives were lost");
+                throw RollbackFixture{};
+            });
+    }
+    catch (const RollbackFixture&)
+    {
+    }
+    if (!repository.backup(prototype.backupNo))
+        throw std::runtime_error("retention fixture did not roll back");
+}
+
 // Synchronize on an actual PostgreSQL lock wait, not a scheduler-dependent sleep.
 void awaitBlockedWriter()
 {
@@ -63,6 +127,31 @@ int main(int argc, char* argv[])
     {
         using namespace ncs::core::application;
         ncs::infrastructure::postgres::PostgresRepository repository(config);
+        {
+            using namespace ncs::infrastructure::postgres::detail;
+            Connection connection(config, &repository.connectionSlots());
+            Statement literal(connection.get(), "SELECT ':p1', CAST(? AS BIGINT), '12:30'");
+            literal.bind(1, 42);
+            if (!literal.row() || literal.text(0) != ":p1" || literal.integer(1) != 42)
+                throw std::runtime_error("PostgreSQL positional binding failed");
+            connection.execute("CREATE TEMP TABLE redaction_fixture(value TEXT UNIQUE)");
+            connection.execute("INSERT INTO redaction_fixture VALUES('private-business-value')");
+            bool rejected = false;
+            try
+            {
+                Statement duplicate(connection.get(), "INSERT INTO redaction_fixture VALUES(?)");
+                duplicate.bind(1, std::string_view("private-business-value"));
+                duplicate.execute();
+            }
+            catch (const std::runtime_error& error)
+            {
+                rejected = true;
+                if (std::string(error.what()) != "database statement failed")
+                    throw std::runtime_error("PostgreSQL DETAIL was not redacted");
+            }
+            if (!rejected)
+                throw std::runtime_error("PostgreSQL duplicate unexpectedly accepted");
+        }
         const auto readiness = repository.check();
         if (!readiness.ready())
         {
@@ -212,6 +301,8 @@ int main(int argc, char* argv[])
         const auto verified = adminOps.verifyBackup(admin->id, backup.value->backupNo, now);
         if (!verified.ok() || verified.value->verificationStatus != "SUCCEEDED")
             throw std::runtime_error("pg_restore archive verification failed");
+
+        checkRetention(repository, *backup.value);
 
         // Expired failed artifacts age out; a failed file removal retains its row.
         BackupRecord expired = *backup.value;

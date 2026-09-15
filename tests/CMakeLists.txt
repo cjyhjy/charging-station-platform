@@ -4,6 +4,13 @@ target_link_libraries(ncs_order_review_tests PRIVATE ncs::server_controller ncs:
 add_test(NAME ncs_order_review COMMAND ncs_order_review_tests)
 set_tests_properties(ncs_order_review PROPERTIES LABELS "contract;integration" TIMEOUT 120)
 
+add_executable(ncs_postgres_statement_tests postgres_statement_test.cpp)
+set_target_properties(ncs_postgres_statement_tests PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_link_libraries(ncs_postgres_statement_tests PRIVATE ncs::infrastructure_postgres Qt6::Core)
+add_test(NAME ncs_postgres_statement COMMAND ncs_postgres_statement_tests)
+set_tests_properties(ncs_postgres_statement PROPERTIES LABELS "database;unit" TIMEOUT 30)
+
 add_executable(ncs_postgres_repository_tests postgres_repository_test.cpp)
 set_target_properties(ncs_postgres_repository_tests PROPERTIES
     AUTOMOC OFF

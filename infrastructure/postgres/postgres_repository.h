@@ -236,7 +236,7 @@ class PostgresRepository final : public database::PlatformRepository
   private:
     void initialize();
     core::application::ReadinessStatus probeDatabase();
-    void pruneBackups();
+    void pruneBackups(std::int64_t now);
 
     PostgresConfig config_;
     mutable QSemaphore connectionSlots_;

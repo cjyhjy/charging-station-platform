@@ -85,11 +85,9 @@ struct WalletEvent
     int64_t balanceAfterCent;
     std::string transactionNo, relatedNo;
 };
-std::string queryError(const QSqlQuery& query)
+std::string queryError(const QSqlQuery&)
 {
-    const auto value = query.lastError().databaseText().toUtf8();
-    return value.isEmpty() ? "database seed statement failed"
-                           : std::string(value.constData(), static_cast<std::size_t>(value.size()));
+    return "database seed statement failed";
 }
 
 class Stmt final

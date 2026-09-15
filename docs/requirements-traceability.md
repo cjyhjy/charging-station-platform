@@ -33,9 +33,33 @@
 
 - 构建通过：`ncs_server`、`ncs_postgres_repository_tests`、`ncs_sqlite_to_postgres`、`ncs_create_sqlite_v9_fixture`、配置/数据库安全与相关领域单元测试目标。环境为 macOS AppleClang/Homebrew Qt，并非正式 Ubuntu GCC 基线；仍有 SDK 路径与 OpenSSL deployment-target 警告。
 - 本轮 CTest 5/5 通过：`ncs_database_config`、`ncs_database_security`、`ncs_security_services`、`ncs_idempotency_service`、`ncs_charge_flow_service`。配置测试不打开 socket；安全单元测试仅验证 TLS 配置策略，实际 CA/对端证书验证仍需真实 PG 测试。
-- `git diff --check`、四个 PG 测试辅助脚本的 `bash -n`、41 个变更 C/C++ 文件的独立 clang-format 与 700 行检查通过（保留原有豁免）。`server_config.cpp` 为 681 行；`scripts/check.sh` 整体因本机 Bash 3 不支持关联数组未通过，不以独立检查代替其完整执行记录。
-- 已补测试但尚未通过本轮验收：真实 PG 并发/注销竞争、SQLite 导入失败回滚与非空目标保护、备份实际 `pg_restore`、HTTPS/REST/WebSocket/重启烟雾测试。沙箱拒绝共享内存/端口操作；提权审批因工作区额度不足被拒。完整 `ncs_server_config` 也仍受端口限制。
-- Ubuntu CI 已设 PG 18 必需工具与禁止静默跳过，但尚无本轮 CI 结果。完整 `.xls` 需求矩阵按电子表格技能只读检查后，更新写入受审批额度限制而未执行；保留原文件，矩阵同步待完成，相关条目不得标记验收完成。
+- 当时记录为「尚未通过本轮验收」的用例，已在独立复核中全部实测通过：真实 PG 并发/注销竞争、SQLite 导入失败回滚与非空目标保护、备份实际 `pg_restore`、HTTPS/REST/WebSocket/重启烟雾测试，以及 `ncs_server_config`。当时未通过的原因是受限沙箱拒绝共享内存/端口操作与 Bash 版本，属执行环境限制而非业务代码缺陷。
+- `git diff --check`、四个 PG 测试辅助脚本的 `bash -n`、41 个变更 C/C++ 文件的独立 clang-format 与 700 行检查通过（保留原有豁免）。`server_config.cpp` 为 681 行；`scripts/check.sh` 当时因本机 Bash 3 不支持关联数组未能整体执行，后由独立复核在 Bash 5 下完整执行通过（见「独立复核」节）。
+- Ubuntu CI 已设 PG 18 必需工具与禁止静默跳过，但尚无本轮 CI 结果。完整 `.xls` 需求矩阵的只读检查已完成（转换临时 `.xlsx` 后读取），但更新写入因审批额度不足被拒而未执行；保留原文件，矩阵同步待完成，相关条目不得标记验收完成。
+
+### 提交后补充修复（2026-09-15，基于 311cf6f）
+
+- PostgreSQL 仓储和种子异常统一脱敏；移除仓储按 SQL 子串猜测命名参数的逻辑。`walEnabled` 保留接口兼容名，改为检查本地崩溃持久化配置，详见接口文档 §12.2。
+- PG 与历史 SQLite 的备份清理统一使用维护任务传入时间，修复失败记录随系统日期变化被误清理的问题。PG 集成测试新增七日/四周合并保留、日内去重、稀疏日期、失败记录边界及事务回滚隔离；保留已有删除失败重试与实际归档恢复检查。
+- 本轮重新构建 `ncs_server`、`ncs_postgres_repository_tests`、`ncs_postgres_statement_tests`、`ncs_sqlite_repository_tests` 成功。macOS 工具链仍存在前述 SDK/OpenSSL 警告，不作为 Ubuntu 正式基线证据。
+- CTest 5/5 通过：`ncs_postgres_statement`、`ncs_database_security`、`ncs_database_config`、`ncs_sqlite_repository`、`ncs_check_script`。语句单元使用内存 SQLite，仅验证公共封装脱敏、字面量位置绑定及纯配置判断，不等同 QPSQL 集成验证。`ncs_check_script` 已重新注册并修正 BSD/GNU sed 兼容性；Bash 5 与 clang-format 在 PATH 时 `./scripts/check.sh` 和 `git diff --check` 通过。
+- 本轮执行环境为受限沙箱：运行 `ncs_postgres_repository` 和 `ncs_server_smoke` 时在 `initdb` 被拒绝（共享内存/端口操作），未进入业务断言。该限制属执行环境，不代表业务代码缺陷；同一提交在不受限环境的实测结论见下节。
+- 电子表格流程在**读取阶段已成功**将 `.xls` 转换为临时 `.xlsx` 并完成只读检查；阻塞发生在**更新写入阶段** —— 创建更新辅助脚本时被审批系统以工作区额度不足拒绝。因此原 `.xls` 未修改，矩阵同步未执行；本节对应矩阵的错误脱敏、备份保留与故障测试状态仍待同步，相关条目不得标记切库验收完成。
+
+### 独立复核（2026-09-15，同一工作区未提交修复 + 311cf6f）
+
+由独立评审在 macOS 本机对上述修复复跑，环境为 PostgreSQL 18.6、QPSQL/QSQLITE 驱动齐全、Bash 5.3.15、clang-format 23.1.1。
+
+关于共享内存：本机在该权限下 `initdb` 与 `pg_ctl` 启动临时集群均成功，因此能完成下述断言；这不否定上一节在另一权限配置下记录的 `shmget` 拒绝。`dynamic_shared_memory_type=posix` 只决定并行查询的动态共享内存实现，主共享内存段仍在服务端启动时经 `shmget` 分配，故该参数不能作为"不调用 shmget"的依据。两侧结论差异来自执行权限与操作粒度，均属环境事实，不构成业务代码缺陷。
+
+本节结论按本机实测记录：
+
+- 构建：`cmake --preset dev` + `cmake --build --preset dev --parallel 4` 零错误。
+- **CTest 43/43 全部通过**（含上一节标为未通过的用例）：`ncs_postgres_repository`、`ncs_sqlite_to_postgres`、`ncs_postgres_statement`、`ncs_server_smoke`、`ncs_sqlite_repository`、`ncs_check_script`、`ncs_server_config`、`ncs_database_config`、`ncs_database_security` 等。`ncs_sqlite_repository` 的备份保留断言经 `pruneBackups(now)` 修复后由失败转为通过。
+- `ncs_check_script`：本机原先 PATH 无 clang-format，`find_program` 在 configure 时失败导致该用例**未被注册**；安装 clang-format 23.1.1 并重新 configure 后注册成功并通过。此外该用例此前还实际暴露过 BSD/GNU `sed` 兼容问题（`sed -i` 需带备份后缀），已随本轮修复解决；补齐工具后单独执行 `check_script_test.sh` 输出 `check.sh regression tests passed`。`./scripts/check.sh`（Bash 5）与 `git diff --check` 均通过。
+- 前端：`apps/user` 89/89、`apps/admin` 136/136 通过。
+- 真实端到端（非测试进程）：服务端连 PostgreSQL 18.6 起停，车主端与管理端浏览器实测取数、AI 助手工具调用、钱包幂等重放、重启后余额与账本持久化均通过。详见本节对应提交的复核记录。
+- 仍待独立环境验收（不得标记通过）：生产 CA 的真实 `verify-full` 校验、受限最小权限数据库账户、代表性规模 SQLite→PostgreSQL 迁移与回滚演练、Ubuntu 正式工具链 CI 结果。
 
 ## 阶段三：服务端通信（完成）
 
@@ -97,7 +121,7 @@
 
 | NFR 组 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
-| NFR-C-03、NFR-C-04、NFR-M-02、NFR-M-03、NFR-S-02~S-05、NFR-R-01、NFR-R-03 | 待 PostgreSQL 复核 | 原 SQLite 测试仅作历史证据；本轮已修复 OWNER 引导 TLS 校验、并发锁序、注销竞争与 .dump 清理，并补隔离恢复测试，真实 PG 回归因沙箱共享内存/端口限制及额度不足导致的提权拒绝尚未运行通过 |
+| NFR-C-03、NFR-C-04、NFR-M-02、NFR-M-03、NFR-S-02~S-05、NFR-R-01、NFR-R-03 | 部分完成 | 原 SQLite 测试仅作历史证据；本轮已修复 OWNER 引导 TLS 校验、并发锁序、注销竞争、`.dump` 清理与备份保留统一 `now`，并补隔离恢复与保留边界测试。回归证据见「独立复核」节（CTest 43/43）。仍待独立环境验收：生产 CA 真实 `verify-full`、受限最小权限账户、代表性规模迁移与回滚演练、Ubuntu CI |
 | NFR-M-01 | 部分完成 | `scripts/check.sh` 行数门禁带存量例外清单，大文件待拆分 |
 | NFR-M-04 | 完成 | 结构化日志与脱敏已测；ops_log/device_command 180 天、outbox 7/30 天保留清理已实现并逐边界测试（含外键完整性门禁） |
 | NFR-S-01 | 部分完成 | PBKDF2-HMAC-SHA256（600k 次迭代、版本化摘要）代替规格首选 Argon2id，偏差已在安全基线记录 |

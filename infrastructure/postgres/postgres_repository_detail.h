@@ -38,11 +38,18 @@ using namespace ncs::core::application;
 constexpr int kLatestSchemaVersion = 9;
 constexpr const char* kLatestSchemaChecksum = "ncs-pg-v9-order-review";
 
-inline std::string sqlError(const QSqlQuery& query)
+inline bool durableWalSettings(const std::string_view fsync, const std::string_view fullPageWrites,
+                               const std::string_view synchronousCommit)
 {
-    const auto text = query.lastError().databaseText().toUtf8();
-    return text.isEmpty() ? "database statement failed"
-                          : std::string(text.constData(), static_cast<std::size_t>(text.size()));
+    return fsync == "on" && fullPageWrites == "on" &&
+           (synchronousCommit == "on" || synchronousCommit == "local" ||
+            synchronousCommit == "remote_write" || synchronousCommit == "remote_apply");
+}
+
+inline std::string sqlError(const QSqlQuery&)
+{
+    // PostgreSQL DETAIL may contain full business rows, keys or SQL text.
+    return "database statement failed";
 }
 
 // 连接封装：每次工作从 Qt SQL 打开一个线程私有 QPSQL 连接。连接名随机且仅在本进程
@@ -130,9 +137,7 @@ class Connection final
 class Statement final
 {
   public:
-    Statement(QSqlDatabase* database, const char* sql)
-        : query_(*database),
-          numberedPlaceholders_(std::string_view(sql).find(":p") != std::string_view::npos)
+    Statement(QSqlDatabase* database, const char* sql) : query_(*database)
     {
         if (!query_.prepare(QString::fromUtf8(sql)))
             throw std::runtime_error(sqlError(query_));
@@ -226,10 +231,9 @@ class Statement final
   private:
     void bindValue(const int index, const QVariant& value)
     {
-        if (numberedPlaceholders_)
-            query_.bindValue(QStringLiteral(":p%1").arg(index), value);
-        else
-            query_.bindValue(index - 1, value);
+        // Repository SQL uses positional placeholders; never infer binding mode
+        // from literals or comments in the SQL text.
+        query_.bindValue(index - 1, value);
     }
 
     void ensureExecuted()
@@ -242,7 +246,6 @@ class Statement final
     }
 
     QSqlQuery query_;
-    bool numberedPlaceholders_ = false;
     bool executed_ = false;
 };
 

@@ -32,8 +32,12 @@ ReadinessStatus PostgresRepository::probeDatabase()
                                             "version DESC LIMIT 1");
         status.schemaVersion = version.row() && version.integer(0) == kLatestSchemaVersion &&
                                version.text(1) == kLatestSchemaChecksum;
-        Statement wal(connection.get(), "SHOW wal_level");
-        status.walEnabled = wal.row() && !wal.text(0).empty();
+        Statement wal(connection.get(), "SELECT current_setting('fsync'), "
+                                        "current_setting('full_page_writes'), "
+                                        "current_setting('synchronous_commit')");
+        // Keep the historical API field, but check local crash durability rather
+        // than the always-present wal_level. This does not attest WAL archival.
+        status.walEnabled = wal.row() && durableWalSettings(wal.text(0), wal.text(1), wal.text(2));
         connection.execute("BEGIN");
         Statement touch(connection.get(), "UPDATE schema_version SET applied_at=applied_at "
                                           "WHERE version=?");

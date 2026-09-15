@@ -1296,6 +1296,8 @@ Bearer 用户令牌必填。本接口为只读查询，不产生业务写入，�
 
 仅回环地址或管理员可访问。检查 schema 版本、数据库可读写、WAL 和迁移状态；只返回布尔检查结果，不返回数据库路径和 SQL 错误。
 
+`walEnabled` 保留历史字段名以兼容客户端。PostgreSQL 下要求 `fsync=on`、`full_page_writes=on`，且 `synchronous_commit` 为 `on`、`local`、`remote_write` 或 `remote_apply`；任一不满足则未就绪。该字段仅检查当前连接的本地崩溃持久化配置，不证明生产 WAL 归档、主备同步或恢复演练已完成。
+
 ## 13. WebSocket 实时事件
 
 连接地址：

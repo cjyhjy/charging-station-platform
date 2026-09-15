@@ -225,7 +225,7 @@ void PostgresRepository::cleanupAnalytics(const std::int64_t now)
 
 // 备份保留（NFR-R-03）：每天最新一份留 7 天、每周最新一份留 4 周，
 // 失败备份留 1 周诊断；文件删除前必须通过目录+文件名双重校验。
-void PostgresRepository::pruneBackups()
+void PostgresRepository::pruneBackups(const std::int64_t now)
 {
     // NFR-R-03: keep the newest backup of each of the last seven days plus the
     // newest of each of the last four weeks; failed diagnostics age out after a
@@ -233,9 +233,6 @@ void PostgresRepository::pruneBackups()
     // by verification so a corrupted record cannot delete arbitrary paths.
     const auto records = backups();
     constexpr std::int64_t day = 24 * 3600;
-    const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-                                 std::chrono::system_clock::now().time_since_epoch())
-                                 .count();
     if (config_.backupDirectory.empty())
         return;
     const std::filesystem::path allowedDirectory =

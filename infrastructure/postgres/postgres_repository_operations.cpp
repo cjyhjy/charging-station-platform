@@ -353,7 +353,7 @@ void PostgresRepository::cleanupAdminRecords(const std::int64_t now)
             deadOutbox.bind(1, now - deadOutboxRetention);
             deadOutbox.execute();
         });
-    pruneBackups();
+    pruneBackups(now);
 }
 
 // ---- 大屏小时聚合重建：可重建数据，不直接种子化 ----
