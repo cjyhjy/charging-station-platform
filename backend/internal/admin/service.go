@@ -17,6 +17,7 @@ import (
 
 	"github.com/heguangV/charging-station-platform/backend/internal/order"
 	"github.com/heguangV/charging-station-platform/backend/internal/station"
+	"github.com/heguangV/charging-station-platform/backend/internal/wallet"
 )
 
 // Charger and user status values from the frozen contract.
@@ -48,6 +49,12 @@ var (
 	ErrInvalidAdminActor = errors.New("admin: administrator may not perform this operation")
 	// ErrInvalidReason reports a restart reason outside the contract bounds.
 	ErrInvalidReason = errors.New("admin: restart reason length is outside 2..200")
+	// ErrInvalidTariff reports a malformed tariff or target-status value.
+	ErrInvalidTariff = errors.New("admin: invalid tariff or target status")
+	// ErrInvalidLedgerFilter reports a malformed ledger or audit query.
+	ErrInvalidLedgerFilter = errors.New("admin: invalid ledger or audit filter")
+	// ErrUserNotFound maps to 404 NOT_FOUND for a missing user.
+	ErrUserNotFound = errors.New("admin: user not found")
 	// ErrInvalidUserStatus reports a status query value outside 0/1.
 	ErrInvalidUserStatus = errors.New("admin: invalid user status")
 	// ErrChargerUnavailable maps to 409 CHARGER_UNAVAILABLE: the charger is
@@ -143,6 +150,93 @@ type StationRecord struct {
 	Status      string
 }
 
+// TariffView is the charger tariff snapshot the admin API exposes.
+type TariffView struct {
+	ChargerID            int64  `json:"chargerId"`
+	ElectricityPriceCent int64  `json:"electricityPriceCentPerKwh"`
+	ServicePriceCent     int64  `json:"servicePriceCentPerKwh"`
+	OffPeakPriceCent     *int64 `json:"offPeakElectricityPriceCentPerKwh,omitempty"`
+	OffPeakStartHour     *int16 `json:"offPeakStartHour,omitempty"`
+	OffPeakEndHour       *int16 `json:"offPeakEndHour,omitempty"`
+}
+
+// TariffUpdate carries a validated tariff change. Nil off-peak fields clear
+// the time-of-use window (flat tariff).
+type TariffUpdate struct {
+	AdminID              int64
+	ChargerID            int64
+	ElectricityPriceCent int64
+	ServicePriceCent     int64
+	OffPeakPriceCent     *int64
+	OffPeakStartHour     *int16
+	OffPeakEndHour       *int16
+}
+
+// ForceReleaseCommand carries a validated forced-release request (BR-11).
+type ForceReleaseCommand struct {
+	AdminID        int64
+	ChargerID      int64
+	Reason         string
+	TargetStatus   string // IDLE or DISABLED
+	IdempotencyKey string
+	RequestHash    string
+	TraceID        string
+}
+
+// UserDetail is the admin user view with the full registration data
+// (SRS 管理端列表: ID、手机号、昵称、余额、注册时间、状态).
+type UserDetail struct {
+	ID           int64      `json:"id"`
+	Phone        string     `json:"phone"`
+	DisplayName  string     `json:"displayName"`
+	AvatarURL    string     `json:"avatarUrl,omitempty"`
+	Status       string     `json:"status"`
+	BalanceCent  int64      `json:"balanceCent"`
+	RegisteredAt time.Time  `json:"registeredAt"`
+	DeletedAt    *time.Time `json:"deletedAt,omitempty"`
+}
+
+// LedgerEntry re-exports the wallet ledger shape for the admin user view.
+type LedgerEntry = wallet.Entry
+type LedgerPage = wallet.EntryPage
+
+// AuditEntry is one operation_logs row for the audit query.
+type AuditEntry struct {
+	ID           int64     `json:"id"`
+	ActorType    string    `json:"actorType"`
+	ActorID      string    `json:"actorId"`
+	Action       string    `json:"action"`
+	ResourceType string    `json:"resourceType"`
+	ResourceID   string    `json:"resourceId"`
+	RequestID    string    `json:"requestId,omitempty"`
+	Payload      string    `json:"payload,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+// AuditPage is one page of the audit trail.
+type AuditPage struct {
+	Items []AuditEntry `json:"items"`
+	Meta  PageMeta     `json:"meta"`
+}
+
+// AuditFilter carries validated audit query parameters.
+type AuditFilter struct {
+	Page         int64
+	PageSize     int64
+	ActorID      string
+	Action       string
+	ResourceType string
+	ResourceID   string
+}
+
+// UserLedgerFilter carries the admin view of one user's ledger.
+type UserLedgerFilter struct {
+	UserID   int64
+	Page     int64
+	PageSize int64
+	Type     string
+}
+
 // Store persists admin operations. Mutating methods own their transactions
 // so business rows, the audit trail and idempotency records commit together.
 type Store interface {
@@ -150,8 +244,22 @@ type Store interface {
 	ListStations(ctx context.Context, page, pageSize int64, keyword string) (StationPage, error)
 	ListChargers(ctx context.Context, filter station.ChargerFilter) (ChargerPage, error)
 	ListUsers(ctx context.Context, filter UserFilter) (UserPage, error)
+	GetUserDetail(ctx context.Context, userID int64) (UserDetail, error)
+	ListUserLedger(ctx context.Context, filter UserLedgerFilter) (LedgerPage, error)
 	ListOrders(ctx context.Context, filter AdminOrderFilter) (OrderPage, error)
 	RestartCharger(ctx context.Context, command RestartCommand) (Command, error)
+	GetTariff(ctx context.Context, chargerID int64) (TariffView, error)
+	UpdateTariff(ctx context.Context, update TariffUpdate) (TariffView, error)
+	ForceRelease(ctx context.Context, command ForceReleaseCommand) (StationRecordCharger, error)
+	ListAudit(ctx context.Context, filter AuditFilter) (AuditPage, error)
+}
+
+// StationRecordCharger reports the charger after a forced release.
+type StationRecordCharger struct {
+	ChargerID   int64  `json:"chargerId"`
+	ChargerCode string `json:"chargerCode"`
+	OrderNo     string `json:"orderNo,omitempty"`
+	Status      string `json:"status"`
 }
 
 // Service validates commands and delegates persistence to a Store.
@@ -187,6 +295,105 @@ func (s *Service) Create(ctx context.Context, command CreateStationCommand) (Sta
 		return StationRecord{}, fmt.Errorf("%w: coordinates out of range", ErrInvalidStationFilter)
 	}
 	return s.store.CreateStation(ctx, command)
+}
+
+// GetTariff returns the charger tariff view.
+func (s *Service) GetTariff(ctx context.Context, chargerID int64) (TariffView, error) {
+	if chargerID < 1 {
+		return TariffView{}, ErrChargerUnavailable
+	}
+	return s.store.GetTariff(ctx, chargerID)
+}
+
+// UpdateTariff applies a tariff change under audit (价格调整). The order
+// domain snapshots the tariff at charging start, so running orders are not
+// affected — exactly what the snapshot semantics guarantee.
+func (s *Service) UpdateTariff(ctx context.Context, update TariffUpdate) (TariffView, error) {
+	if update.AdminID < 1 {
+		return TariffView{}, ErrInvalidAdminActor
+	}
+	if update.ChargerID < 1 {
+		return TariffView{}, ErrChargerUnavailable
+	}
+	if update.ElectricityPriceCent < 0 || update.ServicePriceCent < 0 {
+		return TariffView{}, ErrInvalidTariff
+	}
+	// The off-peak triple (price, window start, window end) is either fully
+	// absent (flat tariff) or fully present and valid — partial windows are
+	// rejected so a tariff can never end up with a dangling boundary.
+	offPeakFields := 0
+	if update.OffPeakPriceCent != nil {
+		offPeakFields++
+	}
+	if update.OffPeakStartHour != nil {
+		offPeakFields++
+	}
+	if update.OffPeakEndHour != nil {
+		offPeakFields++
+	}
+	if offPeakFields == 3 {
+		if *update.OffPeakPriceCent < 0 ||
+			*update.OffPeakStartHour < 0 || *update.OffPeakStartHour > 23 ||
+			*update.OffPeakEndHour < 0 || *update.OffPeakEndHour > 23 ||
+			*update.OffPeakStartHour == *update.OffPeakEndHour {
+			return TariffView{}, ErrInvalidTariff
+		}
+	} else if offPeakFields != 0 {
+		return TariffView{}, ErrInvalidTariff
+	}
+	return s.store.UpdateTariff(ctx, update)
+}
+
+// ForceRelease forcibly releases a charger held by a CREATED or STARTING
+// order (BR-11): the order is cancelled, the charger moves to the requested
+// target status, and the action is audited. Charging devices are rejected —
+// they must go through the controlled stop flow first.
+func (s *Service) ForceRelease(ctx context.Context, command ForceReleaseCommand) (StationRecordCharger, error) {
+	if command.AdminID < 1 {
+		return StationRecordCharger{}, ErrInvalidAdminActor
+	}
+	if command.ChargerID < 1 {
+		return StationRecordCharger{}, ErrChargerUnavailable
+	}
+	if len(command.Reason) < 2 || len(command.Reason) > 200 {
+		return StationRecordCharger{}, ErrInvalidReason
+	}
+	if command.TargetStatus != "IDLE" && command.TargetStatus != "DISABLED" {
+		return StationRecordCharger{}, ErrInvalidTariff
+	}
+	return s.store.ForceRelease(ctx, command)
+}
+
+// UserDetail returns the administrative user view.
+func (s *Service) UserDetail(ctx context.Context, userID int64) (UserDetail, error) {
+	if userID < 1 {
+		return UserDetail{}, ErrInvalidAdminActor
+	}
+	return s.store.GetUserDetail(ctx, userID)
+}
+
+// UserLedger returns one page of a user's ledger for the admin view.
+func (s *Service) UserLedger(ctx context.Context, filter UserLedgerFilter) (LedgerPage, error) {
+	if filter.UserID < 1 {
+		return LedgerPage{}, ErrInvalidAdminActor
+	}
+	if filter.Page < 1 || filter.PageSize < 1 || filter.PageSize > 100 {
+		return LedgerPage{}, ErrInvalidLedgerFilter
+	}
+	switch filter.Type {
+	case "", wallet.TypeTopUp, wallet.TypeCharge, wallet.TypeRefund, wallet.TypeAdjustment:
+	default:
+		return LedgerPage{}, ErrInvalidLedgerFilter
+	}
+	return s.store.ListUserLedger(ctx, filter)
+}
+
+// Audit returns one page of the operation audit trail.
+func (s *Service) Audit(ctx context.Context, filter AuditFilter) (AuditPage, error) {
+	if filter.Page < 1 || filter.PageSize < 1 || filter.PageSize > 100 {
+		return AuditPage{}, ErrInvalidLedgerFilter
+	}
+	return s.store.ListAudit(ctx, filter)
 }
 
 // Restart validates and requests a device restart for an idle or faulted
