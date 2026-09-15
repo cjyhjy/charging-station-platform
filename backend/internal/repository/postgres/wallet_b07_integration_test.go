@@ -425,8 +425,8 @@ func TestB07RefundMissingOrderIsNotRefundable(t *testing.T) {
 	if errors.Is(err, wallet.ErrOrderNotRefundable) {
 		t.Fatalf("missing order reported as not-refundable: %v", err)
 	}
-	if !errors.Is(err, errOrderNotFound) {
-		t.Fatalf("missing order error = %v, want errOrderNotFound", err)
+	if !errors.Is(err, wallet.ErrOrderNotFound) {
+		t.Fatalf("missing order error = %v, want wallet.ErrOrderNotFound", err)
 	}
 
 	// The failed attempt must not leave a claimed idempotency record behind:
