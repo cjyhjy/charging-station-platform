@@ -200,10 +200,16 @@ func run() error {
 	}
 
 	server := httpapi.NewServer(cfg, logger)
-	authHandlers.Register(server)
-	stationHandlers.Register(server)
-	orderHandlers.Register(server)
-	adminHandlers.Register(server)
+	registry := observability.NewRegistry()
+	registry.RegisterHistogram(observability.MetricRequestDuration, observability.DefaultDurationBuckets)
+	observability.RegisterProcessMetrics(registry, observability.ProcessMetricsConfig{
+		Streams: []string{event.StreamOrderEvent, event.StreamChargeEvent, event.StreamChargerCommand},
+	})
+	instrumented := registerWithMetrics{inner: server, registry: registry}
+	authHandlers.Register(instrumented)
+	stationHandlers.Register(instrumented)
+	orderHandlers.Register(instrumented)
+	adminHandlers.Register(instrumented)
 
 	walletStore, err := postgres.NewWalletStore(db)
 	if err != nil {
@@ -217,7 +223,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	walletHandlers.Register(server)
+	walletHandlers.Register(instrumented)
 
 	reviewStore, err := postgres.NewReviewStore(db)
 	if err != nil {
@@ -231,8 +237,24 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	reviewHandlers.Register(server)
-	chargerEventHandlers.Register(server)
+	reviewHandlers.Register(instrumented)
+	chargerEventHandlers.Register(instrumented)
+
+	metrics, err := metricsServer(metricsConfig{
+		envName:        metricsAddrEnv,
+		allowPublicEnv: metricsAllowPublicEnv,
+		fallback:       defaultMetricsAddr,
+	}, registry, logger)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metrics.Shutdown(shutdownCtx); err != nil {
+			logger.Error("shutdown metrics endpoint", "error", err)
+		}
+	}()
 
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
