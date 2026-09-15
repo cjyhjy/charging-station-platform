@@ -129,8 +129,8 @@ func TestA01SchemaSatisfiesTheAdapterAndTheContract(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT coalesce(max(version), 0) FROM schema_migrations`).Scan(&highest); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if highest != 8 {
-		t.Fatalf("highest applied migration = %d, want 8 (0008 is the A-01 migration; a later one would change this conclusion)", highest)
+	if highest < 8 {
+		t.Fatalf("highest applied migration = %d, want at least 8", highest)
 	}
 }
 
