@@ -86,6 +86,8 @@
 
 **结论**：产品路由共 37 条，OpenAPI 共 45 个操作，除下面两处外一一对应；**没有"Go 有而 OpenAPI 没登记"的接口**，因此"前端依据未登记接口开发"的风险在后端侧为零。
 
+> 注意口径：本表的 `MATCH` 指 **Go 路由 ↔ OpenAPI** 一致（后端侧契约自洽）。**前端 ↔ Go** 的对接状态是另一件事，见第 7 节：按实际代码核对后，前端调用与 Go 契约完全一致的条目为 **0**。
+
 ## 3. 差异清单（需要处理的）
 
 ### D-1 `BACKEND_CHANGE`：`/healthz`、`/readyz` 的路径前缀不一致 —— **已修**
@@ -98,9 +100,13 @@
 
 - `agent/` 需要 `POST /api/v1/user/agent/chat`，Go 未实现也未登记。按任务文档 A-05：A 线只做请求层与降级 UI，**不得标记为已接通**；B 线在 A-07 或独立 Agent 模块审批后再登记 OpenAPI 并实现。
 
-### D-3 待 A 线清单到位后比对（不预设结论）
+### D-3 前端清单已核对（原为"待 A 线清单到位后比对"）
 
-A-01 的 `docs/integration/frontend-api-inventory.md` 尚未提交（PR #42 的前端 Web 代码不在本仓库任何 ref 中：`develop` 的 `apps/user`、`apps/admin` 目前仍是 C++ Qt 应用）。拿到清单后逐项回填矩阵的"前端调用点"列，并可能产生新的 `FRONTEND_CHANGE`（例如前端仍在用 C++/SQLite 的路径与响应格式）。
+fork `cjyhjy/charging-station-platform` 分支 `feat/postgres-agent-web-migration`（`4d1a265`）已按只读方式克隆并逐条盘点，结论见第 7 节；明细见 `frontend-api-inventory.md`。
+
+核心发现：前端请求层（`apps/user/src/api/http.js`、`apps/admin/src/api/http.js`）的**传输约定与 Go 完全一致**（`API_BASE=/api/v1`、Bearer、`X-Request-ID`、`Idempotency-Key`、`{success,code,message,data}` 信封），但**路径与分页字段仍是旧契约**：前端用 `/user/...`，Go 用 `/me`、`/orders`……；前端读 `data.total`，Go 返回 `data.meta.total`。
+
+关键旁证：同一 fork 的 `docs/api-integration.md` 开头即写明"本文档与当前 Go 后端实现保持一致……不要根据旧 C++ 接口自行推断路径或字段"，其列出的路径正是 Go 的路径——**代码尚未按该文档迁移**。
 
 ## 4. 本轮已完成的 B 线开工项
 
@@ -182,3 +188,101 @@ NCS_POSTGRES_DSN=postgres://.../ncs_fe_nginx bash backend/scripts/local-stack.sh
 3. **B-02 核心接口确认**：为 18 个核心接口逐项补齐 handler/错误/权限/真实 PG·Redis 测试与 OpenAPI 对照记录（多数已有测试，本项工作是**逐项登记与补齐缺口**，不是重写）。
 4. **B-03 部署与 Nginx**：H5 静态目录、`/api/` 反代、301、自签 TLS、`/healthz`、`/readyz`、`/metrics`、请求 ID 透传、回执来源限制、metrics/readyz 内网限制、令牌不外泄。
 5. **B-06 质量门禁**：`go build/vet/test/race`、真实 PG/Redis 测试、OpenAPI YAML 校验、`nginx -t`、`git diff --check`、无密钥与构建产物入库。
+6. **等 A 线完成前端改造后进入页面联调**：第 7 节的 38 条 `FRONTEND_CHANGE` 是进入页面联调的前置条件（任务文档第 4 节：只有 `MATCH` 项才能进入页面联调）。其中"路径前缀/段序"与"分页 `data.total` → `data.meta.total`"是全局改动，改一次覆盖大部分页面；19 条 `BACKEND_CHANGE` 需先登记 OpenAPI 再实现，7 条 `BLOCKED` 按 A-05/A-07 处理。
+
+## 7. 前端调用对照与契约冻结结论（基于 PR #42 fork 分支实测）
+
+来源：fork `cjyhjy/charging-station-platform` 分支 `feat/postgres-agent-web-migration`（`4d1a265`），盘点明细见 `frontend-api-inventory.md`。
+去重后的「方法+路径」共 **64** 条，分类结果：**BACKEND_CHANGE 19**、**BLOCKED 7**、**FRONTEND_CHANGE 38**。
+
+> 分类规则（可复核）：用户端路径去掉 `/user` 前缀后若命中 Go 路由即判 `FRONTEND_CHANGE`（仍需改分页字段）；其余按显式例外表判定。**当前没有任何一条前端调用与 Go 契约完全一致**——`MATCH = 0`，按任务文档"只有 MATCH 项才能进入页面联调"，因此页面联调的前置条件是先完成下表的前端改造（或对 BACKEND_CHANGE 项补齐后端）。
+
+### 7.1 用户端
+
+| 方法 | 前端路径 | Go 对应 | 分类 | 依据 | 调用处 |
+| ---- | -------- | ------- | ---- | ---- | ------ |
+| POST | `/user/agent/chat` | **无** | BLOCKED | Go 未实现未登记；不得伪装接通 | `user/src/api/agent.js:16` |
+| POST | `/user/auth/login/password` | `POST /auth/user/login` | FRONTEND_CHANGE | 同上；密码登录在 Go 属次要入口 | `user/src/api/auth.js:17` |
+| POST | `/user/auth/login/sms` | `POST /auth/user/login/sms` | FRONTEND_CHANGE | 同上 | `user/src/api/auth.js:12` |
+| POST | `/user/auth/logout` | `POST /auth/logout` | FRONTEND_CHANGE | 同上 | `user/src/api/auth.js:27` |
+| POST | `/user/auth/register` | **无** | BACKEND_CHANGE | Go 无注册接口（当前仅短信登录隐式建号）；需契约裁定：补接口或前端去掉注册步骤 | `user/src/api/auth.js:22` |
+| POST | `/user/auth/sms/code` | `POST /auth/user/sms/code` | FRONTEND_CHANGE | 段序不同，后端能力已具备 | `user/src/api/auth.js:7` |
+| POST | `/user/flows` | `POST /orders` | FRONTEND_CHANGE | 流程模型映射到订单状态机 | `user/src/api/charging.js:7` |
+| GET | `/user/flows/{flowNo}` | `GET /orders/{orderNo}` | FRONTEND_CHANGE | flowNo ↔ orderNo | `user/src/api/charging.js:17` |
+| POST | `/user/flows/{flowNo}/cancellations` | `POST /orders/{orderNo}/cancel` | FRONTEND_CHANGE | 同上 | `user/src/api/charging.js:27` |
+| GET | `/user/flows/{flowNo}/progress` | **无** | BACKEND_CHANGE | 无实时进度端点（详情有 energyWh/amountCent） | `user/src/api/charging.js:41` |
+| POST | `/user/flows/{flowNo}/quote-confirmations` | **无** | FRONTEND_CHANGE | Go 无报价确认步骤；若产品要保留两步确认则升级 BACKEND_CHANGE（需裁定） | `user/src/api/charging.js:22` |
+| POST | `/user/flows/{flowNo}/settlements` | **无** | FRONTEND_CHANGE | Go 在 STOP 回执确认时自动结算 | `user/src/api/charging.js:46` |
+| POST | `/user/flows/{flowNo}/start` | `POST /orders/{orderNo}/start` | FRONTEND_CHANGE | 同上 | `user/src/api/charging.js:32` |
+| GET | `/user/flows/active` | `GET /orders?status=...` | FRONTEND_CHANGE | 用订单状态过滤替代 active 概念 | `user/src/api/charging.js:12` |
+| GET | `/user/me` | `GET /me` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/auth.js:32` |
+| PUT | `/user/me` | `PUT /me/profile` | FRONTEND_CHANGE | 路径与字段按 profile 结构对齐 | `user/src/api/auth.js:37` |
+| POST | `/user/me/avatar` | **无** | BACKEND_CHANGE | Go 只存 avatarUrl 字符串（≤512），无上传/存储接口 | `user/src/api/auth.js:44` |
+| GET | `/user/orders` | `GET /orders` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/order.js:7` |
+| GET | `/user/orders/{orderNo}` | `GET /orders/{orderNo}` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/order.js:12` |
+| GET | `/user/orders/{orderNo}/review` | `GET /orders/{orderNo}/review` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/order.js:17` |
+| POST | `/user/orders/{orderNo}/review` | `POST /orders/{orderNo}/review` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/order.js:22` |
+| GET | `/user/stations` | `GET /stations` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/station.js:11` |
+| GET | `/user/stations/{stationId}` | `GET /stations/{stationId}` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/station.js:23` |
+| GET | `/user/stations/{stationId}/chargers` | `GET /chargers?stationId=` | FRONTEND_CHANGE | 嵌套资源改为查询参数 | `user/src/api/station.js:28` |
+| GET | `/user/stations/{stationId}/quote` | **无** | BACKEND_CHANGE | 无报价接口；金额由计费快照在创建订单时确定 | `user/src/api/station.js:33` |
+| GET | `/user/stations/{stationId}/reviews` | `GET /stations/{stationId}/reviews` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/station.js:53` |
+| GET | `/user/stations/{stationId}/route` | **无** | BLOCKED | 导航/路线属 A-07 | `user/src/api/station.js:42` |
+| GET | `/user/wallet` | `GET /wallet` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/charging.js:51` |
+| POST | `/user/wallet/recharges` | `POST /wallet/top-up` | FRONTEND_CHANGE | 命名 recharges → top-up | `user/src/api/charging.js:56` |
+| GET | `/user/wallet/transactions` | `GET /wallet/transactions` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `user/src/api/charging.js:61` |
+
+### 7.2 管理端
+
+| 方法 | 前端路径 | Go 对应 | 分类 | 依据 | 调用处 |
+| ---- | -------- | ------- | ---- | ---- | ------ |
+| GET | `/admin/accounts` | **无** | BACKEND_CHANGE | 无管理员账号管理接口 | `admin/src/api/account.js:7` |
+| POST | `/admin/accounts` | **无** | BACKEND_CHANGE | 同上 | `admin/src/api/account.js:12` |
+| PUT | `/admin/accounts/{adminId}/status` | **无** | BACKEND_CHANGE | 同上 | `admin/src/api/account.js:17` |
+| GET | `/admin/audit-logs` | `GET /admin/audit` | FRONTEND_CHANGE | 命名 + 分页字段 | `admin/src/api/ops.js:7` |
+| POST | `/admin/auth/login` | `POST /auth/admin/login` | FRONTEND_CHANGE | 段序不同 | `admin/src/api/auth.js:7` |
+| POST | `/admin/auth/logout` | `POST /auth/logout` | FRONTEND_CHANGE | 同上 | `admin/src/api/auth.js:17` |
+| POST | `/admin/auth/reauth` | **无** | BACKEND_CHANGE | 无二次认证接口 | `admin/src/api/auth.js:12` |
+| GET | `/admin/backups` | **无** | BACKEND_CHANGE | 备份由运维脚本/systemd 承担，未做成 API；需裁定是否暴露给管理端 | `admin/src/api/ops.js:12` |
+| POST | `/admin/backups` | **无** | BACKEND_CHANGE | 同上 | `admin/src/api/ops.js:17` |
+| POST | `/admin/backups/{backupNo}/verifications` | **无** | BACKEND_CHANGE | 同上 | `admin/src/api/ops.js:22` |
+| GET | `/admin/chargers` | `GET /admin/chargers` | FRONTEND_CHANGE | 路径一致；仅分页字段（items+meta）与字段形状需对齐 | `admin/src/api/charger.js:7` |
+| POST | `/admin/chargers/{chargerId}/restart-commands` | `POST /admin/chargers/{chargerId}/restart` | FRONTEND_CHANGE | 命令式资源改为动作端点 | `admin/src/api/charger.js:26` |
+| PUT | `/admin/chargers/{chargerId}/status` | **无** | BACKEND_CHANGE | 无桩状态变更接口 | `admin/src/api/charger.js:17` |
+| POST | `/admin/chargers/batch` | **无** | BACKEND_CHANGE | 无批量建桩接口 | `admin/src/api/charger.js:12` |
+| GET | `/admin/device-commands/{commandNo}` | **无** | BACKEND_CHANGE | 无命令状态查询接口 | `admin/src/api/charger.js:35` |
+| GET | `/admin/flows` | `GET /admin/orders` | FRONTEND_CHANGE | flow 列表映射为订单列表 | `admin/src/api/flow.js:7` |
+| POST | `/admin/flows/{flowNo}/force-releases` | `POST /admin/chargers/{chargerId}/release` | FRONTEND_CHANGE | 强释放按桩而非按流程 | `admin/src/api/flow.js:12` |
+| PUT | `/admin/me/password` | **无** | BACKEND_CHANGE | 无管理员改密接口 | `admin/src/api/auth.js:22` |
+| POST | `/admin/ml-tasks` | **无** | BLOCKED | ML 属 A-07 | `admin/src/api/ml.js:24` |
+| GET | `/admin/ml-tasks/{taskNo}` | **无** | BLOCKED | 同上 | `admin/src/api/ml.js:29` |
+| GET | `/admin/predictions` | **无** | BLOCKED | 同上 | `admin/src/api/ml.js:17` |
+| POST | `/admin/price-adjustments` | **无** | BACKEND_CHANGE | 无调价单接口 | `admin/src/api/station.js:45` |
+| GET | `/admin/stations` | `GET /admin/stations` | FRONTEND_CHANGE | 路径一致；仅分页字段（items+meta）与字段形状需对齐 | `admin/src/api/station.js:7` |
+| POST | `/admin/stations` | `POST /admin/stations` | FRONTEND_CHANGE | 前缀/形状调整后即可对应 | `admin/src/api/station.js:12` |
+| PUT | `/admin/stations/{stationId}` | **无** | BACKEND_CHANGE | 无站点更新接口 | `admin/src/api/station.js:17` |
+| POST | `/admin/stations/{stationId}/{action}` | **无** | BACKEND_CHANGE | 站点启停动作无接口 | `admin/src/api/station.js:26` |
+| GET | `/admin/stats/charger-status` | **无** | BLOCKED | 同上 | `admin/src/api/stats.js:68` |
+| GET | `/admin/stats/revenue` | **无** | BLOCKED | 统计属 A-07 | `admin/src/api/stats.js:39` |
+| GET | `/admin/tariffs` | `GET /admin/chargers/{chargerId}/tariff` | FRONTEND_CHANGE | 全局费率表 → 按桩费率 | `admin/src/api/station.js:35` |
+| POST | `/admin/tariffs` | `PUT /admin/chargers/{chargerId}/tariff` | FRONTEND_CHANGE | 同上 | `admin/src/api/station.js:40` |
+| GET | `/admin/users` | `GET /admin/users` | FRONTEND_CHANGE | 路径一致；仅分页字段（items+meta）与字段形状需对齐 | `admin/src/api/user.js:10` |
+| GET | `/admin/users/{userId}` | `GET /admin/users/{userId}` | FRONTEND_CHANGE | 路径一致；仅分页字段（items+meta）与字段形状需对齐 | `admin/src/api/user.js:15` |
+| GET | `/admin/users/{userId}/orders` | **无** | BACKEND_CHANGE | `AdminOrderFilter` 无 UserID（internal/admin/service.go:106-111） | `admin/src/api/user.js:29` |
+| PUT | `/admin/users/{userId}/status` | `POST .../freeze` \| `POST .../unfreeze` | FRONTEND_CHANGE | 状态 PUT 改为两个动作端点 | `admin/src/api/user.js:20` |
+
+### 7.3 另有两条需单独记录
+
+- `apps/user/src/api/auth.js:49` 直接拼接 `${API_BASE}/user/me/avatar/content` 作为头像 `<img>` 地址（未走 `request()`）：Go 无此接口 → `BACKEND_CHANGE`。
+- `apps/user/src/api/http.js`、`apps/admin/src/api/http.js` 内的 `api.get/post/put/delete` 为请求层自身便捷方法，非业务调用，不计入分类。
+
+### 7.4 对第 2 阶段（契约冻结）的结论
+
+| 结论 | 内容 |
+| ---- | ---- |
+| MATCH | **0 条**（路径级）；仅传输约定一致：`API_BASE=/api/v1`、Bearer、`X-Request-ID`、`Idempotency-Key`、`{success,code,message,data}` 信封 |
+| FRONTEND_CHANGE | **38 条**：路径前缀/段序/命名改动 + 统一改分页解析（`data.total` → `data.meta.total`）|
+| BACKEND_CHANGE | **19 条**：Go 无对应能力，需先登记 OpenAPI 再实现（注册、头像上传、进度、按用户查订单、站点更新/启停、批量建桩、桩状态、命令查询、调价单、备份、管理端账号/改密/二次认证、报价等）|
+| BLOCKED | **7 条**：Agent chat、导航路线、ML 任务/预测、统计（A-07/A-05 范围）|
+
+**给 A 线的改造优先级建议**（按任务文档第 6 节验收场景顺序）：认证与会话 → 站点/桩 → 钱包（含 `recharges`→`top-up`）→ 订单（含 flow→order 映射）→ 评价/申诉 → 管理端列表与详情 → 其余 BACKEND_CHANGE 项排期。
