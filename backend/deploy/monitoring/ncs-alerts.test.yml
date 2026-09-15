@@ -1,0 +1,254 @@
+# ncs-alerts.yml 的单元测试（B-06 上线前验证）。
+#
+# 运行：
+#   promtool test rules backend/deploy/monitoring/ncs-alerts.test.yml
+#
+# 为什么需要它：真实触发演练证明"规则在活的 Prometheus 里会 firing"，但要等 2/5/10/15 分钟；
+# 这个文件把同样的阈值与持续时间压进秒级回归，任何一次改阈值、改 for、写错 label/annotation
+# 都会立刻失败。两边都要有：单元测试证明规则本身正确，实机演练证明它在真实 Prometheus 里生效。
+#
+# 时间轴：合成样本从 t=0 起就处于故障值（interval 1m），因此 eval_time 就是"故障持续了多久"，
+# 每个 eval_time 都恰好卡在对应规则的 for 边界上：早一分钟必须不报，晚一分钟必须报。
+rule_files:
+  - ncs-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 场景一：依赖不可达、Outbox 积压、Publisher/Worker 卡住、Pending 增长、死信出现。
+  # redis 保持健康，用来证明按依赖维度分别告警。
+  - interval: 1m
+    input_series:
+      - series: 'ncs_dependency_up{dependency="postgres",job="ncs-api"}'
+        values: '0x50'
+      - series: 'ncs_dependency_up{dependency="redis",job="ncs-api"}'
+        values: '1x50'
+      - series: 'ncs_pg_outbox_unpublished'
+        values: '1200x50'
+      - series: 'ncs_pg_outbox_oldest_unpublished_seconds'
+        values: '1000x50'
+      # 一个已停止发布的 Publisher / Worker：时间戳停在 1（远早于现在）。
+      - series: 'ncs_publisher_last_publish_timestamp_seconds{job="ncs-publisher"}'
+        values: '1x50'
+      - series: 'ncs_worker_last_success_timestamp_seconds{job="ncs-worker"}'
+        values: '1x50'
+      - series: 'ncs_stream_pending{stream="ncs:commands"}'
+        values: '5+10x49'
+      - series: 'ncs_stream_dead_letter_length{stream="ncs:commands"}'
+        values: '3x50'
+      - series: 'ncs_worker_dead_lettered_total'
+        values: '0+10x49'
+    alert_rule_test:
+      # 1 分钟：只有 for: 0m 的两条死信规则触发，其余仍在 pending。
+      - eval_time: 1m
+        alertname: NCSDeadLettersPresent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              stream: ncs:commands
+            exp_annotations:
+              summary: "死信流中存在 3 条未处理事件"
+              description: |-
+                死信意味着有事件既没有成功处理、也不会再自动重试。每条都要有人看：查 event_consumptions 的
+                outcome=DEAD_LETTERED 记录与 Worker 日志中的 reason。死信不清理会一直计在这里。
+      - eval_time: 1m
+        alertname: NCSDeadLetterWritten
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "最近 5 分钟有事件进入死信"
+              description: "新产生的死信比存量更值得立刻看：它说明刚刚有一条链路失败并放弃了重试。"
+      - eval_time: 1m
+        alertname: NCSDependencyDown
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: NCSOutboxBacklogWarning
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: NCSOutboxBacklogCritical
+        exp_alerts: []
+      - eval_time: 1m
+        alertname: NCSWorkerNotConsuming
+        exp_alerts: []
+
+      # for: 2m 的依赖规则在 2 分钟触发：postgres 一条，redis 不触发。
+      - eval_time: 2m
+        alertname: NCSDependencyDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              dependency: postgres
+              job: ncs-api
+            exp_annotations:
+              summary: "postgres 不可达（ncs-api）"
+              description: |-
+                postgres 已连续 2 分钟无应答。API 会因此报 503 并由负载均衡摘除；
+                session/lock 为 fail-closed，Redis 不可用时业务写入会被拒绝。Redis 仍是可恢复基础设施，
+                恢复后由 PostgreSQL 的 Outbox / Pending 继续推进。
+
+      # for: 5m 的两条阈值告警在 5 分钟触发。
+      - eval_time: 5m
+        alertname: NCSOutboxBacklogWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Outbox 未发布积压超过 100（持续 5 分钟）"
+              description: "当前 1200 条未发布。先看 Publisher 是否在运行、是否持有 advisory lock。"
+      - eval_time: 5m
+        alertname: NCSOutboxOldestWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "最老的未发布 Outbox 记录已等待超过 2 分钟"
+              description: "最老一条已等待 1000 秒。积压数量不大但最老记录很旧，通常意味着 Publisher 在运行却推不动。"
+      # 15 分钟的积压严重规则此时还不得触发。
+      - eval_time: 5m
+        alertname: NCSOutboxBacklogCritical
+        exp_alerts: []
+
+      # for: 10m 的最老积压在 10 分钟触发。
+      - eval_time: 10m
+        alertname: NCSOutboxOldestCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "最老的未发布 Outbox 记录已等待超过 15 分钟"
+              description: "最老一条已等待 1000 秒。订单事件长时间没有进入 Stream（订单会停在 STARTING/STOPPING）。"
+      - eval_time: 10m
+        alertname: NCSPendingGrowing
+        exp_alerts: []
+
+      # for: 10m 的 Pending 增长在 11 分钟触发（deriv 需要 10 分钟窗口）。
+      - eval_time: 11m
+        alertname: NCSPendingGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              stream: ncs:commands
+            exp_annotations:
+              summary: "Stream ncs:commands 的 Pending 持续增长（10 分钟）"
+              description: "投递了但未被 ACK 的条目在增加：消费变慢、处理失败重试，或消费者反复崩溃。"
+      # Publisher/Worker 的 10 分钟阈值（600s）此时刚满足，for: 10m 还没走完。
+      - eval_time: 11m
+        alertname: NCSPublisherNotPublishing
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: NCSWorkerNotConsuming
+        exp_alerts: []
+
+      # for: 15m 的积压严重规则在 15 分钟触发。
+      - eval_time: 15m
+        alertname: NCSOutboxBacklogCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "Outbox 未发布积压超过 1000（持续 15 分钟）"
+              description: "当前 1200 条未发布。业务事务已提交但事件没有进入 Stream，下游全部滞后。"
+
+      # 时间阈值 600s 在 10 分钟后满足，加上 for: 10m，21 分钟触发。
+      - eval_time: 21m
+        alertname: NCSPublisherNotPublishing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ncs-publisher
+            exp_annotations:
+              summary: "Publisher 超过 10 分钟没有成功发布，且存在未发布记录"
+              description: "可能是 Publisher 未运行、未取得 advisory lock（看 ncs_publisher_standby 与失锁计数）或 Redis 写入失败。"
+      - eval_time: 21m
+        alertname: NCSWorkerNotConsuming
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ncs-worker
+            exp_annotations:
+              summary: "Worker 超过 10 分钟没有成功处理事件，且存在待处理任务"
+              description: "检查 Worker 是否在运行、消费组是否有成员、依赖是否可达（ncs_dependency_up）。"
+
+      # 时间阈值 1800s 在 30 分钟后满足，加上 for: 5m，36 分钟触发。
+      - eval_time: 30m
+        alertname: NCSPublisherStalledCritical
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: NCSPublisherStalledCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ncs-publisher
+            exp_annotations:
+              summary: "Publisher 超过 30 分钟没有成功发布，且存在未发布记录"
+              description: "订单与设备命令链路已经停摆；先确认 Publisher 进程与 advisory lock，再看 Redis 是否可达。"
+      - eval_time: 36m
+        alertname: NCSWorkerStalledCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ncs-worker
+            exp_annotations:
+              summary: "Worker 超过 30 分钟没有成功处理事件，且存在待处理任务"
+              description: "事件闭环停摆：订单状态不会被推进，设备命令不会被下发。"
+
+  # 场景二：完全健康的系统（也是"空库"的形态）必须一条都不报，即使 Publisher/Worker 的时间戳很旧。
+  # 规则注释里写明的口径：空闲不算故障，"最近成功时间"陈旧必须与"确实有活干"取交集。
+  - interval: 1m
+    input_series:
+      - series: 'ncs_dependency_up{dependency="postgres",job="ncs-api"}'
+        values: '1x45'
+      - series: 'ncs_dependency_up{dependency="redis",job="ncs-api"}'
+        values: '1x45'
+      - series: 'ncs_pg_outbox_unpublished'
+        values: '0x45'
+      - series: 'ncs_pg_outbox_oldest_unpublished_seconds'
+        values: '0x45'
+      - series: 'ncs_publisher_last_publish_timestamp_seconds{job="ncs-publisher"}'
+        values: '1x45'
+      - series: 'ncs_worker_last_success_timestamp_seconds{job="ncs-worker"}'
+        values: '1x45'
+      - series: 'ncs_stream_pending{stream="ncs:commands"}'
+        values: '0x45'
+      - series: 'ncs_stream_dead_letter_length{stream="ncs:commands"}'
+        values: '0x45'
+      - series: 'ncs_worker_dead_lettered_total'
+        values: '0x45'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: NCSDependencyDown
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSOutboxBacklogWarning
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSOutboxBacklogCritical
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSOutboxOldestWarning
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSOutboxOldestCritical
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSPublisherNotPublishing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSPublisherStalledCritical
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSWorkerNotConsuming
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSWorkerStalledCritical
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSPendingGrowing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSDeadLettersPresent
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: NCSDeadLetterWritten
+        exp_alerts: []
