@@ -66,6 +66,120 @@ LIMIT 1`
 	return &admin, nil
 }
 
+// AccountMutationAdapter implements the A-line auth.AccountMutation port
+// over user_accounts. Delivered by A-01 per the two-track split: the port
+// lives in internal/auth, the PostgreSQL adapter lives here (B-02).
+type AccountMutationAdapter struct {
+	db *sql.DB
+}
+
+// NewAccountMutationAdapter binds the adapter to a connection pool.
+func NewAccountMutationAdapter(db *sql.DB) (*AccountMutationAdapter, error) {
+	if db == nil {
+		return nil, errors.New("postgres: mutation adapter requires a database")
+	}
+	return &AccountMutationAdapter{db: db}, nil
+}
+
+// GetProfile returns the profile view; deleted accounts are not found.
+func (s *AccountMutationAdapter) GetProfile(ctx context.Context, userID int64) (auth.ProfileView, error) {
+	const query = `SELECT id, phone, display_name, avatar_url, status, created_at
+FROM user_accounts WHERE id = $1 AND deleted_at IS NULL`
+	var view auth.ProfileView
+	var phone, avatar sql.NullString
+	if err := s.db.QueryRowContext(ctx, query, userID).Scan(
+		&view.ID, &phone, &view.DisplayName, &avatar, &view.Status, &view.RegisteredAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return auth.ProfileView{}, auth.ErrProfileNotFound
+		}
+		return auth.ProfileView{}, err
+	}
+	view.PhoneMasked = phone.String
+	view.AvatarURL = avatar.String
+	return view, nil
+}
+
+// UpdateProfile applies a nickname and/or avatar change.
+func (s *AccountMutationAdapter) UpdateProfile(ctx context.Context, userID int64, update auth.ProfileUpdate) (auth.ProfileView, error) {
+	var view auth.ProfileView
+	var phone, avatar sql.NullString
+	var row *sql.Row
+	if update.DisplayName != nil && update.AvatarURL != nil {
+		row = s.db.QueryRowContext(ctx, `UPDATE user_accounts
+SET display_name = $2, avatar_url = $3, updated_at = CURRENT_TIMESTAMP
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING id, phone, display_name, avatar_url, status, created_at`,
+			userID, *update.DisplayName, *update.AvatarURL)
+	} else if update.DisplayName != nil {
+		row = s.db.QueryRowContext(ctx, `UPDATE user_accounts
+SET display_name = $2, updated_at = CURRENT_TIMESTAMP
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING id, phone, display_name, avatar_url, status, created_at`,
+			userID, *update.DisplayName)
+	} else {
+		row = s.db.QueryRowContext(ctx, `UPDATE user_accounts
+SET avatar_url = $2, updated_at = CURRENT_TIMESTAMP
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING id, phone, display_name, avatar_url, status, created_at`,
+			userID, *update.AvatarURL)
+	}
+	if err := row.Scan(&view.ID, &phone, &view.DisplayName, &avatar, &view.Status, &view.RegisteredAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return auth.ProfileView{}, auth.ErrProfileNotFound
+		}
+		return auth.ProfileView{}, err
+	}
+	view.PhoneMasked = phone.String
+	view.AvatarURL = avatar.String
+	return view, nil
+}
+
+// DeleteAccount anonymizes the account in place (UC-U-05 申请注销): the
+// phone and display name are replaced with irreversible placeholders, the
+// password is dropped and the account is disabled. Returns false when the
+// account was already deleted or never existed.
+func (s *AccountMutationAdapter) DeleteAccount(ctx context.Context, userID int64) (bool, error) {
+	tag, err := s.db.ExecContext(ctx, `UPDATE user_accounts
+SET phone = 'deleted-' || id::text || '@invalid',
+    display_name = '已注销用户',
+    password_hash = '',
+    avatar_url = '',
+    status = 'DISABLED',
+    deleted_at = CURRENT_TIMESTAMP,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $1 AND deleted_at IS NULL`, userID)
+	if err != nil {
+		return false, err
+	}
+	affected, err := tag.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// SetFrozen sets or clears the DISABLED status (BR-07). Returns false when
+// the account is missing or already deleted.
+func (s *AccountMutationAdapter) SetFrozen(ctx context.Context, userID int64, frozen bool) (bool, error) {
+	status := "ACTIVE"
+	if frozen {
+		status = "DISABLED"
+	}
+	tag, err := s.db.ExecContext(ctx, `UPDATE user_accounts
+SET status = $2, updated_at = CURRENT_TIMESTAMP
+WHERE id = $1 AND deleted_at IS NULL`, userID, status)
+	if err != nil {
+		return false, err
+	}
+	affected, err := tag.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+var _ auth.AccountMutation = (*AccountMutationAdapter)(nil)
+
 // EnsureUserWithWallet registers the user and the wallet when missing
 // (UC-U-01) and returns the account either way. Both paths execute the same
 // statements — an INSERT ... ON CONFLICT DO NOTHING for the user and for the
