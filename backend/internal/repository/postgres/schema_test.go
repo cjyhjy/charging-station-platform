@@ -214,3 +214,64 @@ func TestP0MigrationMatchesFrozenContract(t *testing.T) {
 		}
 	}
 }
+
+// readNumberedMigration returns one numbered migration, lower-cased like the P0 helper.
+func readNumberedMigration(t *testing.T, name string) string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test filename")
+	}
+	contents, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "../../../migrations/", name))
+	if err != nil {
+		t.Fatalf("read migration %s: %v", name, err)
+	}
+	return strings.ToLower(string(contents))
+}
+
+// A-01 persistence: the deletion scheme is only as good as the shape it is stored in, so the shape is
+// pinned here. The deletion is an in-place anonymization, which means every field that must change has
+// to exist and the invariants that make a half-deleted account impossible have to be declared in the
+// migration rather than only in the adapter's comment.
+func TestUserProfileMigrationIsComplete(t *testing.T) {
+	schema := readNumberedMigration(t, "0008_user_profile_and_deletion.sql")
+
+	for _, needle := range []string{
+		"add column if not exists avatar_url text not null default ''",
+		"add column if not exists deleted_at timestamptz",
+		// invariants: deleted implies disabled, deleted implies no credentials, bounded avatar storage
+		"check (deleted_at is null or status = 'disabled')",
+		"check (deleted_at is null or password_hash = '')",
+		"check (char_length(avatar_url) <= 512)",
+		// the read paths all filter on deleted_at, and the partial index only pays for deleted rows
+		"create index if not exists idx_user_accounts_deleted_at",
+		"where deleted_at is not null",
+	} {
+		if !strings.Contains(schema, needle) {
+			t.Errorf("0008 is missing %q", needle)
+		}
+	}
+	if strings.Contains(schema, "drop column") {
+		t.Error("an up migration must not drop anything")
+	}
+
+	// The down script has to undo exactly what the up migration added, in an order PostgreSQL accepts
+	// (constraints before the columns they reference) and without touching other migrations.
+	down := readNumberedMigration(t, "down/0008_user_profile_and_deletion.down.sql")
+	for _, needle := range []string{
+		"drop constraint if exists user_accounts_avatar_url_length",
+		"drop constraint if exists user_accounts_deleted_has_no_credentials",
+		"drop constraint if exists user_accounts_deleted_is_disabled",
+		"drop index if exists idx_user_accounts_deleted_at",
+		"drop column if exists deleted_at",
+		"drop column if exists avatar_url",
+	} {
+		if !strings.Contains(down, needle) {
+			t.Errorf("the down script is missing %q", needle)
+		}
+	}
+	// The down script must not be reachable from the embedded set: it is applied by hand only.
+	if strings.Contains(schema, "0008_user_profile_and_deletion.down") {
+		t.Error("the up migration must not reference the down script")
+	}
+}

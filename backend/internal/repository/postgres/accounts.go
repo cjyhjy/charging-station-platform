@@ -69,6 +69,15 @@ LIMIT 1`
 // AccountMutationAdapter implements the A-line auth.AccountMutation port
 // over user_accounts. Delivered by A-01 per the two-track split: the port
 // lives in internal/auth, the PostgreSQL adapter lives here (B-02).
+//
+// Transaction boundary (A-01 review, B line):
+//
+// Every method here is a single statement, and in PostgreSQL a single statement is already one
+// transaction, applied or not applied as a whole. Wrapping it in BeginTx/Commit would add a round
+// trip and no atomicity, so the port's "every method must run inside a transaction" is satisfied by
+// construction rather than by an explicit block. What no adapter can make atomic is the boundary the
+// service draws across two stores: the status change commits here while session revocation happens in
+// Redis. See docs/migration/a-01-persistence-review.md for that analysis and its consequences.
 type AccountMutationAdapter struct {
 	db *sql.DB
 }
@@ -81,9 +90,18 @@ func NewAccountMutationAdapter(db *sql.DB) (*AccountMutationAdapter, error) {
 	return &AccountMutationAdapter{db: db}, nil
 }
 
+// profileColumns is the projection every profile statement returns, so a column added to one path
+// cannot be forgotten in the others.
+const profileColumns = `id, phone, display_name, avatar_url, status, created_at`
+
 // GetProfile returns the profile view; deleted accounts are not found.
+//
+// ProfileView.PhoneMasked carries the RAW phone from this store: masking is applied by the service
+// (auth.MaskPhone) on the way out. The field name is therefore misleading, and a caller that forgets
+// to mask leaks a phone number. It is left as it is because renaming the port field is an A-line
+// change; the B-06 A-01 review records it. Do not return this value to a client unmasked.
 func (s *AccountMutationAdapter) GetProfile(ctx context.Context, userID int64) (auth.ProfileView, error) {
-	const query = `SELECT id, phone, display_name, avatar_url, status, created_at
+	const query = `SELECT ` + profileColumns + `
 FROM user_accounts WHERE id = $1 AND deleted_at IS NULL`
 	var view auth.ProfileView
 	var phone, avatar sql.NullString
@@ -99,31 +117,29 @@ FROM user_accounts WHERE id = $1 AND deleted_at IS NULL`
 	return view, nil
 }
 
-// UpdateProfile applies a nickname and/or avatar change.
+// UpdateProfile applies a nickname and/or avatar change and returns the stored view.
+//
+// One statement with COALESCE instead of one statement per field combination: a nil pointer means
+// "leave this column alone", which is exactly what COALESCE($n, column) expresses, and the single
+// statement cannot drift out of step with itself the way three near-identical ones can. The previous
+// version also had a panic path - a call with neither field set reached the avatar branch and
+// dereferenced a nil pointer - which the handler happened to prevent by rejecting such requests.
+// A store should not depend on a caller for that, so it is refused here.
 func (s *AccountMutationAdapter) UpdateProfile(ctx context.Context, userID int64, update auth.ProfileUpdate) (auth.ProfileView, error) {
+	if update.DisplayName == nil && update.AvatarURL == nil {
+		return auth.ProfileView{}, errors.New("postgres: profile update requires at least one field")
+	}
+	const query = `UPDATE user_accounts
+SET display_name = COALESCE($2, display_name),
+    avatar_url   = COALESCE($3, avatar_url),
+    updated_at   = CURRENT_TIMESTAMP
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING ` + profileColumns
+
 	var view auth.ProfileView
 	var phone, avatar sql.NullString
-	var row *sql.Row
-	if update.DisplayName != nil && update.AvatarURL != nil {
-		row = s.db.QueryRowContext(ctx, `UPDATE user_accounts
-SET display_name = $2, avatar_url = $3, updated_at = CURRENT_TIMESTAMP
-WHERE id = $1 AND deleted_at IS NULL
-RETURNING id, phone, display_name, avatar_url, status, created_at`,
-			userID, *update.DisplayName, *update.AvatarURL)
-	} else if update.DisplayName != nil {
-		row = s.db.QueryRowContext(ctx, `UPDATE user_accounts
-SET display_name = $2, updated_at = CURRENT_TIMESTAMP
-WHERE id = $1 AND deleted_at IS NULL
-RETURNING id, phone, display_name, avatar_url, status, created_at`,
-			userID, *update.DisplayName)
-	} else {
-		row = s.db.QueryRowContext(ctx, `UPDATE user_accounts
-SET avatar_url = $2, updated_at = CURRENT_TIMESTAMP
-WHERE id = $1 AND deleted_at IS NULL
-RETURNING id, phone, display_name, avatar_url, status, created_at`,
-			userID, *update.AvatarURL)
-	}
-	if err := row.Scan(&view.ID, &phone, &view.DisplayName, &avatar, &view.Status, &view.RegisteredAt); err != nil {
+	if err := s.db.QueryRowContext(ctx, query, userID, update.DisplayName, update.AvatarURL).Scan(
+		&view.ID, &phone, &view.DisplayName, &avatar, &view.Status, &view.RegisteredAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return auth.ProfileView{}, auth.ErrProfileNotFound
 		}
@@ -138,6 +154,14 @@ RETURNING id, phone, display_name, avatar_url, status, created_at`,
 // phone and display name are replaced with irreversible placeholders, the
 // password is dropped and the account is disabled. Returns false when the
 // account was already deleted or never existed.
+//
+// All five fields change in one statement, and migration 0008 makes two of them invariants of a
+// deleted row (deleted_at IS NULL OR status = 'DISABLED', deleted_at IS NULL OR password_hash = ”),
+// so a future edit cannot half-delete an account and leave it able to log in.
+//
+// The anonymized phone is derived from the id, which is what keeps it unique without a second query:
+// the row keeps its UNIQUE (phone) slot while releasing the real number, so the same person can
+// register again and get a new account.
 func (s *AccountMutationAdapter) DeleteAccount(ctx context.Context, userID int64) (bool, error) {
 	tag, err := s.db.ExecContext(ctx, `UPDATE user_accounts
 SET phone = 'deleted-' || id::text || '@invalid',
@@ -160,6 +184,11 @@ WHERE id = $1 AND deleted_at IS NULL`, userID)
 
 // SetFrozen sets or clears the DISABLED status (BR-07). Returns false when
 // the account is missing or already deleted.
+//
+// Unfreezing writes ACTIVE unconditionally. That is correct today because freeze is the only thing
+// that writes DISABLED, and a deleted account cannot be unfrozen (deleted_at IS NULL guard). If a
+// second reason to disable an account is ever introduced, this must record which reason disabled it
+// rather than assuming it was a freeze.
 func (s *AccountMutationAdapter) SetFrozen(ctx context.Context, userID int64, frozen bool) (bool, error) {
 	status := "ACTIVE"
 	if frozen {
