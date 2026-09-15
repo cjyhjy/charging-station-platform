@@ -56,7 +56,12 @@ export const useAgentStore = defineStore('userAgent', {
         this.messages.push(assistantMessage(result?.reply || '已完成查询。', { result }))
         return true
       } catch (error) {
-        this.error = error?.userMessage || 'AI 助手暂时不可用，请稍后重试'
+        // Go 后端尚未提供 Agent 端点（A-07）：404/501 明确提示未开放，不伪装成故障。
+        if (error?.status === 404 || error?.status === 501) {
+          this.error = 'AI 助手暂未开放：后端 Agent 接口尚未上线（A-07）'
+        } else {
+          this.error = error?.userMessage || 'AI 助手暂时不可用，请稍后重试'
+        }
         return false
       } finally {
         this.loading = false

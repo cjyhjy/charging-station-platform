@@ -14,7 +14,6 @@ import {
   setAccessToken,
   setSessionExpiredHandler
 } from '../src/api/http'
-import { avatarContentUrl, fetchAvatarObjectUrl, uploadAvatar } from '../src/api/auth'
 import { chatWithAgent } from '../src/api/agent'
 import { rechargeWallet } from '../src/api/charging'
 import { fetchStations } from '../src/api/station'
@@ -189,39 +188,17 @@ describe('幂等键与查询参数', () => {
   })
 
 
-  it('头像内容需要 Bearer 令牌单独请求，未设置头像（404）时返回空串', async () => {
-    const fetchMock = mockFetch(async () => ({ ok: false, status: 404, json: async () => ({ success: false, code: 4, userMessage: '未设置头像', data: null }) }))
-    setAccessToken('token-abc')
-
-    expect(avatarContentUrl()).toBe('/api/v1/user/me/avatar/content')
-    await expect(fetchAvatarObjectUrl()).resolves.toBe('')
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/user/me/avatar/content')
-    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer token-abc')
-
-    mockFetch(async () => ({ ok: true, status: 200, blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }) }))
-    expect(typeof (await fetchAvatarObjectUrl())).toBe('string')
+  it('错误信封的请求 ID 缺失时回退到 Go 契约的 traceId 字段', async () => {
+    mockFetch(async () => jsonResponse({ success: false, code: 4, message: 'not found', userMessage: '请求的资源不存在', traceId: 'trace-go-1', data: null }, 404))
+    const error = await request('/user/orders').catch(caught => caught)
+    expect(error.requestId).toBe('trace-go-1')
   })
 
-  it('上传头像是业务写入：携带 Idempotency-Key 且使用 multipart 表单', async () => {
-    const fetchMock = mockFetch(async () => jsonResponse(envelope({ avatarUrl: '/api/v1/user/me/avatar/content', version: 4 })))
-    const file = new File([new Uint8Array([1, 2, 3])], 'avatar.png', { type: 'image/png' })
-
-    await uploadAvatar(file)
-
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('/api/v1/user/me/avatar')
-    expect(init.method).toBe('POST')
-    expect(init.headers['Idempotency-Key']).toMatch(UUID_PATTERN)
-    // FormData 由浏览器自行设置 multipart boundary，不能手写 Content-Type。
-    expect(init.headers['Content-Type']).toBeUndefined()
-    expect(init.body).toBeInstanceOf(FormData)
-  })
-
-  it('查询参数忽略空值，且站点查询在无定位时不下发经纬度', async () => {    expect(buildQuery({ page: 1, keyword: '', chargerType: undefined, latitudeE6: null })).toBe('?page=1')
+  it('查询参数忽略空值，且站点查询在无定位时不下发经纬度（Go 契约参数为 connectorType）', async () => {    expect(buildQuery({ page: 1, keyword: '', chargerType: undefined, latitudeE6: null })).toBe('?page=1')
     expect(buildQuery({})).toBe('')
 
-    const fetchMock = mockFetch(async () => jsonResponse(envelope({ items: [], total: 0, page: 1, pageSize: 20 })))
+    const fetchMock = mockFetch(async () => jsonResponse(envelope({ items: [], meta: { page: 1, pageSize: 20, total: 0 } })))
     await fetchStations({ keyword: '中关村', chargerType: 1, page: 1, pageSize: 20 })
-    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/user/stations?keyword=%E4%B8%AD%E5%85%B3%E6%9D%91&chargerType=1&page=1&pageSize=20')
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/stations?keyword=%E4%B8%AD%E5%85%B3%E6%9D%91&connectorType=DC&page=1&pageSize=20')
   })
 })

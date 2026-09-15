@@ -1,23 +1,47 @@
 import { api } from './http'
+import { flattenPage, mapOrder, mapReview } from './contract'
+import { fetchOrder } from './charging'
 
-/** 订单与评价接口（接口文档 §3.4、§3.5、§5.9）。 */
+/** 订单列表、小票、评价与申诉接口（Go 契约）。 */
 
-/** §3.4 我的订单；sort 仅允许 -createdAt / createdAt。 */
-export function fetchOrders({ status, fromAt, toAt, page, pageSize, sort } = {}) {
-  return api.get('/user/orders', { status, fromAt, toAt, page, pageSize, sort })
+/** 我的订单；status 直接使用 Go 订单状态枚举（CREATED/CHARGING/COMPLETED/...）。 */
+export function fetchOrders({ status, page, pageSize } = {}) {
+  return api.get('/orders', { status, page, pageSize }).then(flattenPage).then(mapOrderPage)
 }
 
-/** §3.5 订单小票（完整价格快照、时长、电量、应付、实付、欠费）。 */
+/** 订单小票（Go 契约字段：价格快照、电量 Wh、应付、实付、支付状态）。 */
 export function fetchOrderReceipt(orderNo) {
-  return api.get(`/user/orders/${encodeURIComponent(orderNo)}`)
+  return fetchOrder(orderNo)
 }
 
-/** §5.9 查询本人订单评价，未评价时返回 {review: null}。 */
+/**
+ * 查询本人订单评价。旧契约未评价时返回 {review: null}；
+ * Go 契约未评价返回 404，由调用方按 status 404 归一化为无评价。
+ */
 export function fetchOrderReview(orderNo) {
-  return api.get(`/user/orders/${encodeURIComponent(orderNo)}/review`)
+  return api.get(`/orders/${encodeURIComponent(orderNo)}/review`).then(mapReview)
 }
 
-/** §5.9 提交评价：rating 必填 1～5，content 必填 1～500 码点。 */
+/** 提交评价：Go 字段为 stars/comment（1..5 星、1..500 码点），同内容重放幂等返回首次结果。 */
 export function submitOrderReview(orderNo, { rating, content }, idempotencyKey) {
-  return api.post(`/user/orders/${encodeURIComponent(orderNo)}/review`, { rating, content }, { idempotent: true, idempotencyKey })
+  return api
+    .post(
+      `/orders/${encodeURIComponent(orderNo)}/review`,
+      { stars: rating, comment: content },
+      { idempotent: true, idempotencyKey }
+    )
+    .then(mapReview)
+}
+
+/** 提交申诉（UC-U-09）：仅本人 COMPLETED 订单；同内容重放幂等，不同内容 409。 */
+export function createAppeal(orderNo, { reason }, idempotencyKey) {
+  return api.post(
+    `/orders/${encodeURIComponent(orderNo)}/appeal`,
+    { reason },
+    { idempotent: true, idempotencyKey }
+  )
+}
+
+function mapOrderPage(data) {
+  return { ...data, items: (Array.isArray(data.items) ? data.items : []).map(mapOrder) }
 }

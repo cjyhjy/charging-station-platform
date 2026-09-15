@@ -1,13 +1,18 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import * as orderApi from '@/api/order'
+import * as stationApi from '@/api/station'
 import { randomId } from '@/api/http'
 import { formatDateTime, formatEnergy, formatDuration, formatYuan } from '@/services/coordinate'
 import AppSkeleton from '@/components/AppSkeleton.vue'
 import { staggerStyle } from '@/composables/useReveal'
 import { useAuthStore } from '@/stores/auth'
 
-/** 我的订单：分页列表 + 订单小票 + 评价（每单仅可评价一次，失败重试复用幂等键）。 */
+/**
+ * 我的订单：分页列表 + 订单小票 + 评价与申诉。
+ * 评价每单仅一次（同内容重放返回首次结果），失败重试复用幂等键；
+ * 申诉针对已完成的订单，重复申诉（409）按已提交提示。
+ */
 const auth = useAuthStore()
 
 const orders = ref([])
@@ -24,32 +29,56 @@ const rating = ref(5)
 const content = ref('')
 const reviewError = ref('')
 const reviewBusy = ref(false)
+const appealReason = ref('')
+const appealError = ref('')
+const appealBusy = ref(false)
+const appealDone = ref(false)
+const stationNames = ref({})
 
 let pendingReviewKey = null
+let pendingAppealKey = null
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 const statusOptions = [
   { label: '全部', value: '' },
-  { label: '已完成', value: '60' },
-  { label: '已取消', value: '70' },
-  { label: '已结算', value: '90' }
+  { label: '已完成', value: 'COMPLETED' },
+  { label: '已取消', value: 'CANCELLED' },
+  { label: '已失败', value: 'FAILED' },
+  { label: '已过期', value: 'EXPIRED' }
 ]
 
-onMounted(() => {
-  if (auth.isLoggedIn) void loadOrders(1)
+onMounted(async () => {
+  if (!auth.isLoggedIn) return
+  await loadStationNames()
+  await loadOrders(1)
 })
+
+/** 订单列表只带 stationId；拉一次站点列表把 id 解析成名称，失败时回退“站点 #id”。 */
+async function loadStationNames() {
+  try {
+    const data = await stationApi.fetchStations({ page: 1, pageSize: 100 })
+    const map = {}
+    for (const item of data.items || []) map[item.id] = item.name
+    stationNames.value = map
+  } catch {
+    stationNames.value = {}
+  }
+}
+
+function withStationName(order) {
+  return { ...order, stationName: stationNames.value[order.stationId] || order.stationName }
+}
 
 async function loadOrders(targetPage = page.value) {
   loading.value = true
   error.value = ''
   try {
     const data = await orderApi.fetchOrders({
-      status: statusFilter.value === '' ? undefined : Number(statusFilter.value),
+      status: statusFilter.value === '' ? undefined : statusFilter.value,
       page: targetPage,
-      pageSize,
-      sort: '-createdAt'
+      pageSize
     })
-    orders.value = Array.isArray(data.items) ? data.items : []
+    orders.value = (Array.isArray(data.items) ? data.items : []).map(withStationName)
     total.value = Number.isInteger(data.total) ? data.total : orders.value.length
     page.value = Number.isInteger(data.page) ? data.page : targetPage
   } catch (caught) {
@@ -65,20 +94,22 @@ async function openOrder(orderNo) {
   receipt.value = null
   review.value = null
   reviewError.value = ''
+  appealError.value = ''
+  appealDone.value = false
   pendingReviewKey = null
+  pendingAppealKey = null
   content.value = ''
   rating.value = 5
   try {
-    receipt.value = await orderApi.fetchOrderReceipt(orderNo)
+    receipt.value = withStationName(await orderApi.fetchOrderReceipt(orderNo))
   } catch (caught) {
     reviewError.value = caught?.userMessage || '订单小票加载失败'
   }
   try {
-    const data = await orderApi.fetchOrderReview(orderNo)
-    review.value = data?.review || null
+    review.value = await orderApi.fetchOrderReview(orderNo)
     return
   } catch (caught) {
-    // 404 表示订单不存在或非本人订单；其他错误提示用户。
+    // Go 契约：未评价返回 404，等同于旧契约的 {review: null}。
     if (caught?.status !== 404) reviewError.value = caught?.userMessage || '评价查询失败'
   }
 }
@@ -104,6 +135,33 @@ async function submitReview() {
     reviewError.value = caught?.userMessage || '评价提交失败，请稍后重试'
   } finally {
     reviewBusy.value = false
+  }
+}
+
+/** 提交申诉：仅本人已完成订单；同内容重放返回首次结果，不同内容冲突。 */
+async function submitAppeal() {
+  const reason = appealReason.value.trim()
+  if (!reason) {
+    appealError.value = '请填写申诉原因'
+    return
+  }
+  appealBusy.value = true
+  appealError.value = ''
+  pendingAppealKey = pendingAppealKey || randomId()
+  try {
+    await orderApi.createAppeal(selectedOrderNo.value, { reason }, pendingAppealKey)
+    pendingAppealKey = null
+    appealDone.value = true
+  } catch (caught) {
+    if (caught?.status === 409) {
+      appealDone.value = true
+      appealError.value = ''
+      pendingAppealKey = null
+    } else {
+      appealError.value = caught?.userMessage || '申诉提交失败，请稍后重试'
+    }
+  } finally {
+    appealBusy.value = false
   }
 }
 
@@ -201,6 +259,26 @@ function changeStatus(value) {
           </form>
 
           <p v-if="reviewError" class="alert alert--error" data-testid="review-error">{{ reviewError }}</p>
+        </div>
+
+        <div v-if="receipt.status === 'COMPLETED'" class="review-box" data-testid="order-appeal">
+          <h3>订单申诉</h3>
+
+          <div v-if="appealDone" data-testid="order-appeal-done">
+            <p>申诉已提交，客服审核通过后会把实付金额退回钱包。</p>
+          </div>
+
+          <form v-else class="review-form" @submit.prevent="submitAppeal">
+            <label class="field">
+              <span>申诉原因（1~500 字）</span>
+              <textarea v-model="appealReason" data-testid="appeal-reason" rows="3" maxlength="500" placeholder="请说明申诉原因，例如计量争议"></textarea>
+            </label>
+            <button type="submit" class="btn" data-testid="appeal-submit" :disabled="appealBusy">
+              {{ appealBusy ? '提交中…' : '提交申诉' }}
+            </button>
+          </form>
+
+          <p v-if="appealError" class="alert alert--error" data-testid="appeal-error">{{ appealError }}</p>
         </div>
       </div>
     </template>

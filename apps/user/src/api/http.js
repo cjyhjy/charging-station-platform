@@ -241,7 +241,11 @@ export async function request(path, options = {}) {
         (typeof envelope.userMessage === 'string' && envelope.userMessage) ||
         (typeof envelope.message === 'string' && envelope.message) ||
         statusUserMessage(response.status),
-      requestId: typeof envelope.requestId === 'string' && envelope.requestId ? envelope.requestId : requestId,
+      requestId:
+        (typeof envelope.requestId === 'string' && envelope.requestId) ||
+        // Go 契约的错误信封把请求 ID 放在 traceId 字段。
+        (typeof envelope.traceId === 'string' && envelope.traceId) ||
+        requestId,
       sessionExpired: response.status === 401 || response.status === 403 || code === 401 || code === 403
     })
     if (apiError.sessionExpired) notifySessionExpired(apiError)

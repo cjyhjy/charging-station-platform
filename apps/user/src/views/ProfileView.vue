@@ -1,24 +1,23 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import * as chargingApi from '@/api/charging'
 import { randomId } from '@/api/http'
 import { formatYuan } from '@/services/coordinate'
-import { fetchAvatarObjectUrl } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 
-/** 我的：验证码登录 / 退出、资料修改、钱包余额与充值。 */
+/**
+ * 我的：验证码登录 / 退出、资料修改、钱包余额与充值。
+ * 头像上传在 Go 契约中暂缺（B-01 待决策），入口显式提示未开放。
+ */
 const auth = useAuthStore()
 
 const phone = ref('')
 const smsCode = ref('')
 const nickname = ref('')
-const avatarFile = ref(null)
-const avatarObjectUrl = ref('')
 const rechargeAmountYuan = ref('50')
 const notice = ref('')
 
 let pendingRechargeKey = null
-let pendingAvatarKey = null
 
 const canSubmitLogin = computed(() => /^1\d{10}$/.test(phone.value.trim()) && /^\d{6}$/.test(smsCode.value.trim()))
 const rechargeAmountCent = computed(() => Math.round(Number(rechargeAmountYuan.value) * 100))
@@ -27,22 +26,8 @@ onMounted(async () => {
   if (!auth.isLoggedIn) return
   await auth.refreshProfile()
   await auth.refreshWallet()
-  nickname.value = auth.user?.nickname || ''
-  await loadAvatar()
+  nickname.value = auth.displayName === '未登录' ? '' : auth.displayName
 })
-
-onBeforeUnmount(() => {
-  if (avatarObjectUrl.value) URL.revokeObjectURL(avatarObjectUrl.value)
-})
-
-/** 头像接口需要 Bearer 令牌，因此取回内容后使用 blob URL，避免 <img> 请求未授权。 */
-async function loadAvatar() {
-  if (!auth.avatarUrl) return
-  const url = await fetchAvatarObjectUrl()
-  if (!url) return
-  if (avatarObjectUrl.value) URL.revokeObjectURL(avatarObjectUrl.value)
-  avatarObjectUrl.value = url
-}
 
 async function requestCode() {
   notice.value = ''
@@ -50,7 +35,7 @@ async function requestCode() {
     auth.error = '请输入 11 位手机号'
     return
   }
-  const data = await auth.requestCode(phone.value.trim(), 'LOGIN')
+  const data = await auth.requestCode(phone.value.trim())
   if (data?.developmentCode) notice.value = `开发环境模拟验证码：${data.developmentCode}`
 }
 
@@ -73,17 +58,6 @@ async function saveNickname() {
   await auth.updateNickname(value)
 }
 
-async function uploadAvatar() {
-  const file = avatarFile.value
-  if (!file) return
-  pendingAvatarKey = pendingAvatarKey || randomId()
-  const done = await auth.uploadAvatar(file)
-  if (done) {
-    pendingAvatarKey = null
-    await loadAvatar()
-  }
-}
-
 async function recharge() {
   const amountCent = rechargeAmountCent.value
   if (!Number.isFinite(amountCent) || amountCent < 1 || amountCent > 1000000) {
@@ -103,8 +77,8 @@ async function recharge() {
   }
 }
 
-/** 未设置头像（404 或未登录）时使用仓库自带的场景图作为占位。 */
-const avatarSrc = computed(() => avatarObjectUrl.value || '/charging-scene.png')
+/** Go 契约暂无头像能力，统一使用仓库自带的场景图作为占位。 */
+const avatarSrc = '/charging-scene.png'
 </script>
 
 <template>
@@ -171,10 +145,7 @@ const avatarSrc = computed(() => avatarObjectUrl.value || '/charging-scene.png')
           <button type="submit" class="btn btn--primary" data-testid="profile-save-nickname" :disabled="auth.loading">保存昵称</button>
         </form>
 
-        <div class="panel__row">
-          <input data-testid="profile-avatar-file" type="file" accept="image/png,image/jpeg,image/bmp" @change="avatarFile = $event.target.files?.[0] || null" />
-          <button type="button" class="btn" data-testid="profile-avatar-upload" :disabled="!avatarFile || auth.loading" @click="uploadAvatar">上传头像</button>
-        </div>
+        <p class="muted" data-testid="profile-avatar-unavailable">头像上传暂未开放：Go 后端契约尚未包含该能力（待 B-01 确认）。</p>
       </div>
 
       <p v-if="auth.error" class="alert alert--error" data-testid="profile-error">{{ auth.error }}</p>

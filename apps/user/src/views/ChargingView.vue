@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 import * as chargingApi from '@/api/charging'
 import { randomId } from '@/api/http'
 import { formatDuration, formatEnergy, formatYuan } from '@/services/coordinate'
@@ -8,13 +8,15 @@ import AppSkeleton from '@/components/AppSkeleton.vue'
 import { useValueFlash } from '@/composables/useValueFlash'
 import { useAuthStore } from '@/stores/auth'
 
-/** 充电流程：排队/待确认报价/已预约/充电中/结算，进度由服务端快照计算，客户端只轮询展示。 */
-const route = useRoute()
+/**
+ * 充电页（Go 订单模型）：创建订单即绑定设备并锁定价格快照，START/STOP 是 202
+ * 异步设备命令，结算由设备回执驱动。前端只轮询订单详情展示状态与累计量，
+ * 结束充电 = POST stop 后轮询至 COMPLETED 再展示小票。
+ */
 const router = useRouter()
 const auth = useAuthStore()
 
-const flow = ref(null)
-const progress = ref(null)
+const order = ref(null)
 const receipt = ref(null)
 const loading = ref(false)
 const busy = ref(false)
@@ -26,29 +28,24 @@ const POLL_INTERVAL_MS = 3000
 let pollTimer = null
 let pendingRechargeKey = null
 
-const status = computed(() => flow.value?.status ?? null)
-const quote = computed(() => flow.value?.quote || null)
-const isActive = computed(() => flow.value !== null && ![60, 70, 90].includes(status.value))
-const socText = computed(() => (Number.isInteger(progress.value?.simulatedSoc) ? `${progress.value.simulatedSoc}%` : '--'))
+const status = computed(() => order.value?.status ?? '')
+const isActive = computed(() => order.value !== null && order.value.active === true)
+const energyMwh = computed(() => (Number.isFinite(order.value?.energyMwh) ? order.value.energyMwh : 0))
+const amountCent = computed(() => (Number.isFinite(order.value?.amountCent) ? order.value.amountCent : 0))
+const durationSec = computed(() => (Number.isFinite(order.value?.durationSec) ? order.value.durationSec : 0))
 
 /**
- * 实时进度每几秒轮询一次，数值变化时用一次短暂高亮提示“数据刚更新”。
+ * 充电量/金额变化时用一次短暂高亮提示“数据刚更新”。
  * 只切换 class，不参与任何格式化，因此断言到的文本始终是最终值。
  */
-const { flashing: energyFlashing } = useValueFlash(() => progress.value?.energyMwh ?? 0)
-const { flashing: amountFlashing } = useValueFlash(() => progress.value?.amountCent ?? 0)
+const { flashing: energyFlashing } = useValueFlash(energyMwh)
+const { flashing: amountFlashing } = useValueFlash(amountCent)
 const { flashing: balanceFlashing } = useValueFlash(() => auth.balanceCent)
-const { flashing: socFlashing } = useValueFlash(() => progress.value?.simulatedSoc ?? null)
 
 onMounted(async () => {
   if (!auth.isLoggedIn) return
   await auth.refreshWallet()
-  await refreshFlow()
-  const stationId = Number(route.query.stationId)
-  const chargerType = Number(route.query.chargerType)
-  if (!flow.value && Number.isInteger(stationId) && stationId > 0) {
-    await requestNewFlow(stationId, chargerType === 0 ? 0 : 1)
-  }
+  await refreshOrder()
 })
 
 onBeforeUnmount(stopPolling)
@@ -63,29 +60,25 @@ function stopPolling() {
 function startPolling() {
   if (pollTimer) return
   pollTimer = setInterval(() => {
-    if (flow.value?.flowNo) void refreshProgress()
+    if (order.value?.orderNo && order.value.active) void refreshOrder()
   }, POLL_INTERVAL_MS)
 }
 
-async function refreshFlow() {
+async function refreshOrder() {
   if (!auth.isLoggedIn) return
   loading.value = true
   error.value = ''
   try {
-    const active = await chargingApi.fetchActiveFlow()
-    if (!active?.hasActiveFlow || !active.flow) {
-      flow.value = null
-      progress.value = null
-      stopPolling()
-      return
-    }
-    flow.value = await chargingApi.fetchFlow(active.flow.flowNo)
-    if (flow.value.status === 40) {
-      await refreshProgress()
+    const previous = order.value
+    const active = await chargingApi.fetchActiveOrder()
+    order.value = active
+    if (active) {
+      // STARTING/STOPPING 阶段等待设备回执，CHARGING 阶段跟踪累计电量与金额。
       startPolling()
     } else {
       stopPolling()
-      progress.value = null
+      // 轮询期间订单离开活动集合：此前进行中的订单已到终态，拉取小票。
+      if (previous?.orderNo && previous.active) await loadReceipt(previous.orderNo)
     }
   } catch (caught) {
     error.value = caught?.userMessage || '充电状态加载失败，请稍后重试'
@@ -94,54 +87,36 @@ async function refreshFlow() {
   }
 }
 
-async function refreshProgress() {
-  if (!flow.value?.flowNo) return
-  try {
-    progress.value = await chargingApi.fetchProgress(flow.value.flowNo)
-  } catch (caught) {
-    actionError.value = caught?.userMessage || '进度刷新失败'
-  }
-}
-
-async function requestNewFlow(stationId, chargerType) {
-  busy.value = true
-  actionError.value = ''
-  try {
-    await chargingApi.requestFlow({ stationId, chargerType }, randomId())
-    await refreshFlow()
-  } catch (caught) {
-    actionError.value = caught?.userMessage || '发起充电失败，请稍后重试'
-  } finally {
-    busy.value = false
-  }
-}
-
 async function runAction(action) {
-  if (!flow.value) return
+  if (!order.value) return
   busy.value = true
   actionError.value = ''
+  const orderNo = order.value.orderNo
   try {
-    const flowNo = flow.value.flowNo
-    const version = flow.value.version
-    if (action === 'confirm') {
-      await chargingApi.confirmQuote(flowNo, { quoteNo: quote.value?.quoteNo, flowVersion: version }, randomId())
-    } else if (action === 'cancel') {
-      await chargingApi.cancelFlow(flowNo, { reasonCode: 'USER_CANCELLED', flowVersion: version }, randomId())
+    if (action === 'cancel') {
+      await chargingApi.cancelOrder(orderNo, randomId())
     } else if (action === 'start') {
-      await chargingApi.startFlow(flowNo, { flowVersion: version }, randomId())
-    } else if (action === 'settle') {
-      receipt.value = await chargingApi.settleFlow(flowNo, { flowVersion: version, reasonCode: 'USER_STOPPED' }, randomId())
-      stopPolling()
-      flow.value = null
-      progress.value = null
-      await auth.refreshWallet()
-      return
+      await chargingApi.startOrder(orderNo, randomId())
+    } else if (action === 'stop') {
+      await chargingApi.stopOrder(orderNo, randomId())
     }
-    await refreshFlow()
+    await refreshOrder()
   } catch (caught) {
     actionError.value = caught?.userMessage || '操作失败，请稍后重试'
   } finally {
     busy.value = false
+  }
+}
+
+/** 小票：订单离开活动集合且终态为 COMPLETED 时展示；其余终态直接回空闲页。 */
+async function loadReceipt(orderNo) {
+  const detail = await chargingApi.fetchOrderReceipt(orderNo)
+  stopPolling()
+  order.value = null
+  if (detail?.status === 'COMPLETED') {
+    receipt.value = detail
+    await auth.refreshWallet()
+    await auth.refreshProfile()
   }
 }
 
@@ -187,7 +162,6 @@ function goHome() {
           <strong class="value-target" :class="{ 'value-flash': balanceFlashing }" data-testid="charging-balance">{{ formatYuan(auth.balanceCent) }}</strong>
           元
         </p>
-        <p v-if="auth.hasDebt" class="alert alert--error" data-testid="charging-debt">存在欠费 {{ formatYuan(auth.debtCent) }} 元，请先充值清偿。</p>
         <div class="inline-form">
           <input v-model="rechargeAmountYuan" data-testid="charging-recharge-amount" type="number" min="0.01" step="0.01" />
           <button type="button" class="btn" data-testid="charging-recharge" :disabled="busy" @click="recharge">充值</button>
@@ -196,7 +170,7 @@ function goHome() {
 
       <p v-if="error" class="alert alert--error" data-testid="charging-error" role="alert">
         {{ error }}
-        <button type="button" class="btn" data-testid="charging-retry" @click="refreshFlow">重试</button>
+        <button type="button" class="btn" data-testid="charging-retry" @click="refreshOrder">重试</button>
       </p>
       <div v-if="loading" data-testid="charging-loading" role="status">
         <span class="sr-only">正在加载充电状态…</span>
@@ -214,7 +188,7 @@ function goHome() {
           <li><span>电量</span><strong data-testid="receipt-energy">{{ formatEnergy(receipt.energyMwh) }}</strong></li>
           <li><span>应付</span><strong data-testid="receipt-amount">{{ formatYuan(receipt.amountCent) }} 元</strong></li>
           <li><span>实付</span><strong>{{ formatYuan(receipt.paidCent) }} 元</strong></li>
-          <li v-if="receipt.debtAddedCent"><span>新增欠费</span><strong>{{ formatYuan(receipt.debtAddedCent) }} 元</strong></li>
+          <li v-if="receipt.paymentStatus === 'PARTIAL_PAID'"><span>支付状态</span><strong>部分支付（余额不足部分待结清）</strong></li>
         </ul>
         <div class="panel__row">
           <RouterLink class="btn btn--primary" to="/orders">查看订单</RouterLink>
@@ -224,69 +198,55 @@ function goHome() {
 
       <div v-else-if="isActive" v-reveal class="panel" data-testid="charging-flow">
         <header class="panel__row">
-          <h2 data-testid="charging-status">{{ flow.statusText || flow.status }}</h2>
-          <span class="muted" data-testid="charging-flow-no">{{ flow.flowNo }}</span>
+          <h2 data-testid="charging-status">{{ order.statusText || order.status }}</h2>
+          <span class="muted" data-testid="charging-flow-no">{{ order.orderNo }}</span>
         </header>
 
-        <p v-if="flow.chargerCode" data-testid="charging-charger">设备 {{ flow.chargerCode }}</p>
+        <p v-if="order.chargerCode" data-testid="charging-charger">设备 {{ order.chargerCode }}</p>
 
-        <template v-if="status === 10">
-          <p data-testid="charging-queue">排队中，前面还有 {{ flow.queuePosition ?? '—' }} 位。</p>
-          <button type="button" class="btn" data-testid="charging-cancel" :disabled="busy" @click="runAction('cancel')">取消排队</button>
-        </template>
-
-        <template v-else-if="status === 20 && quote">
-          <ul class="metric-list" data-testid="charging-quote">
-            <li><span>电费</span><strong>{{ formatYuan(quote.electricityPriceCentPerKwh) }} 元/kWh</strong></li>
-            <li><span>服务费</span><strong>{{ formatYuan(quote.finalServicePriceCentPerKwh) }} 元/kWh</strong></li>
-            <li><span>合计</span><strong data-testid="charging-quote-total">{{ formatYuan(quote.totalPriceCentPerKwh) }} 元/kWh</strong></li>
-          </ul>
-          <div class="panel__row">
-            <button type="button" class="btn btn--primary" data-testid="charging-confirm" :disabled="busy" @click="runAction('confirm')">确认报价并预约</button>
-            <button type="button" class="btn" data-testid="charging-cancel" :disabled="busy" @click="runAction('cancel')">取消</button>
-          </div>
-        </template>
-
-        <template v-else-if="status === 30">
-          <p>已预约设备，请尽快到达并开始充电。</p>
+        <template v-if="status === 'CREATED'">
+          <p>订单已创建并锁定设备，请尽快开始充电。</p>
           <div class="panel__row">
             <button type="button" class="btn btn--primary" data-testid="charging-start" :disabled="busy" @click="runAction('start')">开始充电</button>
-            <button type="button" class="btn" data-testid="charging-cancel" :disabled="busy" @click="runAction('cancel')">取消预约</button>
+            <button type="button" class="btn" data-testid="charging-cancel" :disabled="busy" @click="runAction('cancel')">取消订单</button>
           </div>
         </template>
 
-        <template v-else-if="status === 40">
+        <template v-else-if="status === 'STARTING'">
+          <p data-testid="charging-starting">启动命令已提交，等待设备回执确认…</p>
+        </template>
+
+        <template v-else-if="status === 'CHARGING'">
           <div class="charge-energy" aria-hidden="true">
             <span>已充电量</span>
-            <strong>{{ formatEnergy(progress?.energyMwh ?? 0) }}</strong>
+            <strong>{{ formatEnergy(energyMwh) }}</strong>
           </div>
           <ul class="metric-list" data-testid="charging-progress">
             <li>
               <span>已充电量</span>
-              <strong class="value-target" :class="{ 'value-flash': energyFlashing }" data-testid="progress-energy">{{ formatEnergy(progress?.energyMwh ?? 0) }}</strong>
+              <strong class="value-target" :class="{ 'value-flash': energyFlashing }" data-testid="progress-energy">{{ formatEnergy(energyMwh) }}</strong>
             </li>
             <li>
               <span>已充金额</span>
-              <strong class="value-target" :class="{ 'value-flash': amountFlashing }" data-testid="progress-amount">{{ formatYuan(progress?.amountCent ?? 0) }} 元</strong>
+              <strong class="value-target" :class="{ 'value-flash': amountFlashing }" data-testid="progress-amount">{{ formatYuan(amountCent) }} 元</strong>
             </li>
-            <li><span>时长</span><strong data-testid="progress-duration">{{ formatDuration(progress?.durationSec ?? 0) }}</strong></li>
-            <li><span>功率</span><strong>{{ ((progress?.powerWatt ?? 0) / 1000).toFixed(1) }} kW</strong></li>
-            <li>
-              <span>模拟 SOC</span>
-              <strong class="value-target" :class="{ 'value-flash': socFlashing }" data-testid="progress-soc">{{ socText }}</strong>
-            </li>
+            <li><span>时长</span><strong data-testid="progress-duration">{{ formatDuration(durationSec) }}</strong></li>
           </ul>
-          <button type="button" class="btn btn--primary" data-testid="charging-settle" :disabled="busy" @click="runAction('settle')">结束充电并结算</button>
+          <button type="button" class="btn btn--primary" data-testid="charging-stop" :disabled="busy" @click="runAction('stop')">停止充电</button>
+        </template>
+
+        <template v-else-if="status === 'STOPPING'">
+          <p data-testid="charging-stopping">停止命令已提交，等待设备回执并结算…</p>
         </template>
 
         <template v-else>
-          <p class="muted" data-testid="charging-other-state">当前状态：{{ flow.statusText || flow.status }}，可刷新获取最新状态。</p>
-          <button type="button" class="btn" data-testid="charging-refresh" @click="refreshFlow">刷新</button>
+          <p class="muted" data-testid="charging-other-state">当前状态：{{ order.statusText || order.status }}，可刷新获取最新状态。</p>
+          <button type="button" class="btn" data-testid="charging-refresh" @click="refreshOrder">刷新</button>
         </template>
       </div>
 
       <div v-else-if="!loading" class="panel" data-testid="charging-idle">
-        <p>当前没有进行中的充电流程。</p>
+        <p>当前没有进行中的充电订单。</p>
         <RouterLink class="btn btn--primary" to="/" data-testid="charging-find-station">去找充电站</RouterLink>
       </div>
     </template>
