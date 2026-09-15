@@ -48,12 +48,12 @@
 | U1 | `auth.js:6 sendSmsCode` | POST `/user/auth/sms/code` | `{phone, purpose}` | `developmentCode`、`retryAfterSec`（`stores/auth.js:69-70`） | POST `/auth/user/sms/code` | 需改造 | 路径前缀；Go 无 `purpose`；响应为 `{phone, expiresInSec, code?}`（`code` 仅模拟短信），字段名与前端不同 |
 | U2 | `auth.js:11 loginWithSms` | POST `/user/auth/login/sms` | `{phone, smsCode, deviceId}` | `accessToken/expiresAt` | POST `/auth/user/login/sms` | 需改造 | 路径前缀；`smsCode→code`；Go 不收 `deviceId`；`identity` 结构适配（C5） |
 | U3 | `auth.js:16 loginWithPassword` | POST `/user/auth/login/password` | `{loginName, password, deviceId}` | `accessToken/expiresAt` | POST `/auth/user/login` | 需改造 | 路径；`loginName→account`；`deviceId` |
-| U4 | `auth.js:21 registerAccount` | POST `/user/auth/register` | `{username, phone, password, smsCode, deviceId}` | `accessToken/expiresAt` | — | 后端缺失 | Go 由短信登录自动注册，无用户名+密码注册端点；B-01 决策补契约或前端下线该入口 |
+| U4 | `auth.js:21 registerAccount` | POST `/user/auth/register` | `{phone, password, smsCode, username?}` | 登录会话（201 即建立会话） | POST `/auth/user/register` | 需改造 | B 线已实现（201 返回 LoginResponse，注册即登录）；前端已接线：不提交 deviceId，username 可选 |
 | U5 | `auth.js:26 logout` | POST `/user/auth/logout` | — | — | POST `/auth/logout` | 需改造 | 仅路径（Go 为用户/管理员统一端点） |
 | U6 | `auth.js:31 fetchProfile` | GET `/user/me` | — | `user`、`balanceCent`、`debtCent`、`hasActiveFlow`、`version`（`stores/auth.js:28-32,113`） | GET `/me` + GET `/me/profile` + GET `/wallet` | 需改造 | Go 无合并资料视图；前端需改为聚合 `/me`、`/me/profile`、`/wallet`，活动流程经 `/orders` 查询 |
 | U7 | `auth.js:36 updateNickname` | PUT `/user/me` | `{nickname, version}` | 更新后的 user | PUT `/me/profile` | 需改造 | 路径；`nickname→displayName`；Go 无 `version` 乐观锁 |
-| U8 | `auth.js:41 uploadAvatar` | POST `/user/me/avatar` | multipart `file` | `avatarUrl` | — | 后端缺失 | Go 无头像上传端点 |
-| U9 | `auth.js:48-68 avatarContentUrl / fetchAvatarObjectUrl`（裸 `fetch`，Bearer） | GET `/user/me/avatar/content` | — | 图片 blob，非 2xx 降级为占位图 | — | 后端缺失 | Go 无头像内容端点；前端已内建 404 降级 |
+| U8 | `ProfileView.vue saveAvatarUrl`（原 `auth.js:41 uploadAvatar`） | PUT `/me/profile` | `{avatarUrl}`（≤512，空串=无头像） | 更新后的资料 | PUT `/me/profile` | 需改造 | Go 契约不提供文件上传，头像为 avatarUrl URL 字段；前端已改为 URL 方式设置与直显 |
+| U9 | 原 `avatarContentUrl / fetchAvatarObjectUrl` | GET `/user/me/avatar/content` | — | 图片 blob | — | 需改造 | Go 契约无内容端点：前端已改为 avatarUrl 直显，不再单独请求该地址 |
 | U10 | `charging.js:6 requestFlow` | POST `/user/flows` | `{stationId, chargerType, preferredChargerId}` | flow（含报价快照） | POST `/orders` | 需改造 | 模型差异：Go 按具体 `chargerId` 创建订单，前端只有站点+类型+偏好；需前端先选桩，或 B 线补"站点级下单"契约（B-01 决策） |
 | U11 | `charging.js:11 fetchActiveFlow` | GET `/user/flows/active` | — | 活动流程 | — | 后端缺失 | Go 无活动订单端点；可用 `GET /orders?status=<活跃集>` 近似，前端恢复逻辑需改 |
 | U12 | `charging.js:16 fetchFlow` | GET `/user/flows/{flowNo}` | — | 流程详情（含待确认报价） | GET `/orders/{orderNo}` | 需改造 | 术语/字段对照；Go 无"待确认报价快照"概念 |
@@ -90,9 +90,9 @@
 | A7 | `account.js:16 setAccountStatus` | PUT `/admin/accounts/{adminId}/status` | `{status, reason, version}`（幂等键） | — | — | 后端缺失 | 同上 |
 | A8 | `charger.js:6 fetchChargers` | GET `/admin/chargers` | `{stationId, status, chargerType, keyword, page, pageSize}` | `{items, meta}` | GET `/admin/chargers` | 需改造 | 路径一致；Go 支持 `keyword/stationId/status`+分页，`chargerType` 参数不支持 |
 | A9 | `charger.js:11 createChargersBatch` | POST `/admin/chargers/batch` | `{stationId, chargers[]}`（幂等键） | — | — | 后端缺失 | Go 无建设备端点 |
-| A10 | `charger.js:16 setChargerStatus` | PUT `/admin/chargers/{chargerId}/status` | `{targetStatus, reason, version}`（幂等键） | — | — | 后端缺失 | Go 仅有 release/restart，无任意状态设置 |
+| A10 | `charger.js:16 setChargerStatus` | PUT `/admin/chargers/{chargerId}/status` | `{targetStatus, reason, version}`（幂等键） | 就地更新该行 | PUT `/admin/chargers/{chargerId}/status` | 需改造 | B 线已实现：body 为 `{status: IDLE\|DISABLED, reason}`（仅两个目标状态；OCCUPIED/RESTARTING 409），无版本乐观锁；前端已接线并限制可选目标 |
 | A11 | `charger.js:25 createRestartCommand` | POST `/admin/chargers/{chargerId}/restart-commands` | `{confirm: true, reason}`（幂等键） | 202 `{commandNo, status}` | POST `/admin/chargers/{chargerId}/restart` | 需改造 | 路径；Go 契约未定义 `confirm` 字段（二次确认由前端承担）；响应语义一致 |
-| A12 | `charger.js:34 fetchDeviceCommand` | GET `/admin/device-commands/{commandNo}` | — | `PENDING/RUNNING/SUCCEEDED/FAILED` | — | 后端缺失 | Go 命令结果持久化在 internal 域，未暴露管理端查询 |
+| A12 | `charger.js:34 fetchDeviceCommand` | GET `/admin/device-commands/{commandNo}` | — | `PENDING/RUNNING/SUCCEEDED/FAILED` | GET `/admin/device-commands/{commandId}` | 需改造 | B 线已实现：标识为 **commandId**；回执模型为 `{result: COMPLETED\|FAILED, applied}`（回执未到 404），前端已恢复轮询并映射到既有命令状态面板 |
 | A13 | `flow.js:6 fetchFlows` | GET `/admin/flows` | `{status, stationId, chargerId, userId, page, pageSize}` | `{items, meta}` | GET `/admin/orders` | 需改造 | 术语+参数：Go 支持 `orderNo/status`+分页，无 `stationId/chargerId/userId` 过滤 |
 | A14 | `flow.js:11 forceReleaseFlow` | POST `/admin/flows/{flowNo}/force-releases` | `{confirm, reason, nextChargerStatus, flowVersion}`（幂等键） | — | POST `/admin/chargers/{chargerId}/release` | 需改造 | 按设备而非流程号定位；Go 幂等键必填（前端已带） |
 | A15 | `ops.js:6 fetchAuditLogs` | GET `/admin/audit-logs` | `{actorId, action, targetType, targetId, fromAt, toAt, page, pageSize}` | `{items, meta}` | GET `/admin/audit` | 需改造 | 路径；`targetType/targetId→resourceType/resourceId`；时间范围不支持（C8） |
@@ -102,7 +102,7 @@
 | A19 | `station.js:6 fetchStations` | GET `/admin/stations` | `{status, adcode, keyword, page, pageSize}` | `{items, meta}` | GET `/admin/stations` | 需改造 | 路径一致；`adcode` 不支持，其余参数待 B-01 对照 |
 | A20 | `station.js:11 createStation` | POST `/admin/stations` | 站点 + `initialCharger`（幂等键） | — | POST `/admin/stations` | 已匹配 | 路径与方法一致；body（含 `initialCharger` 结构）待 B-01 逐字段对照 |
 | A21 | `station.js:16 updateStation` | PUT `/admin/stations/{stationId}` | `{name?/address?/adcode?/latitudeE6?/longitudeE6?/businessHours?/version}`（幂等键） | — | — | 后端缺失 | Go 无修改站点端点 |
-| A22 | `station.js:23 setStationEnabled` | POST `/admin/stations/{stationId}/enable\|disable` | `{reason, version}`（幂等键） | — | — | 后端缺失 | Go 无站点启停端点（枚举含 DISABLED 但无管理入口） |
+| A22 | `station.js:23 setStationEnabled` | POST `/admin/stations/{stationId}/enable\|disable` | `{reason, version}`（幂等键） | — | PUT `/admin/stations/{stationId}/status` | 需改造 | B 线已实现：body 为 `{status: OPEN\|CLOSED\|DISABLED, reason}`，接受 OPEN↔CLOSED 等四种迁移；前端已接线（启停布尔映射 OPEN/DISABLED） |
 | A23 | `station.js:34 fetchTariffs` | GET `/admin/tariffs` | `{adcode, effectiveAt, page, pageSize}` | 价格版本列表 | — | 后端缺失 | 模型差异：Go 仅有设备级费率 `GET /admin/chargers/{chargerId}/tariff`，无行政区基础价格版本 |
 | A24 | `station.js:39 createTariff` | POST `/admin/tariffs` | 价格版本（幂等键） | — | — | 后端缺失 | 同上 |
 | A25 | `station.js:44 createPriceAdjustment` | POST `/admin/price-adjustments` | `{adjustmentBp…}`（幂等键） | — | — | 后端缺失 | Go 无服务费调整域 |
@@ -111,7 +111,7 @@
 | A28 | `user.js:9 fetchUsers` | GET `/admin/users` | `{status, phoneExact, phoneLast4, page, pageSize, sort}` | `{items, meta}` | GET `/admin/users` | 需改造 | 路径一致；Go 支持 `keyword/status`+分页；`phoneExact/phoneLast4/sort` 不支持（隐私口径一致：无模糊扫描） |
 | A29 | `user.js:14 fetchUser` | GET `/admin/users/{userId}` | — | 脱敏手机号、钱包汇总、会话数、活动流程摘要 | GET `/admin/users/{userId}` | 需改造 | 路径一致；Go 返回 `{id, phone, displayName, avatarUrl, status, balanceCent, createdAt, deletedAt}`，无会话数/活动流程摘要 |
 | A30 | `user.js:19 setUserStatus` | PUT `/admin/users/{userId}/status` | `{status(0|1), reason, version}`（幂等键） | — | POST `/admin/users/{userId}/freeze`、`/unfreeze` | 需改造 | 方法/路径/body 全不同；Go 无 `version` 乐观锁 |
-| A31 | `user.js:28 fetchUserOrders` | GET `/admin/users/{userId}/orders` | `{status(60/70/90), page, pageSize}` | `{items, meta}`（写审计） | GET `/admin/orders` | 需改造 | Go 无按用户过滤的订单列表（仅 `orderNo/status`）；数字状态码 → 字符串枚举（C7） |
+| A31 | `user.js:28 fetchUserOrders` | GET `/admin/users/{userId}/orders` | `{status(60/70/90), page, pageSize}` | `{items, meta}`（写审计） | GET `/admin/orders?userId=` | 需改造 | B 线已实现 userId 过滤：前端已接线（状态数字码 → 字符串枚举，行形状归一化） |
 | A32 | `ml.js:17 fetchPredictions` | GET `/admin/predictions` | `{stationId, horizonHour, fromAt}` | 预测结果 | — | 后端缺失 | ML 属 A-07 |
 | A33 | `ml.js:23 startMlTask` | POST `/admin/ml-tasks` | `{taskType, horizonHours?}`（幂等键） | `taskNo` | — | 后端缺失 | 同上 |
 | A34 | `ml.js:28 fetchMlTask` | GET `/admin/ml-tasks/{taskNo}` | — | 任务状态 | — | 后端缺失 | 同上 |
@@ -135,20 +135,23 @@
 
 | Go 端点 | 验收场景依赖 | 说明 |
 |---|---|---|
-| POST `/orders/{orderNo}/appeal` | 用户链路 13（提交申诉） | 前端用户端无任何申诉调用 |
 | DELETE `/me` | 账号注销（资料域） | 前端未提供注销入口 |
-| GET/PUT `/me/profile` | 资料展示与修改 | 前端以 `/user/me` 合并视图替代（见 U6/U7） |
-| GET `/admin/appeals`、POST `/admin/appeals/{appealId}/approve` | 管理链路 8/9（申诉队列与审核） | 前端管理端无申诉页面 |
 | POST `/admin/orders/{orderNo}/refund` | 退款与账务一致性验证 | 前端管理端无退款入口 |
+
+> 本轮已接线并从本清单移除：用户申诉、资料读写（/me/profile）、管理端申诉队列与审核、按用户查询订单。
 
 ## 7. 汇总
 
 | 范围 | 登记数 | 已匹配 | 需改造 | 后端缺失 | BLOCKED |
 |---|---|---|---|---|---|
-| 用户端 | 31 | 0 | 22 | 8 | 1（U31） |
-| 管理端 | 34 | 1（A20） | 12 | 21 | 0 |
+| 用户端 | 31 | 0 | 25 | 5 | 1（U31） |
+| 管理端 | 34 | 1（A20） | 16 | 17 | 0 |
 | Agent | 1 | — | — | — | 1 |
-| 合计 | 66 | 1 | 34 | 29 | 2 |
+| 合计 | 66 | 1 | 41 | 22 | 2 |
+
+> 二轮更新（B 线第二批交付后）：U4 注册、U8/U9 头像 URL、A10 桩状态、A12 命令查询（commandId）、
+> A22 站点状态、A31 按用户订单由"后端缺失"改为"需改造"并已完成前端接线；A9/A21/A16-A18 等
+> 其余后端缺失项状态不变。
 
 > 用户端 U17（结算）按"需改造"计入（语义由 `POST /orders/{orderNo}/stop` + 回执驱动结算承接）。
 
@@ -172,3 +175,6 @@ A1/A4（`deviceId`、`mustChangePassword`）、C6（错误码 23）。
 6. REAUTH 降级开关：在 B-01 裁决前隐藏依赖重验证的管理端操作并提示"暂未开放"（A2、C6）。
 7. Agent 降级：`/user/agent/chat` 返回 404/501 时展示"AI 助手暂未开放"（U31）。
 8. 每完成一个模块按任务文档 §A-03/§A-04 提交截图、Network 证据、成功/失败样例与自动化测试。
+
+> 二轮同步：上述 1-7 已落地；B 线第二批交付的六项能力（注册、头像 URL、按用户订单、
+> 站点状态、充电桩状态、命令查询 commandId）已全部接线并通过两端测试。

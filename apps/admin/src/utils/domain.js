@@ -14,8 +14,8 @@ export const CHARGER_STATUS = [
   { value: 4, key: 'restarting', label: '重启中', tone: 'warn' }
 ]
 
-/** 可通过 PUT /chargers/{id}/status 直接设置的状态（在用状态必须走重启/受控释放）。 */
-export const CHARGER_SETTABLE_STATUS = [0, 2, 3]
+/** 可通过 PUT /chargers/{id}/status 直接设置的目标状态（Go 契约只接受 IDLE/DISABLED；故障设备置空闲即恢复）。 */
+export const CHARGER_SETTABLE_STATUS = [0, 3]
 
 /** 充电桩类型：0 交流慢充、1 直流快充。 */
 export const CHARGER_TYPES = [

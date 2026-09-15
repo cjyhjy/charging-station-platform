@@ -15,6 +15,7 @@ import {
   setSessionExpiredHandler
 } from '../src/api/http'
 import { chatWithAgent } from '../src/api/agent'
+import { registerAccount, updateProfile } from '../src/api/auth'
 import { rechargeWallet } from '../src/api/charging'
 import { fetchStations } from '../src/api/station'
 
@@ -170,6 +171,33 @@ describe('幂等键与查询参数', () => {
 
     await rechargeWallet(10000, 'fixed-key-1')
     expect(fetchMock.mock.calls[1][1].headers['Idempotency-Key']).toBe('fixed-key-1')
+  })
+
+  it('注册（POST /auth/user/register）返回登录会话，不携带幂等键', async () => {
+    const fetchMock = mockFetch(async () =>
+      jsonResponse(envelope({ accessToken: 'reg-token-1', expiresAt: 1893456000, identity: { id: 3, role: 'USER', displayName: '李先生', status: 'ACTIVE' } }), { status: 201 })
+    )
+    const session = await registerAccount({ phone: '13800138000', password: 'ncs-New-2026-pw', smsCode: '123456' })
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/auth/user/register')
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST')
+    expect(fetchMock.mock.calls[0][1].headers['Idempotency-Key']).toBeUndefined()
+    // username 可选：缺省时不提交，服务端以手机号命名。
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ phone: '13800138000', password: 'ncs-New-2026-pw', smsCode: '123456' })
+    expect(session.accessToken).toBe('reg-token-1')
+    expect(session.user.displayName).toBe('李先生')
+  })
+
+  it('资料更新（PUT /me/profile）支持昵称与头像 URL 字段', async () => {
+    const fetchMock = mockFetch(async () => jsonResponse(envelope({ id: 3, displayName: '李先生', avatarUrl: 'https://cdn.example.com/a.png', status: 'ACTIVE', registeredAt: '2026-09-02T12:00:00Z' })))
+    const data = await updateProfile({ displayName: '李先生', avatarUrl: 'https://cdn.example.com/a.png' })
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/me/profile')
+    expect(fetchMock.mock.calls[0][1].method).toBe('PUT')
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ displayName: '李先生', avatarUrl: 'https://cdn.example.com/a.png' })
+    // 归一化：注册时间 ISO → Unix 秒，头像回落到 user.avatarUrl。
+    expect(data.user.registeredAt).toBe(1788350400)
+    expect(data.user.avatarUrl).toBe('https://cdn.example.com/a.png')
   })
 
   it('AI 助手会话是只读 POST，不带 Idempotency-Key，并使用更长的超时预算', async () => {

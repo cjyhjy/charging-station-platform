@@ -126,12 +126,19 @@ export function mapAdminIdentity(identity) {
 /** Go 订单 → 旧活动流程行（flowNo 即订单号；版本字段 Go 契约没有，恒为 0）。 */
 export function mapOrderToFlow(raw) {
   if (!raw || typeof raw !== 'object') return null
+  const createdAt = isoToUnixSecond(raw.createdAt)
+  const updatedAt = isoToUnixSecond(raw.updatedAt)
   return {
     ...raw,
     flowNo: raw.orderNo,
     status: mapOrderStatus(raw.status),
     statusText: mapOrderStatusText(raw.status),
-    version: 0
+    version: 0,
+    stationName: raw.stationName || `站点 ${raw.stationId ?? '—'}`,
+    chargerCode: raw.chargerCode || (raw.chargerId != null ? `#${raw.chargerId}` : ''),
+    energyMwh: Number.isFinite(raw.energyWh) ? raw.energyWh * 1000 : null,
+    startedAt: createdAt,
+    durationSec: updatedAt > createdAt ? updatedAt - createdAt : 0
   }
 }
 

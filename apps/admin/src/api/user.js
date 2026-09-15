@@ -1,5 +1,5 @@
 import { api, unsupported } from './http'
-import { flattenPage, mapUser, mapWalletEntry, legacyToUserStatus } from './contract'
+import { flattenPage, mapOrderToFlow, mapUser, mapWalletEntry, legacyToOrderStatus, legacyToUserStatus } from './contract'
 
 /**
  * 用户管理接口（Go 契约）。
@@ -44,7 +44,18 @@ export function fetchUserTransactions(userId, { type, page, pageSize } = {}) {
     .then(data => ({ ...data, items: (Array.isArray(data.items) ? data.items : []).map(mapWalletEntry) }))
 }
 
-/** 用户订单历史：Go 契约 /admin/orders 暂无按用户过滤（待 B-01 补参数）。 */
-export function fetchUserOrders() {
-  return unsupported('按用户查询订单在 Go 后端暂未提供（待 B-01 补充过滤参数）')
+/**
+ * 用户订单历史（GET /admin/orders?userId=）：Go 契约的 AdminOrderFilter 已支持
+ * userId 过滤。行形状与用户端订单列表一致（状态归一化 + 时间/电量换算）。
+ */
+export function fetchUserOrders(userId, { status, page, pageSize } = {}) {
+  return api
+    .get('/admin/orders', {
+      userId,
+      status: status === undefined || status === null ? undefined : legacyToOrderStatus(status),
+      page,
+      pageSize
+    })
+    .then(flattenPage)
+    .then(data => ({ ...data, items: (Array.isArray(data.items) ? data.items : []).map(mapOrderToFlow) }))
 }

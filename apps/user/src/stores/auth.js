@@ -86,6 +86,11 @@ export const useAuthStore = defineStore('userAuth', {
       return this.runLogin(() => authApi.loginWithPassword({ loginName, password }))
     },
 
+    /** 用户名密码注册（Go 契约 201 返回登录会话，注册即登录）。 */
+    async register({ username, phone, password, smsCode }) {
+      return this.runLogin(() => authApi.registerAccount({ username, phone, password, smsCode }))
+    },
+
     async runLogin(call) {
       this.loading = true
       this.error = null
@@ -133,6 +138,23 @@ export const useAuthStore = defineStore('userAuth', {
         this.profile = await authApi.updateNickname(nickname)
         if (this.profile?.user) this.user = this.profile.user
         this.notice = '昵称已更新'
+        this.error = null
+        return true
+      } catch (error) {
+        this.handleError(error)
+        return false
+      } finally {
+        this.loading = false
+      }
+    },
+
+    /** 头像地址（Go 契约 avatarUrl 字符串；无文件上传端点）。 */
+    async updateAvatarUrl(avatarUrl) {
+      this.loading = true
+      try {
+        this.profile = await authApi.updateAvatarUrl(avatarUrl)
+        if (this.profile?.user) this.user = this.profile.user
+        this.notice = avatarUrl ? '头像地址已更新' : '已清除头像地址'
         this.error = null
         return true
       } catch (error) {

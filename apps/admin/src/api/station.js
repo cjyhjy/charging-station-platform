@@ -35,9 +35,19 @@ export function updateStation() {
   return unsupported('修改站点在 Go 后端暂未提供（待 B-01 契约决策）')
 }
 
-/** 站点启停：Go 契约暂无该端点。 */
-export function setStationEnabled() {
-  return unsupported('站点启停在 Go 后端暂未提供（待 B-01 契约决策）')
+/**
+ * 站点状态变更（PUT /admin/stations/{stationId}/status）：Go 契约接受
+ * OPEN<->CLOSED、OPEN→DISABLED、CLOSED→DISABLED、DISABLED→OPEN。
+ * 旧的启用/停用布尔语义映射为 OPEN/DISABLED。
+ */
+export function setStationEnabled(stationId, enabled, { reason, idempotencyKey } = {}) {
+  return api
+    .put(
+      `/admin/stations/${encodeURIComponent(stationId)}/status`,
+      { status: enabled ? 'OPEN' : 'DISABLED', reason },
+      { idempotent: true, idempotencyKey }
+    )
+    .then(data => ({ ...data, enabled: data.status === 'OPEN' }))
 }
 
 /** 行政区基础价格版本：Go 契约的费率是设备级的（见 charger tariff），该域暂缺。 */

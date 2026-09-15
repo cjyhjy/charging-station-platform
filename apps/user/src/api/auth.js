@@ -28,6 +28,21 @@ export function loginWithPassword({ loginName, password }) {
   return api.post('/auth/user/login', { account: loginName, password }).then(mapLoginSession)
 }
 
+/**
+ * 用户名密码注册（Go 契约 201 返回登录会话）：phone/password/smsCode 必填，
+ * username 可选（缺省时以手机号命名）。验证码用同一短信端点获取。
+ */
+export function registerAccount({ username, phone, password, smsCode }) {
+  return api
+    .post('/auth/user/register', {
+      phone,
+      password,
+      smsCode,
+      ...(username ? { username } : {})
+    })
+    .then(mapLoginSession)
+}
+
 /** 退出当前会话；重复退出幂等成功，因此不需要幂等键。 */
 export function logout() {
   return api.post('/auth/logout')
@@ -40,15 +55,23 @@ export function fetchProfile() {
   )
 }
 
-/** 修改昵称（Go 字段为 displayName；契约无 version 乐观锁）。 */
-export function updateNickname(nickname) {
-  return api.put('/me/profile', { displayName: nickname }).then(data => ({ user: mapProfileView(data) }))
+/**
+ * 修改资料（Go 契约 ProfileUpdateRequest：displayName / avatarUrl 至少一项，
+ * 无版本乐观锁）。头像为 URL 字段：Go 契约不提供文件上传，前端以 URL 方式设置。
+ */
+export function updateProfile(patch) {
+  return api.put('/me/profile', patch).then(data => ({ user: mapProfileView(data) }))
 }
 
-/**
- * 注册端点说明：Go 契约没有用户名+密码注册，验证码登录即自动注册，
- * 因此旧 /user/auth/register 不再保留前端入口（B-01 若补契约再恢复）。
- */
+/** 修改昵称。 */
+export function updateNickname(nickname) {
+  return updateProfile({ displayName: nickname })
+}
+
+/** 修改头像地址（Go 契约 avatarUrl 字符串，≤512，空串表示无头像）。 */
+export function updateAvatarUrl(avatarUrl) {
+  return updateProfile({ avatarUrl })
+}
 
 function mapLoginSession(session) {
   return { ...session, user: mapIdentity(session?.identity) }

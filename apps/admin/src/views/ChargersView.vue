@@ -263,7 +263,7 @@ async function submitRestart({ reason }) {
         <div>
           <h2>最近一次远程重启</h2>
           <p class="panel__hint">
-            命令编号 {{ chargers.command.commandNo }} · 提交于 {{ formatDateTime(chargers.command.createdAt) }}
+            命令编号 {{ chargers.command.commandId }} · 提交于 {{ formatDateTime(chargers.command.createdAt) }}
           </p>
         </div>
         <div class="panel__row">

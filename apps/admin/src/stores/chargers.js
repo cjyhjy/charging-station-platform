@@ -173,7 +173,7 @@ export const useChargersStore = defineStore('adminChargers', {
       }
     },
 
-    /** 远程重启（Go 契约）：202 返回 {commandNo, status(PENDING)}；无命令查询端点，不自动轮询。 */
+    /** 远程重启（Go 契约）：202 返回 {commandId, status}，受理后轮询命令回执结果。 */
     async restart(charger, reason) {
       const auth = useAuthStore()
       this.saving = true
@@ -184,17 +184,16 @@ export const useChargersStore = defineStore('adminChargers', {
           createRestartCommand(charger.id, { reason }, { idempotencyKey })
         )
         this.command = {
-          commandNo: data.commandNo || '',
+          commandId: data.commandId || '',
           status: data.status || 'PENDING',
           chargerStatus: null,
           createdAt: toInteger(data.createdAt) ?? 0,
           completedAt: null,
           errorSummary: '',
-          chargerCode: charger.code,
-          /** Go 契约暂无命令查询端点：面板仅展示受理结果，最新状态以设备列表刷新为准。 */
-          noQueryEndpoint: true
+          chargerCode: charger.code
         }
-        this.notice = `重启指令已受理（${data.commandNo || '无编号'}），Go 后端暂无命令查询接口，请稍后刷新列表查看设备状态`
+        this.notice = `重启指令已受理（${data.commandId || '无编号'}），正在等待设备回执`
+        if (this.command.commandId) this.startPolling()
         return true
       } catch (error) {
         this.error = error?.userMessage || '远程重启失败'
@@ -204,15 +203,25 @@ export const useChargersStore = defineStore('adminChargers', {
       }
     },
 
-    /** §7.10 查询一次命令状态；终态时停止轮询并刷新设备列表。 */
+    /**
+     * 查询一次命令回执（GET /admin/device-commands/{commandId}）。
+     * Go 契约：回执未到达返回 404 —— 按"仍在等待"处理；回执到达后 result
+     * COMPLETED→SUCCEEDED、FAILED→FAILED，终态时停止轮询并刷新设备列表。
+     */
     async pollCommand() {
-      if (!this.command?.commandNo) return null
-      const data = await fetchDeviceCommand(this.command.commandNo)
+      if (!this.command?.commandId) return null
+      let data
+      try {
+        data = await fetchDeviceCommand(this.command.commandId)
+      } catch (error) {
+        if (error?.status === 404) return this.command
+        throw error
+      }
       this.command = {
         ...this.command,
-        status: data.status || this.command.status,
-        completedAt: toInteger(data.completedAt),
-        errorSummary: typeof data.errorSummary === 'string' ? data.errorSummary : ''
+        status: data.result === 'COMPLETED' ? 'SUCCEEDED' : data.result === 'FAILED' ? 'FAILED' : this.command.status,
+        completedAt: toInteger(data.recordedAt ? Date.parse(data.recordedAt) / 1000 : null),
+        errorSummary: data.result === 'FAILED' ? '设备回执报告重启失败' : ''
       }
       if (COMMAND_STATUS[this.command.status]?.terminal) {
         this.stopPolling()

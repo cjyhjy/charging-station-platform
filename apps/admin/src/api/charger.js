@@ -20,7 +20,10 @@ export function fetchChargers(params = {}) {
     .then(data => ({ ...data, items: (Array.isArray(data.items) ? data.items : []).map(mapCharger) }))
 }
 
-/** 远程重启：Go 返回 202 + {commandNo, status}，无命令查询端点（见 fetchDeviceCommand）。 */
+/**
+ * 远程重启：Go 返回 202 + {commandId, status}。commandId 是
+ * charger_command_outcomes.command_id 的业务标识（非订单号）。
+ */
 export function createRestartCommand(chargerId, { reason }, { idempotencyKey } = {}) {
   return api.post(
     `/admin/chargers/${encodeURIComponent(chargerId)}/restart`,
@@ -29,17 +32,35 @@ export function createRestartCommand(chargerId, { reason }, { idempotencyKey } =
   )
 }
 
+/**
+ * 命令状态查询（GET /admin/device-commands/{commandId}）：返回平台为该命令记录的
+ * 网关回执结果（result: COMPLETED/FAILED + applied）。回执未到达时 Go 返回 404，
+ * 调用方按"仍在等待回执"处理。
+ */
+export function fetchDeviceCommand(commandId) {
+  return api.get(`/admin/device-commands/${encodeURIComponent(commandId)}`)
+}
+
+/**
+ * 直接设置设备状态（PUT /admin/chargers/{chargerId}/status）：Go 契约只接受
+ * IDLE/DISABLED 两个目标状态（IDLE<->DISABLED、FAULT→IDLE/DISABLED；
+ * OCCUPIED/RESTARTING 一律 409）。旧数字码 0→IDLE、3→DISABLED。
+ */
+export function setChargerStatus(chargerId, { targetStatus, reason }, { idempotencyKey } = {}) {
+  const status = targetStatus === 0 ? 'IDLE' : targetStatus === 3 ? 'DISABLED' : null
+  if (!status) {
+    return unsupported('Go 契约只允许把设备置为空闲（IDLE）或已停用（DISABLED）')
+  }
+  return api
+    .put(
+      `/admin/chargers/${encodeURIComponent(chargerId)}/status`,
+      { status, reason },
+      { idempotent: true, idempotencyKey }
+    )
+    .then(data => ({ ...data, status: data.status === 'IDLE' ? 0 : 3 }))
+}
+
 /** 批量创建设备：Go 契约暂无该端点（待 B-01 决策）。 */
 export function createChargersBatch() {
   return unsupported('批量创建设备在 Go 后端暂未提供（待 B-01 契约决策）')
-}
-
-/** 直接设置设备状态：Go 契约暂无该端点（仅有 release/restart）。 */
-export function setChargerStatus() {
-  return unsupported('直接设置设备状态在 Go 后端暂未提供（待 B-01 契约决策）')
-}
-
-/** 命令状态查询：Go 契约暂无该端点，重启结果经设备列表刷新观察。 */
-export function fetchDeviceCommand() {
-  return unsupported('命令状态查询在 Go 后端暂未提供；请刷新设备列表查看结果')
 }

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { useChargersStore } from '../src/stores/chargers'
+import { useChargersStore, COMMAND_POLL_INTERVAL_MS } from '../src/stores/chargers'
 import { failResponse, installFetch, okResponse } from './helpers'
 
 /** Go Charger 契约字段（type 为 AC/DC 字符串，status 为字符串枚举）。 */
@@ -81,12 +81,25 @@ describe('设备列表查询', () => {
   })
 })
 
-describe('设备状态变更与批量创建（Go 契约暂缺）', () => {
-  it('直接设置设备状态显式失败，不发起任何请求', async () => {
+describe('设备状态变更（Go 契约：PUT status，仅 IDLE/DISABLED）', () => {
+  it('提交 status/reason 与幂等键，成功后就地更新该行', async () => {
+    harness = installFetch([okResponse({ chargerId: 11, chargerCode: 'ZGC-DC-01', status: 'DISABLED' })])
+    chargers.items = [{ ...MAPPED_ROW }]
+    await expect(chargers.setStatus(chargers.items[0], 3, '人工巡检离线停用')).resolves.toBe(true)
+
+    expect(harness.indexOf('PUT', '/admin/chargers/11/status')).toBe(0)
+    // Go 契约 body 字段为 status（IDLE/DISABLED），无版本乐观锁。
+    expect(harness.bodyOf(0)).toEqual({ status: 'DISABLED', reason: '人工巡检离线停用' })
+    expect(harness.headersOf(0)['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/)
+    expect(chargers.items[0].status).toBe(3)
+    expect(harness.count()).toBe(1)
+  })
+
+  it('目标状态 2（故障）不在 Go 契约允许范围内：显式失败且不发起请求', async () => {
     harness = installFetch([])
     chargers.items = [{ ...MAPPED_ROW }]
-    await expect(chargers.setStatus(chargers.items[0], 2, '人工巡检发现故障')).resolves.toBe(false)
-    expect(chargers.error).toContain('暂未提供')
+    await expect(chargers.setStatus(chargers.items[0], 2, '标记故障')).resolves.toBe(false)
+    expect(chargers.error).toContain('IDLE')
     expect(harness.count()).toBe(0)
   })
 
@@ -99,9 +112,16 @@ describe('设备状态变更与批量创建（Go 契约暂缺）', () => {
   })
 })
 
-describe('远程重启（Go 契约）', () => {
-  it('创建重启命令后展示受理结果；无命令查询端点，不自动轮询', async () => {
-    harness = installFetch([okResponse({ commandNo: 'CMD202609020001', status: 'PENDING' })])
+describe('远程重启与命令查询（Go 契约，标识为 commandId）', () => {
+  it('创建重启命令后按 commandId 轮询：404 视为等待回执，回执到达进入终态', async () => {
+    vi.useFakeTimers()
+    harness = installFetch([
+      okResponse({ commandId: 'CMD202609160001', status: 'PENDING' }),
+      // 第一轮轮询：回执未到达，Go 返回 404 —— 按"仍在等待"处理。
+      failResponse({ status: 404, code: 4, userMessage: '命令不存在或尚未产生回执' }),
+      // 第二轮轮询：网关回执已记录。
+      okResponse({ commandId: 'CMD202609160001', chargerId: 11, action: 'RESTART', result: 'COMPLETED', applied: true, recordedAt: '2026-09-16T12:00:05Z' })
+    ])
 
     chargers.items = [{ ...MAPPED_ROW }]
     await expect(chargers.restart(chargers.items[0], '远程恢复测试')).resolves.toBe(true)
@@ -110,16 +130,36 @@ describe('远程重启（Go 契约）', () => {
     // Go 契约不需要 confirm 字段（二次确认由前端承担），仅提交原因。
     expect(harness.bodyOf(0)).toEqual({ reason: '远程恢复测试' })
     expect(harness.headersOf(0)['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/)
-    expect(chargers.command.commandNo).toBe('CMD202609020001')
+    expect(chargers.command.commandId).toBe('CMD202609160001')
+    expect(chargers.commandPolling).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(COMMAND_POLL_INTERVAL_MS)
+    expect(harness.indexOf('GET', '/admin/device-commands/CMD202609160001')).toBe(1)
+    // 404 = 回执未到，命令保持受理态，不写入错误信息。
     expect(chargers.command.status).toBe('PENDING')
-    // Go 契约没有命令状态查询：不进入轮询，提示以列表刷新为准。
+    expect(chargers.command.errorSummary).toBe('')
+
+    await vi.advanceTimersByTimeAsync(COMMAND_POLL_INTERVAL_MS)
+    expect(chargers.command.status).toBe('SUCCEEDED')
+    expect(chargers.commandFinished).toBe(true)
     expect(chargers.commandPolling).toBe(false)
-    expect(chargers.notice).toContain('稍后刷新列表')
+    // 终态后自动刷新设备列表
+    expect(harness.indexOf('GET', '/admin/chargers')).toBeGreaterThan(0)
+    vi.useRealTimers()
   })
 
-  it('命令状态查询不可用：显式失败而不是打在真实 404 上', async () => {
-    chargers.command = { commandNo: 'CMD-1', status: 'PENDING' }
-    await expect(chargers.pollCommand()).rejects.toThrow('暂未提供')
+  it('回执报告 FAILED 时命令进入失败态', async () => {
+    vi.useFakeTimers()
+    harness = installFetch([
+      okResponse({ commandId: 'CMD-2', status: 'PENDING' }),
+      okResponse({ commandId: 'CMD-2', chargerId: 11, action: 'RESTART', result: 'FAILED', applied: false, recordedAt: '2026-09-16T12:00:06Z' })
+    ])
+    chargers.items = [{ ...MAPPED_ROW }]
+    await chargers.restart(chargers.items[0], '远程恢复测试')
+    await vi.advanceTimersByTimeAsync(COMMAND_POLL_INTERVAL_MS)
+    expect(chargers.command.status).toBe('FAILED')
+    expect(chargers.commandTone).toBe('danger')
+    vi.useRealTimers()
   })
 
   it('重启失败时保留可读错误', async () => {

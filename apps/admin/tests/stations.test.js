@@ -117,14 +117,25 @@ describe('站点写入（Go 契约）', () => {
     expect(stations.notice).toContain('ZGC2')
   })
 
-  it('修改站点与站点启停在 Go 契约中暂未提供：显式失败且不发起请求', async () => {
+  it('修改站点在 Go 契约中暂未提供：显式失败且不发起请求', async () => {
     harness = installFetch([])
     stations.items = [{ ...GO_STATION, version: 0 }]
     await expect(stations.edit(stations.items[0], { name: '新名称' })).resolves.toBe(false)
     expect(stations.error).toContain('暂未提供')
-    await expect(stations.setEnabled(stations.items[0], false, '设备维护停用')).resolves.toBe(false)
-    expect(stations.error).toContain('暂未提供')
     expect(harness.count()).toBe(0)
+  })
+
+  it('站点状态变更走 PUT /status（OPEN/DISABLED），成功后就地更新该行', async () => {
+    harness = installFetch([okResponse({ id: 1, code: 'ZGC', name: 'NCS 中关村站', status: 'DISABLED' })])
+    stations.items = [{ ...GO_STATION, enabled: true, version: 0 }]
+    await stations.setEnabled(stations.items[0], false, '设备维护停用')
+
+    expect(harness.indexOf('PUT', '/admin/stations/1/status')).toBe(0)
+    // Go 契约 body 为 status（OPEN/CLOSED/DISABLED）+ reason；启停布尔映射为 OPEN/DISABLED。
+    expect(harness.bodyOf(0)).toEqual({ status: 'DISABLED', reason: '设备维护停用' })
+    expect(harness.headersOf(0)['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/)
+    expect(stations.items[0].enabled).toBe(false)
+    expect(harness.count()).toBe(1)
   })
 })
 

@@ -89,12 +89,23 @@ describe('用户详情与账务', () => {
     expect(users.detail.version).toBe(0)
   })
 
-  it('按用户查询订单在 Go 契约中暂未提供：显式失败且不发起请求', async () => {
-    harness = installFetch([])
+  it('订单历史按用户过滤请求 /admin/orders?userId=，状态映射为 Go 枚举', async () => {
+    harness = installFetch([
+      okResponse(goPage([
+        {
+          orderNo: 'ORD-1', userId: 7, stationId: 1, chargerId: 11, status: 'COMPLETED',
+          amountCent: 3200, energyWh: 12500, createdAt: '2026-09-02T12:00:00Z', updatedAt: '2026-09-02T13:00:00Z'
+        }
+      ]))
+    ])
     await users.loadOrders(7, { status: 60 })
-    expect(users.orders).toEqual([])
-    expect(users.ordersError).toContain('暂未提供')
-    expect(harness.count()).toBe(0)
+    expect(harness.urlOf(0).startsWith('/api/v1/admin/orders')).toBe(true)
+    expect(harness.queryOf(0).get('userId')).toBe('7')
+    expect(harness.queryOf(0).get('status')).toBe('COMPLETED')
+    expect(users.orders[0].orderNo).toBe('ORD-1')
+    expect(users.orders[0].statusText).toBe('已完成')
+    expect(users.orders[0].energyMwh).toBe(12500000)
+    expect(users.ordersError).toBe('')
   })
 
   it('用户账务查询走 /admin/users/{id}/transactions', async () => {
