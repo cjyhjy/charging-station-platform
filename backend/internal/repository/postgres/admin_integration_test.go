@@ -182,6 +182,41 @@ func TestAdminUserAndOrderLists(t *testing.T) {
 	if orders.Items[0].PaymentStatus != "PENDING" {
 		t.Fatalf("payment status = %q", orders.Items[0].PaymentStatus)
 	}
+
+	// The management UI opens a user's detail page and asks for that user's
+	// orders, so the list must be filterable by user. Two users with one order
+	// each is the smallest state that can tell the filter apart from "everything".
+	_, userB, _, _, chargerB := orderFlowFixture(t, db, ctx, uniqueSuffix(t))
+	orderStore, err := NewOrderStore(db)
+	if err != nil {
+		t.Fatalf("NewOrderStore() error = %v", err)
+	}
+	otherOrder, err := orderStore.CreateOrder(ctx, order.CreateOrderCommand{
+		UserID: userB, ChargerID: chargerB, IdempotencyKey: "adm-other-" + suffix, RequestHash: "h", TraceID: "t",
+	})
+	if err != nil {
+		t.Fatalf("second user's order: %v", err)
+	}
+	filtered, err := store.ListOrders(ctx, admin.AdminOrderFilter{Page: 1, PageSize: 100, UserID: userB})
+	if err != nil {
+		t.Fatalf("ListOrders(userId=%d) error = %v", userB, err)
+	}
+	if len(filtered.Items) != 1 || filtered.Items[0].OrderNo != otherOrder.OrderNo || filtered.Items[0].UserID != userB {
+		t.Fatalf("filtered orders = %#v, want exactly %s for user %d", filtered.Items, otherOrder.OrderNo, userB)
+	}
+	if filtered.Meta.Total != 1 {
+		t.Fatalf("filtered total = %d, want 1", filtered.Meta.Total)
+	}
+	// The first user's order must not appear in the second user's page.
+	own, err := store.ListOrders(ctx, admin.AdminOrderFilter{Page: 1, PageSize: 100, UserID: userA})
+	if err != nil {
+		t.Fatalf("ListOrders(userId=%d) error = %v", userA, err)
+	}
+	for _, item := range own.Items {
+		if item.UserID != userA {
+			t.Fatalf("user %d's page contains an order of user %d", userA, item.UserID)
+		}
+	}
 }
 
 func TestAdminForceReleaseIdempotencyAndBR11(t *testing.T) {

@@ -129,3 +129,10 @@
 | Agent | BLOCKED | **BLOCKED（确认）**：Go 无 `/api/v1/user/agent/chat`，前端调 `/user/agent/chat` |
 | C++ PG v10 | 不纳入 | **确认不纳入** |
 | 前端接口矩阵 | 等待补齐 | **已补齐**（`frontend-go-api-matrix.md` 第 7 节给出逐条分类与依据） |
+
+## 7. 与裁定相关的参数名结论（补充）
+
+盘点时发现订单列表存在**三方不一致**：OpenAPI 登记的是 `createdFrom`/`createdTo`，handler 此前两个都没解析（只解析 `status`），而前端发送的是 `fromAt`/`toAt`。
+
+按裁定"前端适配"处理：**保留已登记的 `createdFrom`/`createdTo`**，B 线把 handler 补齐（并同时支持 `sort`），前端把 `fromAt`/`toAt` 改为 `createdFrom`/`createdTo`。详见 `frontend-go-api-matrix.md` 第 8.2 节。
+

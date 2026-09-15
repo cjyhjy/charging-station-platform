@@ -286,3 +286,72 @@ NCS_POSTGRES_DSN=postgres://.../ncs_fe_nginx bash backend/scripts/local-stack.sh
 | BLOCKED | **7 条**：Agent chat、导航路线、ML 任务/预测、统计（A-07/A-05 范围）|
 
 **给 A 线的改造优先级建议**（按任务文档第 6 节验收场景顺序）：认证与会话 → 站点/桩 → 钱包（含 `recharges`→`top-up`）→ 订单（含 flow→order 映射）→ 评价/申诉 → 管理端列表与详情 → 其余 BACKEND_CHANGE 项排期。
+
+## 8. 裁定后的执行口径（v2，本轮冻结）
+
+裁定原则：**最少可用需求、轻量稳定、先完成 Go 后端闭环**。以下为逐项落地口径与实施状态。
+
+### 8.1 纳入本轮的 6 类后端接口
+
+| # | 接口 | 现状核对 | 实施状态 |
+| - | ---- | -------- | -------- |
+| 1 | 用户注册 | Go 只有短信登录隐式建号（`internal/auth/service.go` 无 `Register`） | **待实现**：登记 `POST /auth/user/register` → 实现 → 测试 |
+| 2 | 用户订单列表 | `ListFilter` 已有 `CreatedFrom/CreatedTo`，但 handler 只解析 `status`，且无 `sort`；OpenAPI 已登记 `createdFrom/createdTo` | **已完成**（见 8.2） |
+| 3 | 头像 URL 读取与更新 | `user_accounts.avatar_url`（0008，空串=无头像）、`GET /me/profile`、`PUT /me/profile` 均已具备 | **已具备**，仅需在契约记录中标注（上传接口不实现，前端改用 URL 字段） |
+| 4 | 管理端按用户查询订单 | `AdminOrderFilter` 无 `UserID`，SQL 不支持 | **已完成**（见 8.2） |
+| 5 | 命令/订单状态查询 | 订单状态查询已具备（`GET /orders/{orderNo}`、`GET /admin/orders`）；**命令状态查询缺失**（`charger_command_outcomes` 表已有 command_id/charger_id/order_no/action/result/applied/recorded_at） | **待实现**：登记并实现 `GET /admin/device-commands/{commandNo}` |
+| 6 | 站点/充电桩状态管理 | `stations.status`、`chargers.status` 列已存在；无状态变更接口 | **待实现**：登记并实现站点/充电桩状态变更端点 |
+
+### 8.2 本轮已完成（含原始验证）
+
+**用户订单列表参数（item 2）** —— 契约登记的是 `createdFrom`/`createdTo`/`sort`，而 handler 此前只解析 `status`（登记了却没实现）。
+
+- `internal/order/http.go`：解析 `createdFrom`/`createdTo`（RFC3339，解析失败 → 400 而不是静默忽略）与 `sort`；
+- `internal/order/types.go`：新增 `Sort` 字段与 `SortCreatedAtAsc/SortCreatedAtDesc` 常量，服务层校验 `sort` 取值与 `createdFrom < createdTo`（新增 `ErrInvalidSort`、`ErrInvalidTimeWindow`，映射 400）；
+- `internal/repository/postgres/orders.go`：`orderByClause()` 把 `sort` 翻成 `created_at ASC/DESC, id ASC/DESC`，并再次限定取值集合，绝不把调用方文本拼进 SQL；
+- `api/openapi.yaml`：`GET /orders` 增补 `sort`（enum `createdAt` / `-createdAt`，默认 `-createdAt`）。
+
+验证：`TestListAcceptsTheRegisteredQuerySurface`（handler 层：参数真的到达服务层；非法日期、`from >= to`、未登记 sort 三种情况均 400）、`TestOrderListSortAndWindowOnRealDatabase`（真实 PG：默认倒序、`createdAt` 正序、未来/过去窗口返回 0、近一小时窗口返回 2）。
+
+**管理端按用户查订单（item 4）**
+
+- `internal/admin/service.go`：`AdminOrderFilter` 增 `UserID`（0 = 不过滤）；
+- `internal/repository/postgres/admin.go`：过滤条件 `AND ($3 = 0 OR user_id = $3)`；
+- `internal/admin/http.go`：解析 `userId`，非正整数或非数字 → 400；
+- `api/openapi.yaml`：`GET /admin/orders` 增补 `userId`（integer/int64，minimum 1）。
+
+验证：`TestAdminOrderListFiltersByUser`（handler 层：`userId=42` 到达服务层；`0/-3/abc/4.2` 均 400；缺省时 UserID=0 仍列出全部）、`TestAdminUserAndOrderLists`（真实 PG：两个用户各一单，按用户过滤只返回该用户的单，total=1）。
+
+实现中修掉的一处真实缺陷：把用户过滤写成 `$5`、而 `$3/$4` 是 LIMIT/OFFSET 时，**计数查询引用了未参与类型的占位符**，PostgreSQL 直接报 `42P18 could not determine data type of parameter $3`；改为「过滤参数在前、分页参数在后」，计数查询使用同一参数列表的连续前缀。
+
+**反向验证**（移除行为后测试必须失败，均已实测）：
+
+| 回退动作 | 观察到的失败 |
+| -------- | ------------ |
+| handler 不再解析 `createdFrom/createdTo` | `http_test.go: createdFrom = <nil>, want 2026-01-01 00:00:00 +0000 UTC` |
+| 仓储忽略 `sort`（恒为倒序） | `orders_integration_test.go: ascending first item = ORD…fc6ef2cc, want the oldest ORD…cabc3dd4` |
+| 管理端不做按用户过滤 | `admin_integration_test.go: filtered orders = [...整张表...], want exactly ORD… for user 70` |
+
+质量门禁：`gofmt` 干净、`go build ./...`、`go vet ./...`、`go test -count=1 -race ./...`（17 个包 ok）。
+
+### 8.3 前端改造 / 删除 / 延期（与裁定一致）
+
+| 项 | 口径 |
+| -- | ---- |
+| 实时进度 | 前端用订单详情轮询，**不引入 WebSocket**；后端不新增进度端点 |
+| 站点报价 | 使用现有费率与订单金额推导，**不新增报价接口** |
+| 调价单 | 使用现有按桩费率更新，**不新增调价单模型** |
+| 批量建桩 | 前端**删除入口** |
+| 备份 API | 继续用部署脚本，**不开放业务 API** |
+| 管理端账号、改密、二次认证 | 本轮**删除入口** |
+| 独立 ML/统计任务 | 归入 A-07，保持 `BLOCKED` |
+| `flow` 模型 | 采用 Go 订单状态机：前端删除"报价确认""手动结算"两个独立步骤，START/STOP 由设备回执推进，STOP 成功后后端自动结算；**不新增 C++ 风格 flow 接口** |
+| 费率模型 | 采用按充电桩费率 `/admin/chargers/{chargerId}/tariff`；原 `/admin/tariffs` 全局费率页面改为按桩维护；**不新增全局费率表、不新增迁移** |
+
+### 8.4 两线执行顺序
+
+A 线先完成：① 去除 `/user` 前缀与旧登录路径；② 统一分页读 `data.meta.total`；③ 统一 Bearer/幂等键/envelope；④ 删除不纳入本轮的旧 C++ 页面入口；⑤ 接入现有 Go 用户、站点、钱包、订单与管理接口。
+B 线随后登记并实现：① 注册；② 用户订单列表（**已完成**）；③ 头像 URL（**已具备**）；④ 管理端按用户查询订单（**已完成**）；⑤ 命令/订单状态查询；⑥ 必要的站点与充电桩状态管理接口。
+
+**当前结论：前端不能立即进行完整联调，先完成全局前端适配；B 线只补上述 6 类接口，其余能力明确删除或延期 A-07。**
+

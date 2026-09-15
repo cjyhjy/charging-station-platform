@@ -159,18 +159,26 @@ WHERE ($1 = '' OR u.phone ILIKE $1 OR u.display_name ILIKE $1)
 // ListOrders returns one page of orders across all users with the payment
 // fields, optionally filtered by business number prefix and status.
 func (s *AdminStore) ListOrders(ctx context.Context, filter admin.AdminOrderFilter) (order.OrderPage, error) {
+	// $5 filters by user when the caller asked for one user's orders; 0 means no
+	// filter, which keeps the argument list fixed instead of building SQL text.
+	// The filter parameters come first and the pagination parameters last, so the
+	// count query - which has no LIMIT/OFFSET - can pass a contiguous prefix of
+	// the same argument list. Numbering the user filter $5 while $3/$4 belonged to
+	// LIMIT/OFFSET left the count query with two referenced-but-untyped
+	// placeholders and PostgreSQL rejected it with 42P18.
 	const filterSQL = `($1 = '' OR status = $1)
-  AND ($2 = '' OR order_no ILIKE $2)`
+  AND ($2 = '' OR order_no ILIKE $2)
+  AND ($3 = 0 OR user_id = $3)`
 	const pageQuery = `SELECT ` + orderSelectColumns + ` FROM charging_orders
 WHERE ` + filterSQL + `
-ORDER BY created_at DESC
-LIMIT $3 OFFSET $4`
+ORDER BY created_at DESC, id DESC
+LIMIT $4 OFFSET $5`
 	const countQuery = `SELECT count(*) FROM charging_orders WHERE ` + filterSQL
 
 	offset := (filter.Page - 1) * filter.PageSize
 	keyword := likePattern(filter.OrderNo)
 
-	rows, err := s.db.QueryContext(ctx, pageQuery, filter.Status, keyword, filter.PageSize, offset)
+	rows, err := s.db.QueryContext(ctx, pageQuery, filter.Status, keyword, filter.UserID, filter.PageSize, offset)
 	if err != nil {
 		return order.OrderPage{}, err
 	}
@@ -187,7 +195,7 @@ LIMIT $3 OFFSET $4`
 	if err := rows.Err(); err != nil {
 		return order.OrderPage{}, err
 	}
-	if err := s.db.QueryRowContext(ctx, countQuery, filter.Status, keyword).Scan(&page.Meta.Total); err != nil {
+	if err := s.db.QueryRowContext(ctx, countQuery, filter.Status, keyword, filter.UserID).Scan(&page.Meta.Total); err != nil {
 		return order.OrderPage{}, err
 	}
 	return page, nil

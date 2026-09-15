@@ -454,6 +454,15 @@ paths:
           schema:
             type: string
             format: date-time
+        - name: sort
+          in: query
+          description: |-
+            Order of the returned page. The default (-createdAt) is newest first;
+            createdAt returns the oldest first.
+          schema:
+            type: string
+            enum: [createdAt, -createdAt]
+            default: -createdAt
       responses:
         '200':
           description: Order page
@@ -1094,6 +1103,16 @@ paths:
           in: query
           schema:
             $ref: '#/components/schemas/OrderStatus'
+        - name: userId
+          in: query
+          description: |-
+            Only orders belonging to this user. Omit it to list every user's
+            orders; the management UI opens a user's detail page and asks for
+            that user's orders.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
       responses:
         '200':
           description: Admin order page

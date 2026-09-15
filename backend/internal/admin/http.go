@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/heguangV/charging-station-platform/backend/internal/auth"
 	"github.com/heguangV/charging-station-platform/backend/internal/httpapi"
@@ -477,6 +478,14 @@ func (h *Handlers) listOrders(w http.ResponseWriter, r *http.Request) {
 	if len(filter.OrderNo) > 64 {
 		writeInvalidQuery(w, r)
 		return
+	}
+	if raw := strings.TrimSpace(query.Get("userId")); raw != "" {
+		userID, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || userID < 1 {
+			writeInvalidQuery(w, r)
+			return
+		}
+		filter.UserID = userID
 	}
 	result, err := h.service.store.ListOrders(r.Context(), filter)
 	if err != nil {

@@ -108,6 +108,10 @@ type AdminOrderFilter struct {
 	PageSize int64
 	OrderNo  string
 	Status   string
+	// UserID narrows the list to one user's orders (the management UI opens a
+	// user's detail page and asks for that user's orders). Zero means "no user
+	// filter": user ids start at 1, the same convention OrderNo uses for "".
+	UserID int64
 }
 
 // Command is the contract Command payload for a device command.

@@ -21,17 +21,19 @@ import (
 
 // fakeStore records admin commands and returns canned results.
 type fakeStore struct {
-	createResult StationRecord
-	createErr    error
-	stations     StationPage
-	restartCmd   Command
-	restartErr   error
-	users        UserPage
-	orders       OrderPage
-	chargers     ChargerPage
-	restarts     []RestartCommand
-	tariffErr    error
-	releaseErr   error
+	orderFilter    AdminOrderFilter
+	orderFilterSet bool
+	createResult   StationRecord
+	createErr      error
+	stations       StationPage
+	restartCmd     Command
+	restartErr     error
+	users          UserPage
+	orders         OrderPage
+	chargers       ChargerPage
+	restarts       []RestartCommand
+	tariffErr      error
+	releaseErr     error
 }
 
 func (f *fakeStore) CreateStation(context.Context, CreateStationCommand) (StationRecord, error) {
@@ -50,7 +52,9 @@ func (f *fakeStore) ListUsers(context.Context, UserFilter) (UserPage, error) {
 	return f.users, nil
 }
 
-func (f *fakeStore) ListOrders(context.Context, AdminOrderFilter) (OrderPage, error) {
+func (f *fakeStore) ListOrders(_ context.Context, filter AdminOrderFilter) (OrderPage, error) {
+	f.orderFilter = filter
+	f.orderFilterSet = true
 	return f.orders, nil
 }
 
@@ -410,5 +414,39 @@ func TestAuditQueryEndpoint(t *testing.T) {
 	}
 	if data["meta"].(map[string]any)["total"].(float64) != 1 {
 		t.Fatalf("audit meta = %#v", data["meta"])
+	}
+}
+
+// TestAdminOrderListFiltersByUser covers the userId filter the management UI
+// needs when it opens a user's detail page: it must reach the store, and a
+// malformed or non-positive value must be a 400 rather than a silent full list.
+func TestAdminOrderListFiltersByUser(t *testing.T) {
+	f := newFixture(t, adminIdentity(auth.AdminRoleSuper), true)
+	f.store.orders = OrderPage{Items: []order.Order{{OrderNo: "ORD20260914120000aaaa", UserID: 42, Status: "COMPLETED"}},
+		Meta: order.PageMeta{Page: 1, PageSize: 20, Total: 1}}
+
+	recorder, _ := do(t, f.server.Handler(), http.MethodGet, "/api/v1/admin/orders?userId=42", "", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !f.store.orderFilterSet || f.store.orderFilter.UserID != 42 {
+		t.Fatalf("order filter = %#v (set=%v), want UserID 42", f.store.orderFilter, f.store.orderFilterSet)
+	}
+
+	for _, raw := range []string{"0", "-3", "abc", "4.2"} {
+		recorder, payload := do(t, f.server.Handler(), http.MethodGet, "/api/v1/admin/orders?userId="+raw, "", nil)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("userId=%s status = %d body = %s", raw, recorder.Code, recorder.Body.String())
+		}
+		if payload["code"].(float64) != httpapi.CodeInvalidArgument {
+			t.Fatalf("userId=%s code = %v", raw, payload["code"])
+		}
+	}
+
+	// 未提供 userId 时仍然列出全部（0 表示不过滤），并确实到达了服务层。
+	f.store.orderFilterSet = false
+	recorder, _ = do(t, f.server.Handler(), http.MethodGet, "/api/v1/admin/orders", "", nil)
+	if recorder.Code != http.StatusOK || !f.store.orderFilterSet || f.store.orderFilter.UserID != 0 {
+		t.Fatalf("no-filter status = %d filter = %#v", recorder.Code, f.store.orderFilter)
 	}
 }
