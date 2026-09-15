@@ -16,16 +16,69 @@ import (
 // architecture boundary: any API instance can validate any token and a
 // restart no longer logs users out. Redis unavailability is FailClosed —
 // an unverifiable session is an error, never an anonymous request.
+//
+// A per-user token index (ncs:user-sessions:{identityID}, a Redis SET)
+// supports revoking every session of one identity — required by account
+// deletion and account freezing. The index is FailClosed like the sessions
+// themselves.
 type RedisSessionStore struct {
 	sessions *bredis.Sessions
+	commands bredis.Commands
 }
 
 // NewRedisSessionStore binds the adapter to the B-line session store.
-func NewRedisSessionStore(sessions *bredis.Sessions) (*RedisSessionStore, error) {
+func NewRedisSessionStore(sessions *bredis.Sessions, commands bredis.Commands) (*RedisSessionStore, error) {
 	if sessions == nil {
 		return nil, errors.New("auth: redis sessions are required")
 	}
-	return &RedisSessionStore{sessions: sessions}, nil
+	if commands == nil {
+		return nil, errors.New("auth: redis commands are required")
+	}
+	return &RedisSessionStore{sessions: sessions, commands: commands}, nil
+}
+
+// userSessionsKey builds ncs:user-sessions:{identityID}.
+func userSessionsKey(identityID int64) string {
+	return fmt.Sprintf("ncs:user-sessions:%d", identityID)
+}
+
+// addUserTokenScript indexes one token for an identity and refreshes the
+// index ceiling atomically.
+const addUserTokenScript = `
+redis.call('SADD', KEYS[1], ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+return 1
+`
+
+// removeUserTokenScript drops one token from the index.
+const removeUserTokenScript = `
+redis.call('SREM', KEYS[1], ARGV[1])
+return 1
+`
+
+// revokeAllScript deletes every indexed session and the index itself.
+// The session keys are constructed inside the script from the indexed
+// tokens; this trades the KEYS-only cluster convention for the atomicity
+// the revocation guarantee needs (documented for the B line).
+const revokeAllScript = `
+local tokens = redis.call('SMEMBERS', KEYS[1])
+local revoked = 0
+for _, token in ipairs(tokens) do
+  if redis.call('DEL', 'ncs:session:' .. token) == 1 then
+    revoked = revoked + 1
+  end
+end
+redis.call('DEL', KEYS[1])
+return revoked
+`
+
+// RevokeAllForUser revokes every live session of the identity atomically.
+func (s *RedisSessionStore) RevokeAllForUser(ctx context.Context, identityID int64) error {
+	_, err := s.commands.RunScript(ctx, revokeAllScript,
+		[]string{userSessionsKey(identityID)},
+		nil,
+	)
+	return err
 }
 
 func (s *RedisSessionStore) Save(ctx context.Context, token string, session Session) error {
@@ -33,7 +86,24 @@ func (s *RedisSessionStore) Save(ctx context.Context, token string, session Sess
 	if err != nil {
 		return fmt.Errorf("auth: encode session payload: %w", err)
 	}
-	return s.sessions.Save(ctx, token, string(payload))
+	if err := s.sessions.Save(ctx, token, string(payload)); err != nil {
+		return err
+	}
+	// Index the token per identity so RevokeAllForUser can find it. The
+	// index lives at least as long as the session's absolute deadline.
+	if session.IdentityID > 0 {
+		indexTTL := time.Until(session.ExpiresAt)
+		if indexTTL <= 0 {
+			indexTTL = time.Millisecond
+		}
+		if _, err := s.commands.RunScript(ctx, addUserTokenScript,
+			[]string{userSessionsKey(session.IdentityID)},
+			[]string{token, strconv.FormatInt(indexTTL.Milliseconds(), 10)},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *RedisSessionStore) Load(ctx context.Context, token string) (Session, error) {
@@ -63,7 +133,13 @@ func (s *RedisSessionStore) Load(ctx context.Context, token string) (Session, er
 }
 
 func (s *RedisSessionStore) Delete(ctx context.Context, token string) error {
-	return s.sessions.Delete(ctx, token)
+	if err := s.sessions.Delete(ctx, token); err != nil {
+		return err
+	}
+	// The per-user index entry is left in place: Delete does not know the
+	// owning identity. Stale entries are harmless — RevokeAllForUser skips
+	// tokens whose session key no longer exists.
+	return nil
 }
 
 // RedisLoginRateLimiter adapts the B-line fixed-window limiter

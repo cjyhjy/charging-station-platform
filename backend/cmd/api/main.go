@@ -121,7 +121,7 @@ func run() error {
 
 	// Shared-state session storage and login throttling (A-03 review: every
 	// API instance must accept every token).
-	sessionStore, err := auth.NewRedisSessionStore(redisSessions)
+	sessionStore, err := auth.NewRedisSessionStore(redisSessions, commands)
 	if err != nil {
 		return err
 	}
@@ -134,7 +134,11 @@ func run() error {
 		return err
 	}
 
-	authService, err := auth.NewService(accountStore, accountStore, sessionStore, loginLimiter, smsCodes, cfg.SessionIdleTTL, cfg.SessionAbsTTL)
+	mutationAdapter, err := postgres.NewAccountMutationAdapter(db)
+	if err != nil {
+		return err
+	}
+	authService, err := auth.NewService(accountStore, accountStore, mutationAdapter, sessionStore, loginLimiter, smsCodes, cfg.SessionIdleTTL, cfg.SessionAbsTTL)
 	if err != nil {
 		return err
 	}

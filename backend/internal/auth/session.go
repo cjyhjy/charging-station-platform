@@ -29,6 +29,10 @@ type SessionStore interface {
 	Save(ctx context.Context, token string, session Session) error
 	Load(ctx context.Context, token string) (Session, error)
 	Delete(ctx context.Context, token string) error
+	// RevokeAllForUser revokes every live session of one identity (UC-U-05
+	// account deletion, account freezing). Implementations must maintain a
+	// per-user index so revocation works without enumerating the token keys.
+	RevokeAllForUser(ctx context.Context, identityID int64) error
 }
 
 // ErrSessionNotFound is returned by SessionStore.Load for unknown, expired,
@@ -41,6 +45,7 @@ var ErrSessionNotFound = errors.New("auth: session not found")
 type InMemorySessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]Session
+	byUser   map[int64]map[string]struct{}
 	idleTTL  time.Duration
 	clock    func() time.Time
 }
@@ -55,6 +60,7 @@ func NewInMemorySessionStore(idleTTL time.Duration, clock func() time.Time) *InM
 	}
 	return &InMemorySessionStore{
 		sessions: make(map[string]Session),
+		byUser:   make(map[int64]map[string]struct{}),
 		idleTTL:  idleTTL,
 		clock:    clock,
 	}
@@ -70,6 +76,12 @@ func (s *InMemorySessionStore) Save(_ context.Context, token string, session Ses
 	defer s.mu.Unlock()
 	session.lastAccessed = s.clock()
 	s.sessions[token] = session
+	if session.IdentityID > 0 {
+		if s.byUser[session.IdentityID] == nil {
+			s.byUser[session.IdentityID] = make(map[string]struct{})
+		}
+		s.byUser[session.IdentityID][token] = struct{}{}
+	}
 	return nil
 }
 
@@ -99,6 +111,25 @@ func (s *InMemorySessionStore) Load(_ context.Context, token string) (Session, e
 func (s *InMemorySessionStore) Delete(_ context.Context, token string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if session, ok := s.sessions[token]; ok && session.IdentityID > 0 {
+		if tokens := s.byUser[session.IdentityID]; tokens != nil {
+			delete(tokens, token)
+			if len(tokens) == 0 {
+				delete(s.byUser, session.IdentityID)
+			}
+		}
+	}
 	delete(s.sessions, token)
+	return nil
+}
+
+// RevokeAllForUser revokes every live session of the identity.
+func (s *InMemorySessionStore) RevokeAllForUser(_ context.Context, identityID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token := range s.byUser[identityID] {
+		delete(s.sessions, token)
+	}
+	delete(s.byUser, identityID)
 	return nil
 }

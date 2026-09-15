@@ -187,6 +187,7 @@ func TestEndToEndLoginAgainstPostgreSQL(t *testing.T) {
 	service, err := auth.NewService(
 		mustAccountStore(t, db),
 		mustAccountStore(t, db),
+		auth.NewInMemoryAccountMutation(map[int64]*auth.UserAccount{}),
 		auth.NewInMemorySessionStore(time.Minute, nil),
 		auth.NewFixedWindowLimiter(100, time.Minute, nil),
 		auth.NewInMemorySMSCodeStore(nil),
@@ -597,6 +598,7 @@ func TestSMSPasswordlessRegistration(t *testing.T) {
 
 	service, err := auth.NewService(
 		accountStore, accountStore,
+		auth.NewInMemoryAccountMutation(map[int64]*auth.UserAccount{}),
 		auth.NewInMemorySessionStore(time.Minute, nil),
 		auth.NewFixedWindowLimiter(100, time.Minute, nil),
 		auth.NewInMemorySMSCodeStore(nil),
