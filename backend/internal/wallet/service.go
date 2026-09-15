@@ -47,6 +47,10 @@ var (
 	// ErrOrderNotRefundable maps to 409: refund requires a completed order
 	// with a positive settled amount.
 	ErrOrderNotRefundable = errors.New("wallet: order has no settled amount to refund")
+	// ErrOrderNotFound maps to 404: the order a refund names does not exist.
+	// It is deliberately distinct from ErrOrderNotRefundable, because the
+	// caller cannot fix a missing order by looking at the order's state.
+	ErrOrderNotFound = errors.New("wallet: order not found")
 	// ErrInvalidLedgerFilter reports a malformed ledger query.
 	ErrInvalidLedgerFilter = errors.New("wallet: invalid ledger filter")
 )
