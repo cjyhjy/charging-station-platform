@@ -107,6 +107,16 @@ for source_dump in "${dumps[@]}"; do
     args=("${rclone_args[@]}" copy "${work_dir}" "${target}" --include "*.dump.enc*" --s3-no-check-bucket)
     [[ "${dry_run}" == "true" ]] && args+=(--dry-run)
     rclone "${args[@]}"
+
+    # An upload that returned success is not the same as an object that can be read back: a truncated
+    # or half-written object is the failure mode that stays invisible until the day the backup is
+    # needed. The check compares size and hash against the encrypted files that were just sent -
+    # the same files, so a mismatch is a real difference in what the destination holds.
+    if [[ "${dry_run}" != "true" ]]; then
+        step "verify the uploaded object against what was sent"
+        check_args=("${rclone_args[@]}" check "${work_dir}" "${target}" --include "*.dump.enc*" --s3-no-check-bucket)
+        rclone "${check_args[@]}"
+    fi
     pushed="$((pushed + 1))"
 done
 
