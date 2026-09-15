@@ -7,7 +7,7 @@
 | 项目 | 依据 | 产物 | 验证 | 状态 |
 | --- | --- | --- | --- | --- |
 | 需求与设计基线 | SRS、研发指南 | `docs/` 核心文档 | 冲突复核、`git diff --check` | 完成 |
-| 正式 CMake 目标 | 阶段一、NFR-C-01 | `ncs_user`、`ncs_admin`、`ncs_server`、公共库 | 严格警告构建 | 完成 |
+| 正式 CMake 目标 | 阶段一、NFR-C-01 | `ncs_server`、公共库（`ncs_core`、`ncs_infrastructure`、`ncs_agent`）；客户端改为 `apps/user`、`apps/admin` 的 Vue Web，用 npm 构建 | 严格警告构建：C++ 全量构建零错误；两个 Web 前端 `npm run build` 通过 | 完成 |
 | 分层目录与边界 | 研发指南 §2-3 | `apps/`、`server/`、`core/`、`infrastructure/`、`tests/` | CMake 依赖复核 | 完成 |
 | 配置基础 | NFR-S-*、NFR-D-* | `ApplicationConfig`、`.env.example` | 有效配置与启动测试 | 完成 |
 | 本机开发 HTTP 联调 | NFR-D-01 | 客户端/服务端 `NCS_ALLOW_INSECURE_HTTP`、回环限制、传输日志 | 配置拒绝测试、真实 HTTP 客户端—服务端烟雾测试 | 完成；验收与生产仍强制 HTTPS/WSS |
@@ -40,9 +40,12 @@
 
 | 项目 | 依据 | 产物 | 验证 | 状态 |
 | --- | --- | --- | --- | --- |
-| 用户端界面 | UC-U-01~UC-U-10 | `apps/user`（默认启动下首页、充电、订单、资料、头像、充值、登出、注销、导航均走真实 REST；`--mock-scenario` 才启用演示服务） | `ncs_user_net_tests`、`ncs_user_smoke`；服务端侧由 `ncs_user_business_routes` 覆盖；真实 REST GUI 证据待归档 | 部分完成：缺真实服务端联调与 UI 验收证据 |
+| 用户端界面（历史 Qt 实现） | UC-U-01~UC-U-10 | 原 `apps/user` Qt Widgets 用户端已由 UC-U-13 的 Vue 3 Web 客户端取代，代码移除 | 原 `ncs_user_net_tests`、`ncs_user_smoke` 随目标一并移除 | 已被 UC-U-13 取代 |
+| 统一响应式 Web 用户端 | UC-U-13、NFR-U-02、NFR-U-03 | `apps/user`（Vue 3 + Vite + Vue Router + Pinia）：`src/views`、`src/components`、`src/api`、`src/stores`、`src/services`，PC 侧边栏 / 手机底部导航同一套页面 | `apps/user` 内 `npm run test`（vitest）与 `npm run build`（Vite）；服务端侧由 `ncs_user_business_routes` 覆盖 | 部分完成：前端自动化与构建已通过；394×844 与 1440×900 的真实浏览器验收截图待归档 |
 | 腾讯地图导航 | UC-U-02、UC-U-04 | 系统定位优先、WGS84 坐标转换、手动起点、退化路线检查、导航页与明确降级提示 | 2026-09-07：7 项导航/契约/烟雾测试通过；420×760 Qt 页面验证定位失败、模拟起点、路线摘要与空折线状态，见 [验证记录](navigation-fix-2026-09-07.md)。2026-09-05 的真实腾讯地图验收保留为历史证据 | 部分完成：修复与状态回归已验证；VM GeoClue 禁用定位，系统定位成功至真实腾讯底图的整条链路待实机验收 |
-| 拍照上传头像 | UC-U-11 | `apps/user` 已有头像 REST 链路；拍照对话框和 Qt Multimedia 采集仍待实现 | 图片处理、二进制网络、无设备 UI、有/无 Multimedia 构建和实机验收 | 部分完成：前置头像 REST 已就绪，仍缺摄像头采集 |
+| 拍照上传头像 | UC-U-11 | 原 Qt 用户端头像 REST 链路随 UC-U-13 迁移到 Web 车主端；浏览器媒体设备采集仍待实现 | 图片处理、二进制网络、无设备 UI 与浏览器采集验收 | 部分完成：Web 端头像链路已接入 REST，仍缺浏览器摄像头采集 |
+| Web 用户端视觉与动效 | NFR-U-04、NFR-U-05 | `apps/user/src/style.css`（设计令牌与骨架）、`src/styles/motion.css`（关键帧/骨架屏/过渡类）、`src/composables/{useReveal,useValueFlash,useReducedMotion}.js`、`src/directives/reveal.js`、`src/components/NavIcon.vue`、`AppSkeleton.vue` | `ncs_user_web` 前端 `npm run test`（`motion` 用例覆盖滚动进入、指令、数据更新高亮、reduced-motion 降级与样式契约）与 `npm run build`；真实浏览器核对桌面/移动两视口的毛玻璃顶栏、卡片层次、SVG 图标与底部导航指示条 | 部分完成：动效与降级已实现并有测试；真实浏览器截图待归档 |
+| AI 出行助手 | UC-U-14、BR-13、BR-14、NFR-M-05、NFR-P-06、NFR-S-06、NFR-S-07 | `agent/`（AgentService、AgentTool 抽象、station_search/station_detail/poi_search/route 四个工具）、`infrastructure/ai/`（OpenAI-compatible 客户端与配置）、`infrastructure/map/`（TencentMapClient、POI、路线服务）、`server/controller/agent_controller.*`、`POST /api/v1/user/agent/chat` | `ncs_agent_service`、`ncs_agent_tools`、`ncs_agent_controller`、`ncs_llm_client`（标签 `agent`/`ai`）；前端 `agentChat`/`agentView` 覆盖 loading、error 与结构化渲染 | 部分完成：工具编排、契约与降级路径已验证；真实大模型与真实腾讯 Key 下的端到端验收待配置 |
 | 订单评价与场站评论墙 | UC-U-12 | 后端 v9 `order_review` 迁移、`OrderReviewService`、`GET/POST /api/v1/user/orders/{orderNo}/review`（幂等作用域 `u{userId}:review:{orderNo}`）及 `GET /api/v1/user/stations/{id}/reviews` 评论墙（作者脱敏、倒序限量）；桌面端订单卡/小票评价入口、`ReviewDialog` 与场站详情评论板块在线拉取；安卓端订单评价入口与对话框及 `StationDetail` 评论板块（复用同一 REST 契约）；演示模式评论墙含本人评价 | `ncs_order_review_tests`（迁移、所有权、状态、唯一性、幂等、评论墙分组/隔离/排序/脱敏/注销展示/重启持久，标签 contract+integration）；安卓 arm64 debug APK 已重建（含评论墙），真机交互与 UI 验收证据待归档 | 部分完成：后端、桌面端与安卓端实现完成；安卓端待真机验收 |
 
 ## 阶段五：管理端（部分完成）
@@ -50,8 +53,9 @@
 | 项目 | 依据 | 产物 | 验证 | 状态 |
 | --- | --- | --- | --- | --- |
 | 管理服务端 | UC-A-01~UC-A-08 | `server/controller` 管理路由（站点/设备/价格/用户/流程/统计/备份/ML）、登录锁定与二次验证 | `ncs_admin_routes` | 完成 |
-| 管理服务端（管理员账号） | UC-A-09 | 管理员账号列表、创建（OPERATOR）、启用/停用、本人改密，及首个 OWNER 一次性引导（`--bootstrap-owner` + `NCS_ADMIN_BOOTSTRAP_KEY`） | `ncs_admin_account_routes`、`ncs_sqlite_admin_accounts` | 后端部分完成（管理端界面未实现） |
-| 管理端界面 | UC-A-01~UC-A-08 | `apps/admin`（登录、总览、站点、充电桩、用户、预测五页；真实 REST、Bearer、幂等键、请求 ID、响应信封校验） | `ncs_admin_smoke`、`ncs_admin_ui_contract`、`ncs_admin_api_smoke` | 部分完成：缺独立状态表、部分站点/电桩管理动作、订单历史、历史预测对比图和总营收卡 |
+| 管理服务端（管理员账号） | UC-A-09 | 管理员账号列表、创建（OPERATOR）、启用/停用、本人改密，及首个 OWNER 一次性引导（`--bootstrap-owner` + `NCS_ADMIN_BOOTSTRAP_KEY`） | `ncs_admin_account_routes`、`ncs_sqlite_admin_accounts`；界面已由 Web 管理控制台的「管理员账号」页接入 | 完成（后端 + Web 界面） |
+| 管理端界面（原 Qt 实现） | UC-A-01~UC-A-08 | 原 `apps/admin` Qt Widgets 管理端已由 Web 控制台取代，全部源码与 `ncs_admin_ui_contract`、`ncs_admin_smoke`、`ncs_admin_api_smoke` 三个用例一并移除 | 移除后 C++ 全量构建首次零错误通过，管理接口契约仍由 `ncs_admin_routes`、`ncs_admin_account_routes` 覆盖 | 已被 Web 管理端取代 |
+| Web 管理控制台 | UC-A-01~UC-A-09、NFR-U-02、NFR-U-04、NFR-U-05 | `apps/admin`（Vue 3 + Vite + ECharts）：登录与重新认证、总览（营收趋势、每日营收与订单、电桩状态与健康度）、站点与基础价格版本、充电桩与远程重启、用户与订单历史、活动流程强制释放、智能预测与 ML 任务、管理员账号、审计日志与备份运维 | `apps/admin` 的 `npm run test`（13 个文件 136 项：信封/错误码/会话、reauth 同键重试、DTO 格式化与畸形数据拒绝、列表 store、表格与 KPI 组件、路由守卫与抽屉、动效降级）与 `npm run build`；服务端侧由 `ncs_admin_routes`、`ncs_admin_account_routes` 覆盖 | 已完成真实浏览器联调：未登录被守卫重定向到 `/login`；`admin` 登录后总览渲染 10 张 KPI + 2 个 ECharts 画布，侧栏 `blur(18px)`、顶栏 `blur(16px)`、14 个内联 SVG 图标；站点/充电桩/用户/活动流程/管理员/运维各页真实取数（10/20/20/20/1 行、0 报错），预测与审计为空态；390×844 下侧栏变为离屏抽屉并可打开。截图见 `screenshots/preview/after/admin-*.png` |
 
 ## 阶段六：大屏与机器学习（部分完成）
 
@@ -77,7 +81,7 @@
 | --- | --- | --- | --- | --- |
 | 拍照头像 | UC-U-11 | `apps/user/avatar`、`AvatarCaptureDialog`、可选 Qt Multimedia 接入 | 专项实施路径 A0～A5 | 未开始 |
 | 设备通信模拟器 | UC-X-01 | `tools/device_link_sim` 独立 CMake、固定数组帧编解码和非法帧测试 | 独立 `device_link_core_test`；S1～S4 的连接、5 桩并发和 GUI 仍待实现 | 部分完成：通信帧核心已实现 |
-| 安卓用户端 | Android 用户端 | `apps/mobile` Qt Quick 用户端、真实 REST、短信登录、站点、订单、资料和拍照头像 | `tests/mobile` 独立契约/布局测试；APK 构建与真机验收分别记录 | 部分完成：已实现核心业务；2026-09-09 补充 GPS 坐标系与头像版本回归，见 [PR 补充验证](pr36-followup.md) |
+| 安卓用户端（已停止开发） | Android 用户端 | `apps/mobile` Qt Quick 用户端保留为迁移参考；自 2026-09-14 起不再继续开发，`tests/mobile` 中原依赖 `apps/user` Qt 源码的布局用例随之移除 | `ncs_mobile_contract` 与 `ncs_mobile_station_layout` 仍可独立运行（不在主 CMake 树内） | 已冻结：仅作为 UC-U-13 的迁移参考 |
 
 ## 非功能需求状态
 
@@ -88,11 +92,14 @@
 | NFR-M-04 | 完成 | 结构化日志与脱敏已测；ops_log/device_command 180 天、outbox 7/30 天保留清理已实现并逐边界测试（含外键完整性门禁） |
 | NFR-S-01 | 部分完成 | PBKDF2-HMAC-SHA256（600k 次迭代、版本化摘要）代替规格首选 Argon2id，偏差已在安全基线记录 |
 | NFR-R-02 | 完成 | 打开失败、锁等待有处理与测试；损坏库三类错误路径（非 SQLite 文件、页 1 数据区破坏、截断）均断言明确报错（`ncs_sqlite_corruption`） |
-| NFR-U-01、NFR-U-02、NFR-C-01、NFR-C-02、NFR-D-01 | 部分完成 | 提示/窗口尺寸/跨平台/路径重定位有实现，缺系统性验收；Windows CI 修复中 |
+| NFR-U-01、NFR-U-02、NFR-U-03、NFR-C-01、NFR-C-02、NFR-D-01 | 部分完成 | Web 用户端断点、导航形态与失败提示由前端测试覆盖，缺真实浏览器验收截图；跨平台与路径重定位缺系统性验收；Windows CI 修复中 |
+| NFR-M-05、NFR-S-06、NFR-S-07 | 部分完成 | Agent 依赖方向、只读边界与 Key 不出服务端由 `ncs_agent_*` 与前端构建产物检查覆盖；真实凭据下的端到端验收待配置 |
+| NFR-P-06 | 未开始 | Agent 对话 60 秒预算与降级 3 秒预算尚无压测证据 |
 | NFR-P-02、NFR-P-04、NFR-P-05 | 完成 | 营收 30 天聚合微基准（`ncs_sqlite_revenue_bench`：中位 11.8ms、最差 14.3ms）；3000 账号/100 在线/50 排队/48 充电与 20rps 持续/50rps 峰值/100 WS 全量压测证据（`tests/performance/evidence/`，8/8 阈值通过） |
 | NFR-P-01、NFR-P-03、NFR-D-02 | 未开始 | 客户端页面刷新 CPU 与严格单机部署未验收 |
 
 ## 维护规则
 
 - 状态变化先更新需求矩阵，再同步本表；标"完成"必须同时给出产物与验证证据。
-- 当前已知验收欠账：用户端真实联调、管理端 UI、大屏前端、NFR-P-01/P-03 客户端页面性能、NFR-D-02 严格单机部署验收。
+- 当前未修复的已知问题：[Web 用户端本机联调 CORS 问题](web-client-dev-cors.md)——`npm run dev` 的 `/api` 代理会带上浏览器 `Origin`，被服务端来源白名单拒绝（403），当前只能用 `NCS_CORS_ALLOWED_ORIGINS` 运行期规避，两个候选修复方案待确认。
+- 当前已知验收欠账：Web 用户端真实浏览器验收截图、AI 助手真实大模型与腾讯 Key 端到端验收、管理端 UI、大屏前端、NFR-P-01/P-03 客户端页面性能、NFR-P-06 Agent 响应预算、NFR-D-02 严格单机部署验收。

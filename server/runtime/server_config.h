@@ -56,6 +56,13 @@ struct ServerConfig
     bool allowInsecureHttp = false;
     std::vector<std::string> corsAllowedOrigins;
     std::string tencentMapKey;
+    // AI（Agent 大模型）配置：仅由进程环境变量或 .env 提供。aiApiKey 只保存在进程内存中，
+    // 绝不写入日志、启动输出或任何 API 响应；缺任一项时 Agent 走确定性降级路径。
+    std::string aiProvider = "openai";
+    std::string aiModel;
+    std::string aiBaseUrl;
+    std::string aiApiKey;
+    std::int64_t aiTimeoutMs = 15000;
     std::string dashboardSnapshotPath;
     std::string pythonExecutable = "python3";
     std::string mlWorkerScript;

@@ -37,14 +37,19 @@
 | ML 工作脚本 | `--ml-worker-script` | `NCS_ML_WORKER_SCRIPT` | `ml/worker.py` |
 | ML 活动模型 | `--ml-model-path` | `NCS_ML_MODEL_PATH` | `ml/models/load_rf.pkl` |
 | 腾讯地图服务端 Key | `--tencent-map-key` | `NCS_TENCENT_MAP_KEY` | 空（地图能力降级） |
+| AI 提供方 | `--ai-provider` | `NCS_AI_PROVIDER` | `openai`（另支持 `deepseek`、`qwen`、`claude`、`custom`） |
+| AI 模型 | `--ai-model` | `NCS_AI_MODEL` | 空（AI 助手降级为确定性结果） |
+| AI 端点 | `--ai-base-url` | `NCS_AI_BASE_URL` | 空（按 provider 取默认 HTTPS 端点） |
+| AI 密钥 | `--ai-api-key` | `NCS_AI_API_KEY` | 空（不回显、不记日志、不返回响应） |
+| AI 超时 | `--ai-timeout-ms` | `NCS_AI_TIMEOUT_MS` | `15000`（允许 1000～60000） |
 
 `--environment` 允许 `development`、`test`、`acceptance`、`production`。开发模式会启用演示凭据，因此只允许监听数字回环地址；通配地址、多播地址和非法地址会在启动前被拒绝。未显式配置的文件路径以服务程序所在部署目录为稳定基准（源码构建会自动定位项目资源），不随 shell 当前目录漂移。
 
-环境文件：`NCS_ENV_FILE` 指定的文件（必须存在且可读）或资产目录下的 `.env`（存在时加载）提供可由进程环境变量覆盖的默认值；条目名与上表环境变量一致，仅腾讯地图服务端 Key 写作 `TENCENT_MAP_SERVER_KEY`。用户端地图另读取 `TENCENT_MAP_JS_KEY` 和受限来源 `TENCENT_MAP_JS_ORIGIN`，不会保留 Server Key。`.env` 为 Git 忽略的仅本机文件（权限 600），真实 Key 不得提交；可运行 `./scripts/configure-local-map.sh` 安全写入并以 `--check` 验证，详见 `docs/tencent-map-setup.md`。
+环境文件：`NCS_ENV_FILE` 指定的文件（必须存在且可读）或资产目录下的 `.env`（存在时加载）提供可由进程环境变量覆盖的默认值；条目名与上表环境变量一致，例外是腾讯地图服务端 Key 写作 `TENCENT_MAP_SERVER_KEY`，AI 配置写作 `AI_PROVIDER`、`AI_MODEL`、`AI_BASE_URL`、`AI_API_KEY`、`AI_TIMEOUT_MS`。Web 用户端在开发/构建时另读取 `TENCENT_MAP_JS_KEY` 和受限来源 `TENCENT_MAP_JS_ORIGIN`，不会保留 Server Key 或 AI Key。AI 助手未配置 `AI_MODEL`/`AI_API_KEY` 时自动退化为确定性的工具检索结果，不阻断服务启动。`.env` 为 Git 忽略的仅本机文件（权限 600），真实 Key 不得提交；可运行 `./scripts/configure-local-map.sh` 安全写入并以 `--check` 验证，详见 `docs/tencent-map-setup.md`。
 
 ### 1.2 新增增强任务依赖
 
-`UC-U-11` 计划使用 Qt Multimedia 和 MultimediaWidgets，Ubuntu 开发环境需提供 `qt6-multimedia-dev`。依赖未安装时，根 CMake 和 `ncs_user` 必须成功配置与构建，仅不编译摄像头适配和拍照对话框。
+`UC-U-11` 原计划使用 Qt Multimedia 和 MultimediaWidgets；用户端改为 Vue 3 Web 客户端后（`UC-U-13`），摄像头采集改由浏览器媒体设备 API 与浏览器权限模型承担，`ncs_user` Qt 目标已移除。
 
 `UC-X-01` 计划使用 Qt WebSockets，Ubuntu 开发环境需提供 `qt6-websockets-dev`。模拟器使用独立 CMake，依赖缺失不得影响根工程或正式可执行目标。实现后单独构建方式为：
 
@@ -84,15 +89,16 @@ export QT_CMAKE=/path/to/Qt/6.2.x/gcc_64/bin/qt-cmake
 完整运行时按以下顺序启动：
 
 1. 启动 `ncs_server`，等待 `/api/v1/health/ready` 成功（校验 SQLite schema、读写能力、WAL 和迁移版本，任一失败返回 503）。
-2. 启动 `ncs_user` 和 `ncs_admin`，确认连接状态正常。
+2. 在浏览器打开 Web 车主端与管理端（`npm run dev` 或托管 `dist/`），确认连接状态正常。
 3. 需要时启动 Dashboard 与 ML；两者失败不得阻断基础充电结算。
 
 阶段一可直接执行：
 
 ```bash
-./build/dev/server/ncs_server --smoke-test
-QT_QPA_PLATFORM=offscreen ./build/dev/apps/user/ncs_user --smoke-test
-QT_QPA_PLATFORM=offscreen ./build/dev/apps/admin/ncs_admin --smoke-test
+./build/dev/ncs_server --smoke-test
+./scripts/smoke-test.sh                          # 服务端回环冒烟
+cd apps/user  && npm run test && npm run build   # 车主端前端冒烟
+cd apps/admin && npm run test && npm run build   # 管理端前端冒烟
 ```
 
 ## 3. 运行检查

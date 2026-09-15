@@ -5,6 +5,8 @@
 // NCS_ADMIN_BOOTSTRAP_KEY 注入初始密码。
 #include <crow.h>
 
+#include "agent/agent_service.h"
+
 #include "core/application/admin_account_service.h"
 #include "core/application/admin_auth_service.h"
 #include "core/application/admin_ops_service.h"
@@ -20,11 +22,16 @@
 #include "core/application/security_crypto.h"
 #include "core/application/station_service.h"
 #include "core/application/wallet_service.h"
+#include "infrastructure/ai/llm_client.h"
+#include "infrastructure/ai/llm_config.h"
 #include "infrastructure/files/model_artifact_store.h"
+#include "infrastructure/map/poi_service.h"
 #include "infrastructure/map/tencent_geocoder.h"
+#include "infrastructure/map/tencent_map_client.h"
 #include "infrastructure/map/tencent_route_planner.h"
 #include "infrastructure/sqlite/sqlite_repository.h"
 #include "server/controller/admin_routes.h"
+#include "server/controller/agent_controller.h"
 #include "server/controller/api_routes.h"
 #include "server/controller/dashboard_routes.h"
 #include "server/controller/flow_routes.h"
@@ -202,7 +209,8 @@ int main(int argc, char* argv[])
                 std::chrono::seconds(60),
                 std::chrono::seconds(30),
                 std::chrono::seconds(60),
-                [&sessions](const std::string_view token) {
+                [&sessions](const std::string_view token)
+                {
                     return sessions.authenticate(token, std::chrono::system_clock::now())
                         .has_value();
                 },
@@ -235,6 +243,16 @@ int main(int argc, char* argv[])
         };
         ncs::core::application::StationService stationService(repository, geocoder,
                                                               adjustmentLookup);
+        // —— AI 与 Agent 装配：LLM 只通过 core 端口注入 Agent，缺配置时 Agent 自动走确定性降级 ——
+        ncs::infrastructure::map::TencentPoiService poiService(
+            ncs::infrastructure::map::TencentMapClient(
+                QString::fromStdString(startup.config.tencentMapKey)));
+        const auto llmConfig = ncs::infrastructure::ai::makeLlmConfig(
+            startup.config.aiProvider, startup.config.aiModel, startup.config.aiBaseUrl,
+            startup.config.aiApiKey, startup.config.aiTimeoutMs);
+        ncs::infrastructure::ai::OpenAiCompatibleLlmClient llmClient(
+            llmConfig ? *llmConfig : ncs::infrastructure::ai::LlmConfig{});
+        ncs::agent::AgentService agentService(stationService, routePlanner, poiService, llmClient);
         ncs::core::application::ChargeFlowService chargeFlowService(
             repository, repository, repository, businessNumbers,
             static_cast<int>(startup.config.chargeTimeScale), adjustmentLookup);
@@ -289,6 +307,8 @@ int main(int argc, char* argv[])
                                                              blockingExecutor);
         ncs::server::controller::NavigationRoutes navigationRoutes(apiRoutes, navigationService,
                                                                    sessions, blockingExecutor);
+        ncs::server::controller::AgentController agentController(apiRoutes, agentService, sessions,
+                                                                 blockingExecutor);
         ncs::server::controller::FlowRoutes flowRoutes(apiRoutes, chargeFlowService, sessions,
                                                        blockingExecutor, idempotency);
         ncs::server::controller::OrderReviewRoutes reviewRoutes(

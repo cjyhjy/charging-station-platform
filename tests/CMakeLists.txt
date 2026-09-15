@@ -469,18 +469,8 @@ set_tests_properties(ncs_server_smoke PROPERTIES
     TIMEOUT 300
 )
 
-add_test(
-    NAME ncs_server_http_smoke
-    COMMAND ${Python3_EXECUTABLE}
-        ${CMAKE_CURRENT_SOURCE_DIR}/server_http_smoke_test.py
-        $<TARGET_FILE:ncs_server>
-        $<TARGET_FILE:ncs_user>
-)
-set_tests_properties(ncs_server_http_smoke PROPERTIES
-    RUN_SERIAL TRUE
-    TIMEOUT 60
-    LABELS "smoke;integration;http;user"
-)
+# 用户端已迁移为 apps/user 下的 Vue 3 + Vite Web 客户端（npm 独立构建），不再是 CMake 目标，
+# 因此原先驱动 ncs_user 二进制与 Qt 客户端冒烟测试的用例一并移除，避免引用不存在的目标。
 
 # --- Foundation and user-client tests (integrated from develop) ---
 qt_add_executable(ncs_foundation_tests
@@ -498,28 +488,6 @@ ncs_set_project_warnings(ncs_foundation_tests)
 add_test(NAME ncs_foundation_tests COMMAND ncs_foundation_tests)
 set_tests_properties(ncs_foundation_tests PROPERTIES LABELS "unit;foundation")
 
-qt_add_executable(ncs_user_net_tests
-    user_net_tests.cpp
-    ../apps/user/net/api_client.cpp
-    ../apps/user/net/api_client.h
-)
-
-target_include_directories(ncs_user_net_tests PRIVATE ${CMAKE_SOURCE_DIR}/apps/user)
-target_link_libraries(ncs_user_net_tests PRIVATE Qt6::Core Qt6::Network)
-ncs_set_project_warnings(ncs_user_net_tests)
-add_test(NAME ncs_user_net_tests COMMAND ncs_user_net_tests)
-set_tests_properties(ncs_user_net_tests PROPERTIES LABELS "unit;user;network")
-
-add_test(NAME ncs_user_smoke COMMAND ncs_user --smoke-test)
-set_tests_properties(ncs_user_smoke PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-    LABELS "smoke;ui;foundation"
-)
-add_test(NAME ncs_admin_smoke COMMAND ncs_admin --smoke-test)
-set_tests_properties(ncs_admin_smoke PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
-    LABELS "smoke;ui;foundation"
-)
 
 if(UNIX)
     find_program(NCS_BASH_EXECUTABLE bash)
@@ -536,30 +504,51 @@ if(UNIX)
     endif()
 endif()
 
-qt_add_executable(ncs_admin_ui_contract_tests admin_ui_contract_test.cpp admin_http_fixture.h)
-target_link_libraries(ncs_admin_ui_contract_tests PRIVATE ncs_admin_ui)
-ncs_add_admin_resources(ncs_admin_ui_contract_tests)
-ncs_set_project_warnings(ncs_admin_ui_contract_tests)
-add_test(NAME ncs_admin_ui_contract COMMAND ncs_admin_ui_contract_tests)
-set_tests_properties(ncs_admin_ui_contract PROPERTIES
-    ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 45 LABELS "integration;admin;ui;contract")
-add_test(NAME ncs_admin_api_smoke COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/admin_api_smoke_test.py
-    $<TARGET_FILE:ncs_server> $<TARGET_FILE:ncs_admin>)
-set_tests_properties(ncs_admin_api_smoke PROPERTIES
-    TIMEOUT 90 RUN_SERIAL TRUE LABELS "integration;admin;http;tls")
+# 管理端已改造为 apps/admin 下的 Vue 3 Web 控制台（npm 独立构建），不再是 CMake 目标：
+# 原先驱动 Qt 管理端控件的 ncs_admin_ui_contract 与驱动 ncs_admin 二进制登录的
+# ncs_admin_api_smoke 一并移除，避免引用不存在的目标。管理端接口契约仍由
+# ncs_admin_routes 与 ncs_admin_account_routes 在服务端侧覆盖。
 
-add_executable(ncs_user_navigation_origin_tests
-    user_navigation_origin_test.cpp
-    ../apps/user/net/api_client.cpp
-    ../apps/user/net/api_client.h
-    ../apps/user/net/user_api.cpp
+# —— Agent 模块测试：工具调度、四个工具契约、LLM 基础设施与 Agent Controller 契约 ——
+add_executable(ncs_agent_service_tests agent_service_test.cpp)
+set_target_properties(ncs_agent_service_tests PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
 )
-target_include_directories(ncs_user_navigation_origin_tests PRIVATE ${PROJECT_SOURCE_DIR})
-target_link_libraries(ncs_user_navigation_origin_tests PRIVATE Qt6::Core Qt6::Network)
-set_target_properties(ncs_user_navigation_origin_tests PROPERTIES AUTOMOC ON AUTOUIC OFF AUTORCC OFF)
-add_test(NAME ncs_user_navigation_origin COMMAND ncs_user_navigation_origin_tests)
-set_tests_properties(ncs_user_navigation_origin PROPERTIES LABELS "unit;user;navigation")
+target_link_libraries(ncs_agent_service_tests PRIVATE ncs::agent)
+ncs_set_project_warnings(ncs_agent_service_tests)
+add_test(NAME ncs_agent_service COMMAND ncs_agent_service_tests)
+set_tests_properties(ncs_agent_service PROPERTIES LABELS "unit;agent" TIMEOUT 60)
+
+add_executable(ncs_agent_tools_tests agent_tools_test.cpp)
+set_target_properties(ncs_agent_tools_tests PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+target_link_libraries(ncs_agent_tools_tests PRIVATE ncs::agent)
+ncs_set_project_warnings(ncs_agent_tools_tests)
+add_test(NAME ncs_agent_tools COMMAND ncs_agent_tools_tests)
+set_tests_properties(ncs_agent_tools PROPERTIES LABELS "unit;agent" TIMEOUT 60)
+
+add_executable(ncs_agent_controller_tests agent_controller_test.cpp)
+set_target_properties(ncs_agent_controller_tests PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+target_link_libraries(ncs_agent_controller_tests PRIVATE ncs::server_controller)
+ncs_set_project_warnings(ncs_agent_controller_tests)
+add_test(NAME ncs_agent_controller COMMAND ncs_agent_controller_tests)
+set_tests_properties(ncs_agent_controller PROPERTIES LABELS "contract;agent" TIMEOUT 60)
+
+add_executable(ncs_llm_client_tests llm_client_test.cpp)
+set_target_properties(ncs_llm_client_tests PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+)
+target_link_libraries(ncs_llm_client_tests PRIVATE ncs::infrastructure_ai)
+ncs_set_project_warnings(ncs_llm_client_tests)
+add_test(NAME ncs_llm_client COMMAND ncs_llm_client_tests)
+set_tests_properties(ncs_llm_client PROPERTIES LABELS "unit;agent;ai" TIMEOUT 60)
 
 add_executable(ncs_order_payment_tests order_payment_test.cpp)
 set_target_properties(ncs_order_payment_tests PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)

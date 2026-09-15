@@ -33,7 +33,7 @@ struct EnvironmentSetting
 // Env files use the same names as the process environment variables, except
 // the Tencent geocoding key, which the frontend/backend .env documents as
 // TENCENT_MAP_SERVER_KEY (docs/tencent-map-setup.md).
-constexpr std::array<EnvironmentSetting, 22> environmentSettings{{
+constexpr std::array<EnvironmentSetting, 27> environmentSettings{{
     {"NCS_ENVIRONMENT", "NCS_ENVIRONMENT", "--environment"},
     {"NCS_LISTEN_ADDRESS", "NCS_LISTEN_ADDRESS", "--listen-address"},
     {"NCS_PORT", "NCS_PORT", "--port"},
@@ -57,6 +57,11 @@ constexpr std::array<EnvironmentSetting, 22> environmentSettings{{
     {"NCS_PYTHON_EXECUTABLE", "NCS_PYTHON_EXECUTABLE", "--python-executable"},
     {"NCS_ML_WORKER_SCRIPT", "NCS_ML_WORKER_SCRIPT", "--ml-worker-script"},
     {"NCS_ML_MODEL_PATH", "NCS_ML_MODEL_PATH", "--ml-model-path"},
+    {"NCS_AI_PROVIDER", "AI_PROVIDER", "--ai-provider"},
+    {"NCS_AI_MODEL", "AI_MODEL", "--ai-model"},
+    {"NCS_AI_BASE_URL", "AI_BASE_URL", "--ai-base-url"},
+    {"NCS_AI_API_KEY", "AI_API_KEY", "--ai-api-key"},
+    {"NCS_AI_TIMEOUT_MS", "AI_TIMEOUT_MS", "--ai-timeout-ms"},
 }};
 
 ncs::infrastructure::files::LogLevel parseLogLevel(const std::string_view value,
@@ -299,6 +304,29 @@ void applySetting(ServerConfig& config, const std::string_view option, const std
     else if (option == "--ml-model-path")
     {
         config.mlModelPath = normalizePath(value, source);
+    }
+    else if (option == "--ai-provider")
+    {
+        // Provider 名只用于选择默认端点，取值校验放到 makeLlmConfig 统一处理，
+        // 未知 provider 必须显式提供 AI_BASE_URL。
+        config.aiProvider = std::string(value);
+    }
+    else if (option == "--ai-model")
+    {
+        config.aiModel = std::string(value);
+    }
+    else if (option == "--ai-base-url")
+    {
+        config.aiBaseUrl = std::string(value);
+    }
+    else if (option == "--ai-api-key")
+    {
+        // 密钥只保存在进程内存中，绝不写日志、不回显、不进入响应。
+        config.aiApiKey = std::string(value);
+    }
+    else if (option == "--ai-timeout-ms")
+    {
+        config.aiTimeoutMs = static_cast<std::int64_t>(parseUnsigned(value, 1000, 60000, source));
     }
     else
     {
@@ -600,14 +628,19 @@ Environment variables:
   NCS_WEBSOCKET_QUEUE_CAPACITY,
   NCS_LOG_LEVEL, NCS_LOG_DIRECTORY, NCS_DATABASE_PATH,
   NCS_TLS_CERTIFICATE, NCS_TLS_PRIVATE_KEY, NCS_ALLOW_INSECURE_HTTP,
-  NCS_CORS_ALLOWED_ORIGINS, NCS_TENCENT_MAP_KEY
+  NCS_CORS_ALLOWED_ORIGINS, NCS_TENCENT_MAP_KEY,
+  NCS_AI_PROVIDER, NCS_AI_MODEL, NCS_AI_BASE_URL, NCS_AI_API_KEY,
+  NCS_AI_TIMEOUT_MS
 
 Environment files:
   An environment file supplies default values. The file named by NCS_ENV_FILE
   is used when that variable is set (a missing or unreadable file is a hard
   error); otherwise <asset-directory>/.env is loaded when present. Entries
   use the same names as the environment variables above, except the Tencent
-  geocoding key, which is written TENCENT_MAP_SERVER_KEY in the file.
+  geocoding key, which is written TENCENT_MAP_SERVER_KEY in the file, and the
+  AI settings, which are written AI_PROVIDER, AI_MODEL, AI_BASE_URL,
+  AI_API_KEY and AI_TIMEOUT_MS. The AI API key is read from the environment or
+  the .env file only and is never echoed, logged or returned in any response.
 
 Command-line values override environment variables, which override
 environment-file entries. Development defaults are

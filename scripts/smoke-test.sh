@@ -4,8 +4,9 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${1:-${repo_dir}/build/dev}"
 
-QT_QPA_PLATFORM=offscreen "${build_dir}/apps/user/ncs_user" --smoke-test
-QT_QPA_PLATFORM=offscreen "${build_dir}/apps/admin/ncs_admin" --smoke-test
+# 车主端（apps/user）与管理端（apps/admin）均已改造为 Vue 3 Web 客户端：
+# 没有 ncs_user / ncs_admin 可执行目标，C++ 冒烟只剩服务端；
+# Web 端冒烟在各自目录执行 npm run test 与 npm run build。
 
 # ncs_server 没有一次性 --smoke-test 模式：以临时数据库在回环端口拉起进程，
 # 就绪探活通过即视为冒烟成功，退出时清理进程与临时目录。
