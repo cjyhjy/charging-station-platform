@@ -348,10 +348,36 @@ func (s *AdminStore) UpdateTariff(ctx context.Context, update admin.TariffUpdate
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	previous, err := s.GetTariff(ctx, update.ChargerID)
+	// Read the previous tariff inside the same transaction under a row
+	// lock, so the audit's before/after pair corresponds to exactly this
+	// update even under concurrent tariff changes.
+	var previous admin.TariffView
+	var prevOffPeakPrice sql.NullInt64
+	var prevOffPeakStartHour, prevOffPeakEndHour sql.NullInt16
+	err = tx.QueryRowContext(ctx, `SELECT id, price_per_kwh_cents, service_price_per_kwh_cents,
+off_peak_electricity_price_per_kwh_cents, off_peak_start_hour, off_peak_end_hour
+FROM chargers WHERE id = $1 FOR UPDATE`, update.ChargerID).Scan(
+		&previous.ChargerID, &previous.ElectricityPriceCent, &previous.ServicePriceCent,
+		&prevOffPeakPrice, &prevOffPeakStartHour, &prevOffPeakEndHour)
+	if errors.Is(err, sql.ErrNoRows) {
+		return admin.TariffView{}, admin.ErrChargerUnavailable
+	}
 	if err != nil {
 		return admin.TariffView{}, err
 	}
+	if prevOffPeakPrice.Valid {
+		value := prevOffPeakPrice.Int64
+		previous.OffPeakPriceCent = &value
+	}
+	if prevOffPeakStartHour.Valid {
+		value := prevOffPeakStartHour.Int16
+		previous.OffPeakStartHour = &value
+	}
+	if prevOffPeakEndHour.Valid {
+		value := prevOffPeakEndHour.Int16
+		previous.OffPeakEndHour = &value
+	}
+
 	if _, err := tx.ExecContext(ctx, `UPDATE chargers
 SET price_per_kwh_cents = $2, service_price_per_kwh_cents = $3,
     off_peak_electricity_price_per_kwh_cents = $4, off_peak_start_hour = $5, off_peak_end_hour = $6,
@@ -361,16 +387,48 @@ WHERE id = $1`,
 		update.OffPeakPriceCent, update.OffPeakStartHour, update.OffPeakEndHour); err != nil {
 		return admin.TariffView{}, err
 	}
+
+	// Re-read the updated row inside the transaction as the returned view.
+	var updated admin.TariffView
+	var newOffPeakPrice sql.NullInt64
+	var newOffPeakStartHour, newOffPeakEndHour sql.NullInt16
+	err = tx.QueryRowContext(ctx, `SELECT id, price_per_kwh_cents, service_price_per_kwh_cents,
+off_peak_electricity_price_per_kwh_cents, off_peak_start_hour, off_peak_end_hour
+FROM chargers WHERE id = $1`, update.ChargerID).Scan(
+		&updated.ChargerID, &updated.ElectricityPriceCent, &updated.ServicePriceCent,
+		&newOffPeakPrice, &newOffPeakStartHour, &newOffPeakEndHour)
+	if err != nil {
+		return admin.TariffView{}, err
+	}
+	if newOffPeakPrice.Valid {
+		value := newOffPeakPrice.Int64
+		updated.OffPeakPriceCent = &value
+	}
+	if newOffPeakStartHour.Valid {
+		value := newOffPeakStartHour.Int16
+		updated.OffPeakStartHour = &value
+	}
+	if newOffPeakEndHour.Valid {
+		value := newOffPeakEndHour.Int16
+		updated.OffPeakEndHour = &value
+	}
+
 	if err := s.appendAudit(tx, ctx, update.AdminID, "tariff.update", "charger",
 		strconvFormatInt64(update.ChargerID), "",
 		map[string]any{
 			"previous": map[string]any{
 				"electricityPrice": previous.ElectricityPriceCent,
 				"servicePrice":     previous.ServicePriceCent,
+				"offPeakPrice":     previous.OffPeakPriceCent,
+				"offPeakStartHour": previous.OffPeakStartHour,
+				"offPeakEndHour":   previous.OffPeakEndHour,
 			},
 			"new": map[string]any{
-				"electricityPrice": update.ElectricityPriceCent,
-				"servicePrice":     update.ServicePriceCent,
+				"electricityPrice": updated.ElectricityPriceCent,
+				"servicePrice":     updated.ServicePriceCent,
+				"offPeakPrice":     updated.OffPeakPriceCent,
+				"offPeakStartHour": updated.OffPeakStartHour,
+				"offPeakEndHour":   updated.OffPeakEndHour,
 			},
 		}); err != nil {
 		return admin.TariffView{}, err
@@ -378,7 +436,7 @@ WHERE id = $1`,
 	if err := tx.Commit(); err != nil {
 		return admin.TariffView{}, err
 	}
-	return s.GetTariff(ctx, update.ChargerID)
+	return updated, nil
 }
 
 // ForceRelease cancels the active order of an occupied charger (CREATED or
@@ -391,6 +449,19 @@ func (s *AdminStore) ForceRelease(ctx context.Context, command admin.ForceReleas
 		return admin.StationRecordCharger{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	scope := fmt.Sprintf("admin:%d:charger:release:%d", command.AdminID, command.ChargerID)
+	replay, replayed, err := s.claimIdempotency(tx, ctx, scope, command.IdempotencyKey, command.RequestHash)
+	if err != nil {
+		return admin.StationRecordCharger{}, err
+	}
+	if replayed {
+		var replayedCharger admin.StationRecordCharger
+		if err := json.Unmarshal(replay, &replayedCharger); err != nil {
+			return admin.StationRecordCharger{}, fmt.Errorf("decode idempotency replay: %w", err)
+		}
+		return replayedCharger, nil
+	}
 
 	var chargerStatus, chargerCode string
 	err = tx.QueryRowContext(ctx, `SELECT status, code FROM chargers WHERE id = $1 FOR UPDATE`, command.ChargerID).
@@ -444,20 +515,28 @@ WHERE id = $1`, orderID); err != nil {
 			return admin.StationRecordCharger{}, err
 		}
 	}
+	result := admin.StationRecordCharger{
+		ChargerID:   command.ChargerID,
+		ChargerCode: chargerCode,
+		OrderNo:     orderNo,
+		Status:      command.TargetStatus,
+	}
 	if err := s.appendAudit(tx, ctx, command.AdminID, "charger.force-release", "charger",
 		strconvFormatInt64(command.ChargerID), command.TraceID,
 		map[string]any{"orderNo": orderNo, "reason": command.Reason, "targetStatus": command.TargetStatus}); err != nil {
 		return admin.StationRecordCharger{}, err
 	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return admin.StationRecordCharger{}, err
+	}
+	if err := s.finalizeIdempotency(tx, ctx, scope, command.IdempotencyKey, body); err != nil {
+		return admin.StationRecordCharger{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return admin.StationRecordCharger{}, err
 	}
-	return admin.StationRecordCharger{
-		ChargerID:   command.ChargerID,
-		ChargerCode: chargerCode,
-		OrderNo:     orderNo,
-		Status:      command.TargetStatus,
-	}, nil
+	return result, nil
 }
 
 // GetUserDetail returns the administrative user view with the balance.
@@ -473,7 +552,7 @@ WHERE u.id = $1`
 		&detail.ID, &detail.Phone, &detail.DisplayName, &detail.AvatarURL, &detail.Status,
 		&detail.BalanceCent, &detail.RegisteredAt, &deletedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return admin.UserDetail{}, admin.ErrInvalidAdminActor
+		return admin.UserDetail{}, admin.ErrUserNotFound
 	}
 	if err != nil {
 		return admin.UserDetail{}, err

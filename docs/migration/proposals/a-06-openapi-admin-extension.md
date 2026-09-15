@@ -1,4 +1,7 @@
-# A-06 OpenAPI 变更提案（待集成人员确认后合入 api/openapi.yaml）
+# A-06 OpenAPI 变更提案
+
+状态：六个管理端点已按集成人员指示登记入 `api/openapi.yaml`（含 A-04 批准的
+四个钱包端点），本文件保留为变更说明存档。
 
 ## 1. GET /api/v1/admin/chargers/{chargerId}/tariff
 

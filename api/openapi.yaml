@@ -539,6 +539,75 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /wallet:
+    get:
+      tags: [wallet]
+      operationId: getWallet
+      responses:
+        '200':
+          description: Wallet balance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /wallet/top-up:
+    post:
+      tags: [wallet]
+      operationId: topUpWallet
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amountCent]
+              properties:
+                amountCent:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  maximum: 1000000
+      responses:
+        '200':
+          description: Wallet credited (idempotent on Idempotency-Key)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /wallet/transactions:
+    get:
+      tags: [wallet]
+      operationId: listWalletTransactions
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [TOP_UP, CHARGE, REFUND, ADJUSTMENT]
+      responses:
+        '200':
+          description: Ledger page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LedgerPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /admin/stations:
     get:
       tags: [admin]
@@ -615,6 +684,257 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /admin/users/{userId}:
+    get:
+      tags: [admin]
+      operationId: adminGetUser
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Administrative user detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDetailResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/users/{userId}/transactions:
+    get:
+      tags: [admin]
+      operationId: adminListUserTransactions
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [TOP_UP, CHARGE, REFUND, ADJUSTMENT]
+      responses:
+        '200':
+          description: User ledger page (admin view)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LedgerPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/users/{userId}/freeze:
+    post:
+      tags: [admin]
+      operationId: adminFreezeUser
+      description: Disables the account and revokes all its sessions
+        immediately (BR-07). Self-freezing is rejected.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Account frozen
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserStatusEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/users/{userId}/unfreeze:
+    post:
+      tags: [admin]
+      operationId: adminUnfreezeUser
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Account re-enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserStatusEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/chargers/{chargerId}/tariff:
+    get:
+      tags: [admin]
+      operationId: adminGetTariff
+      parameters:
+        - name: chargerId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Charger tariff
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TariffResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [admin]
+      operationId: adminUpdateTariff
+      description: Price adjustment. Audited with previous and new values;
+        running orders are unaffected (tariff snapshot at charging start).
+      parameters:
+        - name: chargerId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TariffUpdateRequest'
+      responses:
+        '200':
+          description: Updated tariff
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TariffResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/chargers/{chargerId}/release:
+    post:
+      tags: [admin]
+      operationId: adminForceRelease
+      description: |-
+        BR-11 forced release with reason and target charger status. Only
+        orders in CREATED or STARTING are releasable; charging or stopping
+        orders are rejected with 409. STARTING orders queue a
+        CANCEL_START revocation command in the same transaction.
+      parameters:
+        - name: chargerId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason, targetStatus]
+              properties:
+                reason:
+                  type: string
+                  minLength: 2
+                  maxLength: 200
+                targetStatus:
+                  type: string
+                  enum: [IDLE, DISABLED]
+      responses:
+        '200':
+          description: Charger released
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /admin/audit:
+    get:
+      tags: [admin]
+      operationId: adminListAudit
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: actorId
+          in: query
+          schema:
+            type: string
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: resourceType
+          in: query
+          schema:
+            type: string
+        - name: resourceId
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Audit trail page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
   /admin/users:
     get:
       tags: [admin]
@@ -670,6 +990,48 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /admin/orders/{orderNo}/refund:
+    post:
+      tags: [admin]
+      operationId: adminRefundOrder
+      description: Returns a completed order's settled amount to the user's
+        wallet (BR-11 audit inside the transaction). The order business state
+        stays COMPLETED; only the payment state reverts.
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 64
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 200
+      responses:
+        '200':
+          description: Refund recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WalletResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
   /admin/chargers/{chargerId}/restart:
     post:
       tags: [admin]
@@ -1314,6 +1676,234 @@ components:
         code: {type: integer, enum: [0]}
         message: {type: string}
         data: {$ref: '#/components/schemas/Command'}
+
+    WalletView:
+      type: object
+      required: [balanceCent]
+      properties:
+        balanceCent:
+          type: integer
+          format: int64
+          minimum: 0
+    WalletResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/WalletView'}
+    LedgerEntry:
+      type: object
+      required: [id, transactionType, amountCent, balanceBeforeCent, balanceAfterCent, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        transactionType:
+          type: string
+          enum: [TOP_UP, CHARGE, REFUND, ADJUSTMENT]
+        amountCent:
+          type: integer
+          format: int64
+        balanceBeforeCent:
+          type: integer
+          format: int64
+          minimum: 0
+        balanceAfterCent:
+          type: integer
+          format: int64
+          minimum: 0
+        orderNo:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    LedgerPageEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [items, meta]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/LedgerEntry'}
+            meta: {$ref: '#/components/schemas/PageMeta'}
+    TariffUpdateRequest:
+      type: object
+      required: [electricityPriceCentPerKwh, servicePriceCentPerKwh]
+      properties:
+        electricityPriceCentPerKwh:
+          type: integer
+          format: int64
+          minimum: 0
+        servicePriceCentPerKwh:
+          type: integer
+          format: int64
+          minimum: 0
+        offPeakElectricityPriceCentPerKwh:
+          type: integer
+          format: int64
+          minimum: 0
+        offPeakStartHour:
+          type: integer
+          minimum: 0
+          maximum: 23
+        offPeakEndHour:
+          type: integer
+          minimum: 0
+          maximum: 23
+    TariffView:
+      type: object
+      required: [chargerId, electricityPriceCentPerKwh, servicePriceCentPerKwh]
+      properties:
+        chargerId:
+          type: integer
+          format: int64
+        electricityPriceCentPerKwh:
+          type: integer
+          format: int64
+          minimum: 0
+        servicePriceCentPerKwh:
+          type: integer
+          format: int64
+          minimum: 0
+        offPeakElectricityPriceCentPerKwh:
+          type: integer
+          format: int64
+          minimum: 0
+        offPeakStartHour:
+          type: integer
+          minimum: 0
+          maximum: 23
+        offPeakEndHour:
+          type: integer
+          minimum: 0
+          maximum: 23
+    TariffResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/TariffView'}
+    UserDetail:
+      type: object
+      required: [id, phone, displayName, status, balanceCent, registeredAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        phone:
+          type: string
+        displayName:
+          type: string
+        avatarUrl:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        balanceCent:
+          type: integer
+          format: int64
+          minimum: 0
+        registeredAt:
+          type: string
+          format: date-time
+        deletedAt:
+          type: string
+          format: date-time
+    UserDetailResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/UserDetail'}
+    UserStatusEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [id, status]
+          properties:
+            id:
+              type: integer
+              format: int64
+            status:
+              type: string
+              enum: [ACTIVE, DISABLED]
+    ReleaseResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [chargerId, chargerCode, status]
+          properties:
+            chargerId:
+              type: integer
+              format: int64
+            chargerCode:
+              type: string
+            orderNo:
+              type: string
+            status:
+              type: string
+              enum: [IDLE, DISABLED]
+    AuditEntry:
+      type: object
+      required: [id, actorType, actorId, action, resourceType, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        actorType:
+          type: string
+        actorId:
+          type: string
+        action:
+          type: string
+        resourceType:
+          type: string
+        resourceId:
+          type: string
+        requestId:
+          type: string
+        payload:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    AuditPageEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [items, meta]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/AuditEntry'}
+            meta: {$ref: '#/components/schemas/PageMeta'}
 
 security:
   - bearerAuth: []
