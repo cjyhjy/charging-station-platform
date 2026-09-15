@@ -18,6 +18,46 @@ import (
 	"github.com/heguangV/charging-station-platform/backend/migrations"
 )
 
+// testDatabaseLockKey namespaces the advisory lock that serializes test
+// binaries sharing one database ("NCS_TEST").
+const testDatabaseLockKey int64 = 0x4E43535F54455354
+
+// lockTestDatabase takes a session-level advisory lock for the duration of one
+// test.
+//
+// TestRunSerializesConcurrentRuns and TestRunWorksWithSingleConnectionPool drop
+// and rebuild every table, so two test binaries pointed at the same database
+// destroy each other's schema: with a second process running, an unrelated test
+// failed with `relation "schema_migrations" does not exist` (SQLSTATE 42P01).
+// The lock makes the schema-rebuilding tests exclusive across processes instead
+// of documenting a rule nobody can enforce.
+func lockTestDatabase(t *testing.T, dsn string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	t.Cleanup(cancel)
+
+	lockDB, err := Open(ctx, dsn, 1)
+	if err != nil {
+		t.Fatalf("open the lock connection: %v", err)
+	}
+	conn, err := lockDB.Conn(ctx)
+	if err != nil {
+		_ = lockDB.Close()
+		t.Fatalf("take the lock connection: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, testDatabaseLockKey); err != nil {
+		_ = conn.Close()
+		_ = lockDB.Close()
+		t.Fatalf("lock the test database: %v", err)
+	}
+	t.Cleanup(func() {
+		// Closing the connection releases the lock even if the unlock fails.
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, testDatabaseLockKey)
+		_ = conn.Close()
+		_ = lockDB.Close()
+	})
+}
+
 // integrationDB returns a migrated database when NCS_TEST_PG_DSN points at a
 // disposable database; tests skip otherwise. The schema is applied through
 // the same runner the API uses at startup.
@@ -27,6 +67,7 @@ func integrationDB(t *testing.T) (*sql.DB, context.Context) {
 	if dsn == "" {
 		t.Skip("NCS_TEST_PG_DSN not set; PostgreSQL integration tests skipped")
 	}
+	lockTestDatabase(t, dsn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
