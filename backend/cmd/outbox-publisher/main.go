@@ -67,6 +67,53 @@ type loopDeps struct {
 	logger   *slog.Logger
 	interval time.Duration
 	batch    int
+	// observer receives the facts only the publishing loop knows: whether this process holds the
+	// lock, whether it lost it, and when it last managed to publish. It is optional so the loop
+	// stays usable without a metrics endpoint (tests, one-off runs).
+	observer loopObserver
+}
+
+// loopObserver is the loop's view of the process metrics.
+type loopObserver interface {
+	LockAcquired()
+	LockLost()
+	LocksHeld(bool)
+	Standby()
+	Published(int)
+	PassFailed()
+}
+
+// registryObserver writes the loop's facts into the process registry.
+type registryObserver struct {
+	registry *observability.Registry
+	clock    *observability.SuccessClock
+}
+
+func (o *registryObserver) LockAcquired() {
+	o.registry.SetGauge(observability.MetricPublisherStandby, nil, 0)
+}
+
+func (o *registryObserver) LockLost() {
+	o.registry.IncCounter(observability.MetricPublisherLockLossesTotal, nil, 1)
+}
+
+func (o *registryObserver) LocksHeld(held bool) {
+	if !held {
+		o.registry.SetGauge(observability.MetricPublisherStandby, nil, 1)
+	}
+}
+
+func (o *registryObserver) Standby() {
+	o.registry.SetGauge(observability.MetricPublisherStandby, nil, 1)
+}
+
+func (o *registryObserver) Published(count int) {
+	o.registry.IncCounter(observability.MetricPublisherPublishedTotal, nil, float64(count))
+	o.clock.Mark()
+}
+
+func (o *registryObserver) PassFailed() {
+	o.registry.IncCounter(observability.MetricPublisherPassFailuresTotal, nil, 1)
 }
 
 func main() {
@@ -140,6 +187,52 @@ func main() {
 		}
 	}()
 
+	// The publisher's own facts - lock held or lost, standby, last successful publish - are invisible
+	// from the API, so this process serves its own endpoint. Loopback by default; a public bind has to
+	// be requested explicitly and is refused otherwise (B-06 ruling on ops endpoints).
+	registry := observability.NewRegistry()
+	successClock := observability.NewSuccessClock(registry, observability.MetricPublisherLastPublish)
+	// Fixed series are created at startup so a scrape always finds the metrics this process promises.
+	observability.RegisterProcessMetrics(registry, observability.ProcessMetricsConfig{Publisher: true})
+	metrics, err := observability.StartMetricsServer(observability.MetricsServerConfig{
+		Addr:            envOr(metricsAddrEnv, defaultMetricsAddr),
+		Registry:        registry,
+		Logger:          logger,
+		AllowPublicBind: truthyEnv(metricsAllowPublicEnv),
+	})
+	if err != nil {
+		logger.Error("start metrics endpoint", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metrics.Shutdown(shutdownCtx); err != nil {
+			logger.Error("shutdown metrics endpoint", "error", err)
+		}
+	}()
+
+	// Dependency and backlog sampling: a publisher that cannot reach PostgreSQL cannot publish, and
+	// the backlog gauge is the number an operator watches while that is true.
+	probeCtx, stopProbe := context.WithCancel(ctx)
+	probeDone := make(chan struct{})
+	go func() {
+		defer close(probeDone)
+		observability.ProbeDependencies(probeCtx, observability.ProbeConfig{
+			PostgresUp:    func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
+			RedisUp:       func(ctx context.Context) bool { return capabilities.Ready(ctx) == nil },
+			SchemaVersion: func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
+			OutboxBacklog: func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
+			Registry:      registry,
+			Logger:        logger,
+			Interval:      dependencyProbeInterval,
+		})
+	}()
+	defer func() {
+		stopProbe()
+		<-probeDone
+	}()
+
 	logger.Info("outbox publisher starting",
 		"interval", intervalFlag.String(),
 		"batch", *batchFlag,
@@ -147,6 +240,7 @@ func main() {
 	)
 
 	deps := loopDeps{
+		observer: &registryObserver{registry: registry, clock: successClock},
 		source:   source,
 		writer:   capabilities.Streams,
 		locker:   advisoryLocker{db: db},
@@ -212,6 +306,9 @@ func runLoop(ctx context.Context, deps loopDeps) error {
 		// guarantee this module is approved on, so the liveness of the lock is checked before
 		// every pass, and losing it stops publication until it can be acquired again.
 		if lock != nil && !lock.Alive(ctx) {
+			if deps.observer != nil {
+				deps.observer.LockLost()
+			}
 			deps.logger.Error("publisher lock is no longer held; stopping publication until it can be re-acquired",
 				"reason", "the lock session ended, so another publisher may now be active")
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -230,6 +327,9 @@ func runLoop(ctx context.Context, deps loopDeps) error {
 				return fmt.Errorf("acquire publisher lock: %w", err)
 			}
 			if acquired == nil {
+				if deps.observer != nil {
+					deps.observer.Standby()
+				}
 				if standby {
 					deps.logger.Warn("another outbox publisher holds the lock; standing by without publishing")
 					standby = false
@@ -237,6 +337,9 @@ func runLoop(ctx context.Context, deps loopDeps) error {
 			} else {
 				lock = acquired
 				standby = true
+				if deps.observer != nil {
+					deps.observer.LockAcquired()
+				}
 				deps.logger.Info("outbox publisher lock acquired; this process is publishing")
 			}
 		}
@@ -249,10 +352,16 @@ func runLoop(ctx context.Context, deps loopDeps) error {
 					return nil
 				}
 				// A failed pass is not fatal: the row stays unpublished and the next pass
-				// retries it. Logging keeps a persistent failure visible.
+				// retries it. The counter and the log keep a persistent failure visible.
+				if deps.observer != nil {
+					deps.observer.PassFailed()
+				}
 				deps.logger.Error("publish pass failed", "error", err, "published", result.Published)
 			} else if result.Published > 0 {
 				published += result.Published
+				if deps.observer != nil {
+					deps.observer.Published(result.Published)
+				}
 				deps.logger.Info("published outbox rows", "pass_published", result.Published, "total_published", published)
 			}
 		}
@@ -293,6 +402,31 @@ type advisoryLockHandle struct {
 func (h advisoryLockHandle) Alive(ctx context.Context) bool { return h.lock.Alive(ctx) }
 
 func (h advisoryLockHandle) Release(ctx context.Context) error { return h.lock.Release(ctx) }
+
+// The ops endpoint defaults (B-06 ruling): API 9090, worker 9091, publisher 9092, all loopback,
+// all overridable through the environment, none hardcoded to a public interface.
+const (
+	metricsAddrEnv          = "NCS_METRICS_ADDR"
+	metricsAllowPublicEnv   = "NCS_METRICS_ALLOW_PUBLIC_BIND"
+	defaultMetricsAddr      = "127.0.0.1:9092"
+	dependencyProbeInterval = 5 * time.Second
+)
+
+func truthyEnv(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// envOr reads a trimmed environment variable, falling back when it is unset or blank.
+func envOr(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
 
 func durationOr(raw string, fallback time.Duration) time.Duration {
 	raw = strings.TrimSpace(raw)

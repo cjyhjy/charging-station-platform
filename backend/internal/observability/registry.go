@@ -92,6 +92,27 @@ const (
 	// between a committed business transaction and the stream, and the first thing to grow when
 	// the publisher is down.
 	MetricOutboxUnpublished = "ncs_pg_outbox_unpublished"
+
+	// MetricWorkerLastSuccess is the Unix time of the last delivery the worker finished
+	// successfully. A process can be alive, connected and consuming nothing; this is the series that
+	// turns that state into an alert instead of a log line somebody has to notice.
+	MetricWorkerLastSuccess = "ncs_worker_last_success_timestamp_seconds"
+	// MetricPublisherLastPublish is the Unix time of the last publish pass that wrote at least one
+	// row, so a publisher that is up but idle on an empty outbox stays distinguishable from one that
+	// is stuck.
+	MetricPublisherLastPublish = "ncs_publisher_last_publish_timestamp_seconds"
+	// MetricPublisherLockLossesTotal counts the times the publisher found it no longer held the
+	// advisory lock. Each one is a window in which another publisher may have become active, so a
+	// non-zero value is an event to look at rather than a routine counter.
+	MetricPublisherLockLossesTotal = "ncs_publisher_lock_losses_total"
+	// MetricPublisherStandby is 1 while this publisher is waiting for the lock another instance holds.
+	MetricPublisherStandby = "ncs_publisher_standby"
+	// MetricPublisherPublishedTotal counts the outbox rows this process published.
+	MetricPublisherPublishedTotal = "ncs_publisher_published_total"
+	// MetricPublisherPassFailuresTotal counts publish passes that returned an error. The rows stay
+	// unpublished and are retried, so this counter is what separates "the outbox is empty" from
+	// "the outbox cannot be written to".
+	MetricPublisherPassFailuresTotal = "ncs_publisher_pass_failures_total"
 )
 
 // Dependency label values for MetricDependencyUp.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/heguangV/charging-station-platform/backend/internal/event"
+	"github.com/heguangV/charging-station-platform/backend/internal/observability"
 )
 
 // These tests cover the parts of the publishing process that are not PostgreSQL: the loop's
@@ -383,5 +384,146 @@ func TestDurationAndIntParsing(t *testing.T) {
 	}
 	if got := intOr("0", 7); got != 7 {
 		t.Fatalf("expected the fallback for a zero batch, got %d", got)
+	}
+}
+
+// recordingObserver captures what the loop reports, so the process metrics can be asserted without
+// a registry or an HTTP endpoint.
+//
+// It is called from the loop goroutine and read from the test goroutine, so every field is behind a
+// mutex: a metrics observer that is not concurrency safe would be a race in the process it observes.
+type recordingObserver struct {
+	mu         sync.Mutex
+	acquired   int
+	lost       int
+	standby    int
+	passFailed int
+	published  int
+}
+
+func (o *recordingObserver) LockAcquired() { o.mu.Lock(); o.acquired++; o.mu.Unlock() }
+func (o *recordingObserver) LockLost()     { o.mu.Lock(); o.lost++; o.mu.Unlock() }
+func (o *recordingObserver) Standby()      { o.mu.Lock(); o.standby++; o.mu.Unlock() }
+func (o *recordingObserver) PassFailed()   { o.mu.Lock(); o.passFailed++; o.mu.Unlock() }
+func (o *recordingObserver) Published(count int) {
+	o.mu.Lock()
+	o.published += count
+	o.mu.Unlock()
+}
+func (o *recordingObserver) LocksHeld(bool) {}
+
+// counts returns a consistent snapshot of everything the observer recorded.
+func (o *recordingObserver) counts() (acquired, lost, standby, passFailed, published int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.acquired, o.lost, o.standby, o.passFailed, o.published
+}
+
+// The publisher's state is only visible from the publisher: holding the lock, standing by, losing it,
+// and when it last managed to publish. These are the facts the ruling asks the endpoint to expose, so
+// the loop's reporting is pinned here.
+func TestLoopReportsLockStateAndPublishes(t *testing.T) {
+	source := &scriptedSource{records: []event.OutboxRecord{outboxRecord("1"), outboxRecord("2")}, marked: map[string]time.Time{}}
+	writer := &countingWriter{}
+	locker := newStubLocker(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observer := &recordingObserver{}
+	deps := newScriptedDeps(source, writer, locker)
+	deps.observer = observer
+	done := make(chan error, 1)
+	go func() { done <- runLoop(ctx, deps) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for source.published() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if acquired, _, _, _, published := observer.counts(); acquired == 0 || published == 0 {
+		t.Fatalf("lock acquisition and publishing must both be reported: acquired=%d published=%d", acquired, published)
+	}
+
+	// Losing the lock is an event, not a routine counter: it is the window in which another
+	// publisher may have become active.
+	locker.kill()
+	for {
+		if _, lost, _, _, _ := observer.counts(); lost > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("losing the lock was not reported")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, lost, _, _, _ := observer.counts(); lost != 1 {
+		t.Fatalf("lock losses reported = %d, want 1", lost)
+	}
+	cancel()
+	<-done
+}
+
+// A process that never gets the lock must report standing by rather than looking idle-but-healthy.
+func TestLoopReportsStandbyWithoutTheLock(t *testing.T) {
+	source := &scriptedSource{records: []event.OutboxRecord{outboxRecord("1")}, marked: map[string]time.Time{}}
+	writer := &countingWriter{}
+	locker := newStubLocker(false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	observer := &recordingObserver{}
+	deps := newScriptedDeps(source, writer, locker)
+	deps.observer = observer
+	done := make(chan error, 1)
+	go func() { done <- runLoop(ctx, deps) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, _, standby, _, _ := observer.counts(); standby > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("standing by was not reported while another publisher holds the lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, _, _, _, published := observer.counts(); published != 0 {
+		t.Fatal("a standby publisher must not report published rows")
+	}
+	cancel()
+	<-done
+}
+
+// The registry observer is what the endpoint actually serves, so it is exercised directly: counters
+// rise, the standby gauge follows the lock, and the last-publish timestamp moves only on success.
+func TestRegistryObserverWritesProcessMetrics(t *testing.T) {
+	registry := observability.NewRegistry()
+	clock := observability.NewSuccessClock(registry, observability.MetricPublisherLastPublish)
+	pinned := time.Date(2026, 9, 15, 8, 30, 0, 0, time.UTC)
+	clock.SetNow(func() time.Time { return pinned })
+	observer := &registryObserver{registry: registry, clock: clock}
+
+	observer.Standby()
+	if value, _ := registry.Gauge(observability.MetricPublisherStandby, nil); value != 1 {
+		t.Fatalf("standby gauge = %v, want 1", value)
+	}
+	observer.LockAcquired()
+	if value, _ := registry.Gauge(observability.MetricPublisherStandby, nil); value != 0 {
+		t.Fatalf("standby gauge = %v, want 0 after acquiring the lock", value)
+	}
+	observer.Published(3)
+	if count, _ := registry.Counter(observability.MetricPublisherPublishedTotal, nil); count != 3 {
+		t.Fatalf("published counter = %v, want 3", count)
+	}
+	if value, present := registry.Gauge(observability.MetricPublisherLastPublish, nil); !present || value != float64(pinned.Unix()) {
+		t.Fatalf("last publish = %v (present %v), want %d", value, present, pinned.Unix())
+	}
+	observer.PassFailed()
+	if count, _ := registry.Counter(observability.MetricPublisherPassFailuresTotal, nil); count != 1 {
+		t.Fatalf("pass failure counter = %v, want 1", count)
+	}
+	observer.LockLost()
+	observer.LockLost()
+	if count, _ := registry.Counter(observability.MetricPublisherLockLossesTotal, nil); count != 2 {
+		t.Fatalf("lock loss counter = %v, want 2", count)
 	}
 }

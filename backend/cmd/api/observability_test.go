@@ -1,17 +1,13 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/heguangV/charging-station-platform/backend/internal/observability"
 )
@@ -127,172 +123,6 @@ func TestInstrumentationRecordsStatusAndLatency(t *testing.T) {
 	// permanently busy process.
 	if gauge, ok := registry.Gauge(observability.MetricRequestsInFlight, nil); !ok || gauge != 0 {
 		t.Fatalf("in-flight gauge = %v (present %v), want 0", gauge, ok)
-	}
-}
-
-func TestMetricsHandlerAnswersPrometheusTextAndRejectsOtherMethods(t *testing.T) {
-	registry := observability.NewRegistry()
-	registry.AddCounter(observability.MetricRequestsTotal, map[string]string{
-		"method": "GET", "route": "/api/v1/orders", "status": "200",
-	}, 5)
-	handler := metricsHandler(registry, discardLogger())
-
-	recorder := httptest.NewRecorder()
-	handler(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", recorder.Code)
-	}
-	if got := recorder.Header().Get("Content-Type"); got != observability.PrometheusContentType {
-		t.Fatalf("content type = %q, want %q", got, observability.PrometheusContentType)
-	}
-	body := recorder.Body.String()
-	if !strings.Contains(body, "# TYPE ncs_api_requests_total counter") || !strings.Contains(body, "ncs_api_requests_total") {
-		t.Fatalf("body is not a Prometheus exposition:\n%s", body)
-	}
-
-	// A metrics endpoint that accepts writes is a needless surface; the API answers 405 in the
-	// shared error envelope like every other route.
-	recorder = httptest.NewRecorder()
-	handler(recorder, httptest.NewRequest(http.MethodPost, "/metrics", nil))
-	if recorder.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want 405", recorder.Code)
-	}
-}
-
-// Readiness must follow the dependencies. This drives every combination, including the one that
-// matters most: PostgreSQL up and Redis down still means not ready, because sessions and locks fail
-// closed and the process would only answer failures.
-func TestDependencyProbeDrivesReadiness(t *testing.T) {
-	cases := []struct {
-		name         string
-		postgresUp   bool
-		redisUp      bool
-		wantReady    bool
-		wantFailures map[string]float64
-	}{
-		{name: "both up", postgresUp: true, redisUp: true, wantReady: true},
-		{name: "postgres down", postgresUp: false, redisUp: true, wantReady: false, wantFailures: map[string]float64{"postgres": 1}},
-		{name: "redis down", postgresUp: true, redisUp: false, wantReady: false, wantFailures: map[string]float64{"redis": 1}},
-		{name: "both down", postgresUp: false, redisUp: false, wantReady: false, wantFailures: map[string]float64{"postgres": 1, "redis": 1}},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			registry := observability.NewRegistry()
-			var ready bool
-			var readyCalls int
-			probeDependencies(context.Background(), probeConfig{
-				postgresUp:    func(context.Context) bool { return testCase.postgresUp },
-				redisUp:       func(context.Context) bool { return testCase.redisUp },
-				schemaVersion: func(context.Context) (int, error) { return 7, nil },
-				outboxBacklog: func(context.Context) (int64, error) { return 12, nil },
-				registry:      registry,
-				logger:        discardLogger(),
-				interval:      0,
-				setReady:      func(value bool) { ready = value; readyCalls++ },
-			})
-
-			if ready != testCase.wantReady {
-				t.Fatalf("ready = %v, want %v", ready, testCase.wantReady)
-			}
-			if readyCalls != 1 {
-				t.Fatalf("readiness set %d times, want once per probe", readyCalls)
-			}
-			postgresGauge, _ := registry.Gauge(observability.MetricDependencyUp, map[string]string{"dependency": "postgres"})
-			if want := boolGauge(testCase.postgresUp); postgresGauge != want {
-				t.Fatalf("postgres up gauge = %v, want %v", postgresGauge, want)
-			}
-			redisGauge, _ := registry.Gauge(observability.MetricDependencyUp, map[string]string{"dependency": "redis"})
-			if want := boolGauge(testCase.redisUp); redisGauge != want {
-				t.Fatalf("redis up gauge = %v, want %v", redisGauge, want)
-			}
-			for dependency, want := range testCase.wantFailures {
-				got, ok := registry.Counter(observability.MetricProbeFailuresTotal, map[string]string{"dependency": dependency})
-				if !ok || got != want {
-					t.Fatalf("probe failures for %s = %v (present %v), want %v", dependency, got, ok, want)
-				}
-			}
-			// The gauges that only make sense with a live database are set when it is up and left
-			// alone when it is not: reporting a stale backlog while PostgreSQL is unreachable would
-			// be a fabricated number.
-			backlog, backlogPresent := registry.Gauge(observability.MetricOutboxUnpublished, nil)
-			version, versionPresent := registry.Gauge(observability.MetricMigrationsVersion, nil)
-			if testCase.postgresUp {
-				if !backlogPresent || backlog != 12 || !versionPresent || version != 7 {
-					t.Fatalf("backlog = %v (present %v), version = %v (present %v), want 12 and 7", backlog, backlogPresent, version, versionPresent)
-				}
-			} else if backlogPresent || versionPresent {
-				t.Fatalf("a probe failure must not publish a backlog or a version: %v / %v", backlog, version)
-			}
-		})
-	}
-}
-
-// A probe that raises a broken query must not take the process down: the failure is logged and the
-// dependency gauges stay honest.
-func TestDependencyProbeSurvivesATemplateFailure(t *testing.T) {
-	registry := observability.NewRegistry()
-	var ready bool
-	probeDependencies(context.Background(), probeConfig{
-		postgresUp:    func(context.Context) bool { return true },
-		redisUp:       func(context.Context) bool { return true },
-		schemaVersion: func(context.Context) (int, error) { return 0, errors.New("relation does not exist") },
-		outboxBacklog: func(context.Context) (int64, error) { return 0, errors.New("connection reset") },
-		registry:      registry,
-		logger:        discardLogger(),
-		interval:      0,
-		setReady:      func(value bool) { ready = value },
-	})
-	if !ready {
-		t.Fatal("a failing gauge query must not make the process unready: the database answered")
-	}
-	if _, present := registry.Gauge(observability.MetricOutboxUnpublished, nil); present {
-		t.Fatal("a failed backlog query must not publish a value")
-	}
-}
-
-// The probe runs until its context is cancelled, which is what makes shutdown deterministic.
-func TestDependencyProbeStopsOnContextCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	var mu sync.Mutex
-	samples := 0
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		probeDependencies(ctx, probeConfig{
-			postgresUp:    func(context.Context) bool { return true },
-			redisUp:       func(context.Context) bool { return true },
-			schemaVersion: func(context.Context) (int, error) { return 7, nil },
-			outboxBacklog: func(context.Context) (int64, error) { return 0, nil },
-			registry:      observability.NewRegistry(),
-			logger:        discardLogger(),
-			interval:      5 * time.Millisecond,
-			setReady: func(bool) {
-				mu.Lock()
-				samples++
-				mu.Unlock()
-			},
-		})
-	}()
-
-	deadline := time.After(2 * time.Second)
-	for {
-		mu.Lock()
-		enough := samples >= 2
-		mu.Unlock()
-		if enough {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("the probe did not sample repeatedly")
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the probe did not stop when its context was cancelled")
 	}
 }
 

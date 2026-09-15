@@ -15,6 +15,7 @@ import (
 	"github.com/heguangV/charging-station-platform/backend/internal/admin"
 	"github.com/heguangV/charging-station-platform/backend/internal/auth"
 	"github.com/heguangV/charging-station-platform/backend/internal/config"
+	"github.com/heguangV/charging-station-platform/backend/internal/event"
 	"github.com/heguangV/charging-station-platform/backend/internal/httpapi"
 	"github.com/heguangV/charging-station-platform/backend/internal/observability"
 	"github.com/heguangV/charging-station-platform/backend/internal/order"
@@ -223,13 +224,34 @@ func run() error {
 	// not the deployment.
 	registry := observability.NewRegistry()
 	registry.RegisterHistogram(observability.MetricRequestDuration, observability.DefaultDurationBuckets)
+	observability.RegisterProcessMetrics(registry, observability.ProcessMetricsConfig{
+		Streams: []string{event.StreamOrderEvent, event.StreamChargeEvent, event.StreamChargerCommand},
+	})
 	instrumented := registerWithMetrics{inner: server, registry: registry}
 	authHandlers.Register(instrumented)
 	stationHandlers.Register(instrumented)
 	orderHandlers.Register(instrumented)
 	adminHandlers.Register(instrumented)
 	chargerEventHandlers.Register(instrumented)
-	server.Register("/metrics", metricsHandler(registry, logger))
+
+	// Metrics are served on their own endpoint rather than on the business listener: the ruling
+	// assigns this process a dedicated ops address, the address is guarded (loopback or private),
+	// and a scrape never shares a connection pool with customer traffic.
+	metrics, err := metricsServer(metricsConfig{
+		envName:        metricsAddrEnv,
+		allowPublicEnv: metricsAllowPublicEnv,
+		fallback:       defaultMetricsAddr,
+	}, registry, logger)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := metrics.Shutdown(shutdownCtx); err != nil {
+			logger.Error("shutdown metrics endpoint", "error", err)
+		}
+	}()
 
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
@@ -302,15 +324,15 @@ func run() error {
 	probeDone := make(chan struct{})
 	go func() {
 		defer close(probeDone)
-		probeDependencies(probeCtx, probeConfig{
-			postgresUp:    func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
-			redisUp:       func(ctx context.Context) bool { return commands.Ping(ctx) == nil },
-			schemaVersion: func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
-			outboxBacklog: func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
-			registry:      registry,
-			logger:        logger,
-			interval:      dependencyProbeInterval,
-			setReady:      server.SetReady,
+		observability.ProbeDependencies(probeCtx, observability.ProbeConfig{
+			PostgresUp:    func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
+			RedisUp:       func(ctx context.Context) bool { return commands.Ping(ctx) == nil },
+			SchemaVersion: func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
+			OutboxBacklog: func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
+			Registry:      registry,
+			Logger:        logger,
+			Interval:      dependencyProbeInterval,
+			Ready:         server.SetReady,
 		})
 	}()
 	defer func() {

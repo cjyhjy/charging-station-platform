@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
 	"os"
@@ -9,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/heguangV/charging-station-platform/backend/internal/httpapi"
 	"github.com/heguangV/charging-station-platform/backend/internal/observability"
 )
 
@@ -91,103 +89,46 @@ func (r *metricsRecorder) Write(body []byte) (int, error) {
 	return r.ResponseWriter.Write(body)
 }
 
-// metricsHandler serves the registry in the Prometheus text format.
+// metricsAddress returns the address the process serves its metrics on.
 //
-// The endpoint is deliberately not registered in OpenAPI: it is an internal operational endpoint
-// for Nginx and the monitoring system, and the ruling keeps it out of the client contract. Nginx
-// restricts it to the ops range, and the API binds to the internal interface, so it is not
-// reachable from the internet even before that.
-func metricsHandler(registry *observability.Registry, logger *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			w.Header().Set("Allow", "GET, HEAD")
-			httpapi.WriteError(w, request, http.StatusMethodNotAllowed, httpapi.CodeMethodNotAllowed, "method not allowed", nil)
-			return
-		}
-		w.Header().Set("Content-Type", observability.PrometheusContentType)
-		if _, err := registry.WritePrometheus(w); err != nil {
-			// The body may already be partially written; log and stop rather than write an error
-			// envelope into the middle of an exposition body.
-			logger.Error("metrics exposition failed", "error", err)
-		}
+// The default is loopback on the port the ruling assigned to each process, and the address is
+// validated by the observability package before it is bound: an empty or public bind is refused
+// unless NCS_METRICS_ALLOW_PUBLIC_BIND says otherwise.
+func metricsAddress(envName, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return value
 	}
+	return fallback
 }
 
-// probeDependencies samples PostgreSQL and Redis and drives readiness from the result.
-//
-// Refusing to serve while a dependency is down is the frozen policy for this platform (sessions and
-// locks fail closed, and PostgreSQL is the source of truth), so the probe turns that policy into
-// something the deployment can act on: /readyz reports 503, and the load balancer stops sending
-// traffic to a process that would only fail it.
-//
-// Every external call is a function field rather than a connection, so the probe's behaviour -
-// including what it does when a dependency fails - is testable without a database.
-func probeDependencies(ctx context.Context, cfg probeConfig) {
-	probe := func() {
-		postgresUp := cfg.postgresUp(ctx)
-		cfg.registry.SetGauge(observability.MetricDependencyUp, map[string]string{"dependency": observability.DependencyPostgres}, boolGauge(postgresUp))
-		if postgresUp {
-			if version, err := cfg.schemaVersion(ctx); err != nil {
-				cfg.logger.Error("schema version probe failed", "error", err)
-			} else {
-				cfg.registry.SetGauge(observability.MetricMigrationsVersion, nil, float64(version))
-			}
-			if backlog, err := cfg.outboxBacklog(ctx); err != nil {
-				cfg.logger.Error("outbox backlog probe failed", "error", err)
-			} else {
-				cfg.registry.SetGauge(observability.MetricOutboxUnpublished, nil, float64(backlog))
-			}
-		} else {
-			cfg.registry.IncCounter(observability.MetricProbeFailuresTotal, map[string]string{"dependency": observability.DependencyPostgres}, 1)
-			cfg.logger.Error("postgres probe failed; the API reports not ready")
-		}
-
-		redisUp := cfg.redisUp(ctx)
-		cfg.registry.SetGauge(observability.MetricDependencyUp, map[string]string{"dependency": observability.DependencyRedis}, boolGauge(redisUp))
-		if !redisUp {
-			cfg.registry.IncCounter(observability.MetricProbeFailuresTotal, map[string]string{"dependency": observability.DependencyRedis}, 1)
-			cfg.logger.Error("redis probe failed; the API reports not ready")
-		}
-
-		cfg.setReady(postgresUp && redisUp)
+// metricsServer starts the process metrics endpoint and returns it for shutdown.
+func metricsServer(cfg metricsConfig, registry *observability.Registry, logger *slog.Logger) (*observability.MetricsServer, error) {
+	server, err := observability.StartMetricsServer(observability.MetricsServerConfig{
+		Addr:            metricsAddress(cfg.envName, cfg.fallback),
+		Registry:        registry,
+		Logger:          logger,
+		AllowPublicBind: truthy(os.Getenv(cfg.allowPublicEnv)),
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	probe()
-	if cfg.interval <= 0 {
-		return
-	}
-	ticker := time.NewTicker(cfg.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			probe()
-		}
-	}
+	return server, nil
 }
 
-// probeConfig carries the probe's dependencies and the interval between samples. The functions are
-// fields so a test can drive every outcome without a PostgreSQL or a Redis.
-type probeConfig struct {
-	postgresUp    func(context.Context) bool
-	redisUp       func(context.Context) bool
-	schemaVersion func(context.Context) (int, error)
-	outboxBacklog func(context.Context) (int64, error)
-	registry      *observability.Registry
-	logger        *slog.Logger
-	interval      time.Duration
-	setReady      func(bool)
+type metricsConfig struct {
+	envName        string
+	allowPublicEnv string
+	fallback       string
 }
 
-// redisPinger is the part of the Redis client the probe needs.
-func boolGauge(value bool) float64 {
-	if value {
-		return 1
-	}
-	return 0
-}
+// The ruling assigned each process its own ops address, all on loopback: 9090 for the API, 9091 for
+// the worker, 9092 for the publisher. They are defaults, not constants - a deployment can move them
+// with the environment variable, and the address is validated before it is bound.
+const (
+	metricsAddrEnv        = "NCS_METRICS_ADDR"
+	metricsAllowPublicEnv = "NCS_METRICS_ALLOW_PUBLIC_BIND"
+	defaultMetricsAddr    = "127.0.0.1:9090"
+)
 
 // migrationGateEnv documents the flag and environment variable that apply migrations and exit.
 //
