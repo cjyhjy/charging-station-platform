@@ -83,6 +83,10 @@ func TestSchemaVersionOnAnUnmigratedDatabase(t *testing.T) {
 	if base == "" {
 		t.Skip("NCS_TEST_PG_DSN not set; PostgreSQL integration tests skipped")
 	}
+	expected, err := HighestMigrationVersion(migrations.FS)
+	if err != nil {
+		t.Fatalf("HighestMigrationVersion() error = %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
