@@ -73,3 +73,7 @@ NCS_TEST_PG_DSN="<一次性测试库 DSN>" \
 NCS_REDIS_TEST_ADDR="127.0.0.1:6379" NCS_REDIS_TEST_DB=15 \
 go test -count=1 -race ./...
 ```
+
+## 接口对接
+
+客户端和 Agent 的接口基线见仓库根目录的 docs/api-integration.md，字段、枚举和响应结构以 api/openapi.yaml 为准。当前 Go 实际实现的路由与 OpenAPI 已对齐；订单确认接口未实现，也未登记在 OpenAPI 中。
