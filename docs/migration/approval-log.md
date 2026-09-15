@@ -34,7 +34,7 @@ BE-B-04、BE-B-05 的行仍需按最终审批结论逐项追溯补齐；旧行�
 | B-03 | Redis 和 Redis Streams | APPROVED（历史 P0） | Redis、Streams、ACK、Pending 和降级已交付 |
 | B-04 | Outbox Publisher | APPROVED（历史 P0） | Publisher 和单活机制已交付 |
 | B-05 | Worker 和设备事件 | APPROVED（历史 P0） | Worker、设备回执和重试死信已交付 |
-| B-06 | 部署、联调和可观测性 | NOT_STARTED | PR #39 合入 develop 后开工 |
+| B-06 | 部署、联调和可观测性 | APPROVED (conditional go-live) | 0ef71f3; four go-live validations have reproducible evidence; production checklist remains |
 | B-07 | 钱包/账务数据支撑 | APPROVED（条件合入） | `2ed84a2`；P0/P1 并发与窗口外幂等修复、真实 PG 矩阵和 schema 契约测试通过；需部署环境持续验证测试库互斥方案 |
 
 边界裁决：
