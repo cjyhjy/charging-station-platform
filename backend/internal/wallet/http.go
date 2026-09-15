@@ -249,6 +249,8 @@ func writeWalletError(w http.ResponseWriter, r *http.Request, err error) {
 		httpapi.WriteError(w, r, http.StatusConflict, 14, "idempotency key conflict", nil)
 	case errors.Is(err, ErrOrderNotRefundable):
 		httpapi.WriteError(w, r, http.StatusConflict, 18, "order has no settled amount to refund", nil)
+	case errors.Is(err, ErrOrderNotFound):
+		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeResourceNotFound, "order not found", nil)
 	case errors.Is(err, ErrWalletNotFound):
 		httpapi.WriteError(w, r, http.StatusNotFound, 4, "wallet not found", nil)
 	default:
