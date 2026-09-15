@@ -144,20 +144,40 @@ func TestAdminUserAndOrderLists(t *testing.T) {
 		}
 	}
 
-	// The seed orders have no bill yet: create one and filter by its number
-	// prefix (the timestamp part of ORD + yyyyMMddHHmmss...).
+	// The seed orders have no bill yet: create one and filter by its order number.
+	//
+	// The filter is a prefix match, so it is given the whole number rather than the 14-character
+	// timestamp part: a timestamp prefix is shared by every order created in the same second, and the
+	// assertion below ("exactly the seeded order comes back") then depends on what the rest of the
+	// suite happened to create at that moment. That is how this test failed once the A-01 persistence
+	// suite started creating orders - the filter, not the store, was the problem.
 	seeded, err := store.CreateOrder(ctx, order.CreateOrderCommand{
 		UserID: userA, ChargerID: chargerA, IdempotencyKey: "adm-order-" + suffix, RequestHash: "h", TraceID: "t",
 	})
 	if err != nil {
 		t.Fatalf("seed order: %v", err)
 	}
-	orders, err := store.ListOrders(ctx, admin.AdminOrderFilter{Page: 1, PageSize: 100, OrderNo: seeded.OrderNo[3:17]})
+	orders, err := store.ListOrders(ctx, admin.AdminOrderFilter{Page: 1, PageSize: 100, OrderNo: seeded.OrderNo})
 	if err != nil {
 		t.Fatalf("ListOrders() error = %v", err)
 	}
 	if len(orders.Items) != 1 || orders.Items[0].OrderNo != seeded.OrderNo {
 		t.Fatalf("orders = %#v", orders)
+	}
+	// The prefix behaviour itself is worth keeping pinned, so a shorter prefix is checked to return
+	// at least the seeded order rather than exactly one.
+	byPrefix, err := store.ListOrders(ctx, admin.AdminOrderFilter{Page: 1, PageSize: 100, OrderNo: seeded.OrderNo[:6]})
+	if err != nil {
+		t.Fatalf("ListOrders(prefix) error = %v", err)
+	}
+	found := false
+	for _, item := range byPrefix.Items {
+		if item.OrderNo == seeded.OrderNo {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a prefix filter did not return the order it matches: %#v", byPrefix.Items)
 	}
 	if orders.Items[0].PaymentStatus != "PENDING" {
 		t.Fatalf("payment status = %q", orders.Items[0].PaymentStatus)
