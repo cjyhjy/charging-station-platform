@@ -74,6 +74,9 @@ func run() error {
 	if len(report.Applied) > 0 {
 		logger.Info("database migrations applied", "count", len(report.Applied))
 	}
+	if migrateOnlyRequested() {
+		return nil
+	}
 
 	// Redis carries sessions, login rate limiting and SMS codes. Sessions
 	// must be shared so any replica validates any token; Redis is therefore
