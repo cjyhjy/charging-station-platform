@@ -1,0 +1,152 @@
+# NCS Go 后端 Nginx 站点模板（由部署脚本用 envsubst 渲染）
+#
+# 职责（见 docs/backend-architecture.md 第 2、7、8 节与 B-06 验收口径）：
+#   1. H5 / 管理端静态资源；
+#   2. /api/v1/ 反向代理到 Go API；
+#   3. 设备回执入口 /api/v1/internal/charger-events 只允许设备网关来源网络；
+#   4. /metrics、/readyz 只允许本机与运维网段；
+#   5. trace ID（$request_id）贯穿访问日志与后端。
+#
+# 渲染变量：
+#   NCS_PUBLIC_HOST       对外域名（生产由部署环境注入真实域名，模板不写死）
+#   NCS_HTTP_PORT         HTTP 监听端口（用于 301 跳转到 HTTPS）
+#   NCS_HTTPS_PORT        HTTPS 监听端口
+#   NCS_STATIC_ROOT       H5 静态资源根目录
+#   NCS_API_UPSTREAM      Go API 地址，例如 127.0.0.1:8080
+#   NCS_TLS_CERT          TLS 证书路径
+#   NCS_TLS_KEY           TLS 私钥路径
+#   NCS_GATEWAY_ALLOW     设备网关来源网段（allow 指令参数，例如 10.20.30.0/24）
+#   NCS_OPS_ALLOW         运维/本机网段（allow 指令参数，例如 127.0.0.1）
+#   NCS_ACCESS_LOG        访问日志路径
+#   NCS_ERROR_LOG         错误日志路径
+#
+# 渲染必须给出变量白名单：
+#   envsubst '${NCS_PUBLIC_HOST} ...' < ncs-api.conf.template > sites/ncs-api.conf
+# 不带白名单的 envsubst 会把 nginx 自己的变量（$host、$request_id、$remote_addr ...）一起替换成空值，
+# 结果是 proxy_set_header 少参数、nginx -t 直接失败。
+#
+# 端口与域名（B-06 裁决）：公网 HTTPS 监听 443，Nginx → Go API 走 127.0.0.1:8080，
+# H5 走静态文件目录；/metrics 与 /readyz 仅内网可访问。本地演练用 8443/8088 覆盖。
+
+upstream ncs_go_api {
+    server ${NCS_API_UPSTREAM};
+    keepalive 32;
+}
+
+# trace ID 规则与 API 侧一致（backend/internal/httpapi 的 validRequestID：字母数字加 -_.: ，最长 128）：
+# 客户端给出的 id 合法就沿用（便于客户端把自己的日志串起来），否则用 Nginx 生成的 $request_id。
+# 这里刻意不无条件透传：非法值会污染访问日志，也无法在后端被接受。
+map $http_x_request_id $ncs_trace_id {
+    default                      $request_id;
+    "~^[A-Za-z0-9._:-]{1,128}$"  $http_x_request_id;
+}
+
+# 访问日志带上 trace ID，便于把一次请求串到 Outbox / Stream / Worker 日志。
+log_format ncs_main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" "$http_user_agent" '
+                    'request_id=$request_id upstream=$upstream_addr rt=$request_time';
+
+server {
+    listen ${NCS_HTTP_PORT};   # 公网默认 80（仅用于跳转到 HTTPS）
+    server_name ${NCS_PUBLIC_HOST};
+
+    # 回执入口与 API 一律走 HTTPS：明文入口只做跳转，避免设备令牌出现在明文链路里。
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen ${NCS_HTTPS_PORT} ssl;   # 公网默认 443
+    server_name ${NCS_PUBLIC_HOST};
+
+    ssl_certificate     ${NCS_TLS_CERT};
+    ssl_certificate_key ${NCS_TLS_KEY};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_session_cache   shared:NCS_TLS:10m;
+    ssl_session_timeout 10m;
+
+    access_log ${NCS_ACCESS_LOG} ncs_main;
+    error_log  ${NCS_ERROR_LOG} warn;
+
+    # 回执载荷很小；限制请求体，避免公开入口被当作上传通道。
+    client_max_body_size 256k;
+    client_body_timeout  10s;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+
+    # --- H5 / 管理端静态资源 -------------------------------------------------
+    root ${NCS_STATIC_ROOT};
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # --- 设备回执入口：只允许设备网关来源网络 --------------------------------
+    # 设备令牌可以推进订单并触发计费，因此这里既做网络限制，也不转发普通客户端请求。
+    location = /api/v1/internal/charger-events {
+        allow ${NCS_GATEWAY_ALLOW};
+        deny all;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-ID      $ncs_trace_id;
+        proxy_pass http://ncs_go_api;
+        proxy_read_timeout 15s;
+    }
+
+    # --- 指标与就绪探针：只允许本机/运维网段 ---------------------------------
+    location = /metrics {
+        allow ${NCS_OPS_ALLOW};
+        deny all;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_pass http://ncs_go_api;
+        access_log off;
+    }
+
+    location = /healthz {
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_pass http://ncs_go_api;
+        access_log off;
+    }
+
+    location = /readyz {
+        allow ${NCS_OPS_ALLOW};
+        deny all;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_pass http://ncs_go_api;
+        access_log off;
+    }
+
+    # --- 业务 API -----------------------------------------------------------
+    location /api/ {
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-ID      $ncs_trace_id;
+        proxy_set_header Connection        "";
+        proxy_pass http://ncs_go_api;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout    30s;
+        proxy_read_timeout    30s;
+
+        # 幂等键与设备回执语义都在后端；这里不重试非幂等请求。
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+    }
+}
