@@ -23,6 +23,12 @@ paths:
     get:
       tags: [system]
       operationId: healthz
+      # The probes are served at the root, NOT under the /api/v1 server prefix below:
+      # internal/httpapi/server.go registers "/healthz" and "/readyz" on the bare mux, and the
+      # deployment's nginx/systemd checks call them there. Without this override a generated client
+      # would ask for /api/v1/healthz and get 404.
+      servers:
+        - url: /
       security: []
       responses:
         '200':
@@ -41,6 +47,10 @@ paths:
     get:
       tags: [system]
       operationId: readyz
+      # Root-level like /healthz, and for the same reason; /metrics is deliberately not registered
+      # here (ops endpoint, never exposed to the front end).
+      servers:
+        - url: /
       security: []
       responses:
         '200':
