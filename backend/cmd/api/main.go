@@ -19,6 +19,7 @@ import (
 	"github.com/heguangV/charging-station-platform/backend/internal/order"
 	"github.com/heguangV/charging-station-platform/backend/internal/repository/postgres"
 	bredis "github.com/heguangV/charging-station-platform/backend/internal/repository/redis"
+	"github.com/heguangV/charging-station-platform/backend/internal/review"
 	"github.com/heguangV/charging-station-platform/backend/internal/station"
 	"github.com/heguangV/charging-station-platform/backend/internal/wallet"
 	"github.com/heguangV/charging-station-platform/backend/migrations"
@@ -217,6 +218,20 @@ func run() error {
 		return err
 	}
 	walletHandlers.Register(server)
+
+	reviewStore, err := postgres.NewReviewStore(db)
+	if err != nil {
+		return err
+	}
+	reviewService, err := review.NewService(reviewStore)
+	if err != nil {
+		return err
+	}
+	reviewHandlers, err := review.NewHandlers(reviewService, authHandlers, authHandlers)
+	if err != nil {
+		return err
+	}
+	reviewHandlers.Register(server)
 	chargerEventHandlers.Register(server)
 
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)

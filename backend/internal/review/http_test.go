@@ -1,0 +1,160 @@
+package review
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/heguangV/charging-station-platform/backend/internal/auth"
+	"github.com/heguangV/charging-station-platform/backend/internal/config"
+	"github.com/heguangV/charging-station-platform/backend/internal/httpapi"
+)
+
+type fakeStore struct {
+	review     ReviewView
+	reviewErr  error
+	appeal     AppealView
+	appealErr  error
+	wall       WallPage
+	approved   bool
+	approveErr error
+}
+
+func (f *fakeStore) CreateReview(_ context.Context, userID int64, orderNo string, stars int, comment string) (ReviewView, error) {
+	return ReviewView{OrderNo: orderNo, Stars: stars, Comment: comment, CreatedAt: time.Now().UTC()}, f.reviewErr
+}
+
+func (f *fakeStore) GetReview(context.Context, int64, string) (ReviewView, error) {
+	return f.review, f.reviewErr
+}
+
+func (f *fakeStore) ListWall(context.Context, WallFilter) (WallPage, error) {
+	return f.wall, nil
+}
+
+func (f *fakeStore) CreateAppeal(_ context.Context, userID int64, orderNo string, reason string) (AppealView, error) {
+	return AppealView{ID: 1, OrderNo: orderNo, Reason: reason, Status: AppealPending}, f.appealErr
+}
+
+func (f *fakeStore) ListAppeals(context.Context, AppealFilter) (AppealPage, error) {
+	return AppealPage{Items: []AppealView{{ID: 1, Status: AppealPending}}, Meta: PageMeta{Total: 1}}, nil
+}
+
+func (f *fakeStore) GetAppeal(_ context.Context, appealID int64) (AppealView, error) {
+	status := AppealPending
+	if f.approved {
+		status = AppealApproved
+	}
+	return AppealView{ID: appealID, Status: status}, nil
+}
+
+func (f *fakeStore) ApproveAppeal(context.Context, int64, int64) (bool, error) {
+	f.approved = true
+	return f.approved, f.approveErr
+}
+
+type fakeAuthProvider struct {
+	identity auth.Identity
+	found    bool
+}
+
+func (f fakeAuthProvider) RequireIdentity(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !f.found {
+			httpapi.WriteError(w, r, http.StatusUnauthorized, httpapi.CodeUnauthorized, "session is missing or expired", nil)
+			return
+		}
+		next(w, r.WithContext(auth.WithIdentity(r.Context(), f.identity)))
+	}
+}
+
+func (f fakeAuthProvider) RequireRole(role string, next http.HandlerFunc) http.HandlerFunc {
+	return f.RequireIdentity(next)
+}
+
+func (f fakeAuthProvider) RequireAdminWrite(next http.HandlerFunc) http.HandlerFunc {
+	return f.RequireRole(auth.RoleAdmin, next)
+}
+
+func newFixture(t *testing.T, identity auth.Identity, found bool) *httpapi.Server {
+	t.Helper()
+	store := &fakeStore{}
+	service, err := NewService(store)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	handlers, err := NewHandlers(service, fakeAuthProvider{identity: identity, found: found}, fakeAuthProvider{identity: identity, found: found})
+	if err != nil {
+		t.Fatalf("NewHandlers() error = %v", err)
+	}
+	server := httpapi.NewServer(config.Config{RequestIDHeader: "X-Request-ID"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handlers.Register(server)
+	server.SetReady(true)
+	return server
+}
+
+func TestReviewCreateValidation(t *testing.T) {
+	server := newFixture(t, auth.Identity{ID: 7, Role: auth.RoleUser, Status: auth.StatusActive}, true)
+
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"zero stars", `{"stars":0,"comment":"好"}`, http.StatusBadRequest},
+		{"six stars", `{"stars":6,"comment":"好"}`, http.StatusBadRequest},
+		{"empty comment", `{"stars":5,"comment":"  "}`, http.StatusBadRequest},
+		{"valid", `{"stars":5,"comment":"充电很快"}`, http.StatusCreated},
+	}
+	for _, testCase := range cases {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/orders/ORD20260915120000aaaa/review", strings.NewReader(testCase.body))
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != testCase.want {
+			t.Errorf("%s: status = %d, want %d", testCase.name, recorder.Code, testCase.want)
+		}
+	}
+}
+
+func TestWallRequiresAuthAndValidStation(t *testing.T) {
+	anon := newFixture(t, auth.Identity{}, false)
+	recorder := httptest.NewRecorder()
+	anon.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/stations/1/reviews", nil))
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous wall status = %d", recorder.Code)
+	}
+
+	authed := newFixture(t, auth.Identity{ID: 7, Role: auth.RoleUser, Status: auth.StatusActive}, true)
+	recorder2 := httptest.NewRecorder()
+	authed.Handler().ServeHTTP(recorder2, httptest.NewRequest(http.MethodGet, "/api/v1/stations/notanumber/reviews", nil))
+	if recorder2.Code != http.StatusBadRequest {
+		t.Fatalf("bad station status = %d", recorder2.Code)
+	}
+}
+
+func TestAppealApprovalEndpoint(t *testing.T) {
+	admin := newFixture(t, auth.Identity{ID: 2, Role: auth.RoleAdmin, AdminRole: auth.AdminRoleOperator, Status: auth.StatusActive}, true)
+
+	recorder := httptest.NewRecorder()
+	admin.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/admin/appeals/1/approve", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("approve status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	data := payload["data"].(map[string]any)
+	if data["status"] != AppealApproved {
+		t.Fatalf("status = %v", data["status"])
+	}
+}
+
+var _ = errors.New
