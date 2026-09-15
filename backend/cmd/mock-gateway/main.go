@@ -1,0 +1,444 @@
+// Command mock-gateway is a development-only HTTP stand-in for the charger gateway.
+//
+// It exists so the command half of the closed loop can be exercised end to end before the real
+// gateway protocol exists: the worker dispatches a command to it, it answers, and the platform
+// records the device outcome. It speaks the same HTTP contract as the dispatcher
+// (backend/cmd/worker/adapters.go) and nothing else.
+//
+// It is NOT a charger gateway. It does not implement Modbus, OCPP or any device protocol, and it
+// must never be enabled in a production configuration: the dispatcher only reaches it when the
+// gateway address is explicitly pointed at it, and the worker's default configuration has no
+// gateway address at all, so a deployment that forgot to set one fails instead of silently
+// dispatching to a mock.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+// defaultAddr keeps the mock off the ports the platform itself uses.
+const defaultAddr = "127.0.0.1:8091"
+
+// mockHeader marks every response so nobody mistakes this process for a device.
+const mockHeader = "X-NCS-Mock-Gateway"
+
+func main() {
+	var (
+		addrFlag    = flag.String("addr", envOr("NCS_MOCK_GATEWAY_ADDR", defaultAddr), "listen address")
+		delayFlag   = flag.Duration("delay", durationOr(os.Getenv("NCS_MOCK_GATEWAY_DELAY"), 0), "simulated device latency before answering")
+		resultFlag  = flag.String("result", envOr("NCS_MOCK_GATEWAY_RESULT", "COMPLETED"), "outcome to report: COMPLETED or FAILED")
+		failingFlag = flag.String("failing-chargers", envOr("NCS_MOCK_GATEWAY_FAILING_CHARGERS", ""), "comma separated charger ids answered with FAILED")
+	)
+	flag.Parse()
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger.Warn("starting the development mock charger gateway; it implements no device protocol and must not be used in production",
+		"addr", *addrFlag, "result", *resultFlag, "delay", delayFlag.String())
+
+	gateway := &mockGateway{
+		logger:   logger,
+		delay:    *delayFlag,
+		result:   strings.ToUpper(strings.TrimSpace(*resultFlag)),
+		failing:  parseIDSet(*failingFlag),
+		commands: map[string]*commandRecord{},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", gateway.handleHealth)
+	mux.HandleFunc("/chargers/", gateway.handleCommand)
+
+	server := &http.Server{
+		Addr:              *addrFlag,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	listener, err := net.Listen("tcp", *addrFlag)
+	if err != nil {
+		logger.Error("listen", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("mock gateway listening", "addr", listener.Addr().String())
+	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error("serve", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("mock gateway stopped", "commands", gateway.commandCount(), "executed", gateway.executedCount())
+}
+
+// mockGateway answers device commands.
+type mockGateway struct {
+	logger  *slog.Logger
+	delay   time.Duration
+	result  string
+	failing map[string]bool
+
+	mu       sync.Mutex
+	commands map[string]*commandRecord
+
+	// executions counts how many times device work was actually simulated, so a test can show that
+	// concurrent duplicates did not execute it twice.
+	executions int
+}
+
+// commandRecord is what the gateway remembers about one command id.
+//
+// It exists so the gateway is idempotent the way a real one must be: a retry of the SAME request
+// is answered with the outcome that was already decided (the device is not restarted twice), while
+// the same command id carrying a DIFFERENT request is a conflict rather than a silent overwrite -
+// overwriting was the review finding, because it hides a caller that reuses command ids for
+// different work.
+type commandRecord struct {
+	commandID string
+	chargerID string
+	// orderNo is part of the request's identity: the same command id carrying a
+	// different order is a different piece of work, and answering it with the first
+	// outcome would attach a device result to the wrong order.
+	orderNo string
+	action  string
+	// done is closed when the outcome is decided. A duplicate that arrives while the first request
+	// is still waiting for the device waits on it instead of executing the command again.
+	done        chan struct{}
+	inProgress  bool
+	status      string
+	detail      string
+	attempts    int
+	firstSeenAt time.Time
+}
+
+// outcome is the decided result, or ok=false while the device has not answered yet.
+func (r *commandRecord) outcome() (status string, detail string, ok bool) {
+	if r.inProgress {
+		return "", "", false
+	}
+	return r.status, r.detail, true
+}
+
+type commandRequest struct {
+	CommandID string `json:"command_id"`
+	ChargerID string `json:"charger_id"`
+	OrderNo   string `json:"order_no"`
+	Action    string `json:"action"`
+	TraceID   string `json:"trace_id"`
+}
+
+// supportedActions mirrors the frozen command contract: the station-level restart plus the two
+// charge actions. The charge actions name an order; a restart does not.
+var supportedActions = map[string]bool{"RESTART": true, "START_CHARGING": true, "STOP_CHARGING": true}
+
+// actionNeedsOrder mirrors the same contract's field requirement.
+func actionNeedsOrder(action string) bool {
+	return action == "START_CHARGING" || action == "STOP_CHARGING"
+}
+
+type commandResponse struct {
+	CommandID string `json:"command_id"`
+	ChargerID string `json:"charger_id"`
+	Status    string `json:"status"`
+	Detail    string `json:"detail"`
+	Attempts  int    `json:"attempts"`
+}
+
+func (g *mockGateway) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set(mockHeader, "true")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "kind": "mock-gateway"})
+}
+
+// handleCommand answers POST /chargers/{chargerId}/commands.
+//
+// The command id is the idempotency key. A repeated request - same id, same charger, same action,
+// same order - is answered with the stored outcome and an incremented attempt counter, because a
+// retry must not restart a device a second time. The same id with a different charger, action or
+// order is a 409: the stored result belongs to the first request, and answering the second one
+// would report an outcome for work that was never done (or, for a charge command, attach it to the
+// wrong order).
+func (g *mockGateway) handleCommand(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set(mockHeader, "true")
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	chargerID := strings.TrimPrefix(r.URL.Path, "/chargers/")
+	chargerID = strings.TrimSuffix(chargerID, "/commands")
+	chargerID = strings.Trim(chargerID, "/")
+	if chargerID == "" || strings.Contains(chargerID, "/") {
+		http.Error(w, `{"error":"charger id is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	var request commandRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&request); err != nil {
+		http.Error(w, `{"error":"invalid command body"}`, http.StatusBadRequest)
+		return
+	}
+	commandID := strings.TrimSpace(request.CommandID)
+	if commandID == "" {
+		http.Error(w, `{"error":"command_id is required"}`, http.StatusBadRequest)
+		return
+	}
+	if header := r.Header.Get("Idempotency-Key"); header != "" && header != commandID {
+		http.Error(w, `{"error":"Idempotency-Key does not match command_id"}`, http.StatusBadRequest)
+		return
+	}
+	action := strings.ToUpper(strings.TrimSpace(request.Action))
+
+	// The claim loop owns the whole lifecycle of a command id, and it is a loop because a
+	// placeholder can disappear underneath a waiter: when the request that was executing the
+	// command goes away before the device answers, it clears its placeholder and wakes the waiters,
+	// and each of them then has to re-decide what it is allowed to do. Answering from the state it
+	// saw before waking is what produced a fabricated FAILED receipt for a device that had simply
+	// not been reached.
+	for {
+		claim, conflict := g.claim(commandID, chargerID, request.OrderNo, action)
+		if conflict {
+			writeCommandError(w, http.StatusConflict, "command_id was already used for a different request", commandID)
+			return
+		}
+
+		if claim.execute {
+			// This request now owns the placeholder, and every early return from here must give it
+			// back: an unsupported action used to return before the placeholder was cleared, so the
+			// next request with the same id waited forever for an outcome that could never arrive.
+			if !supportedActions[action] {
+				g.abandon(commandID, "unsupported action")
+				// An action outside the frozen set is a client error, which the dispatcher turns
+				// into a permanent failure.
+				writeCommandError(w, http.StatusBadRequest, "unsupported action", commandID)
+				return
+			}
+			if actionNeedsOrder(action) && strings.TrimSpace(request.OrderNo) == "" {
+				g.abandon(commandID, "a charge command needs an order number")
+				writeCommandError(w, http.StatusBadRequest, action+" requires order_no", commandID)
+				return
+			}
+			status, detail, ok := g.simulate(r.Context(), commandID, chargerID, request.OrderNo, action, request.TraceID)
+			if !ok {
+				// The device never answered, so there is no outcome and no response to give.
+				return
+			}
+			writeCommandResponse(w, &commandRecord{
+				commandID: commandID, chargerID: chargerID,
+				status: status, detail: detail, attempts: 1,
+			})
+			return
+		}
+
+		if claim.waiter {
+			// Another delivery of the same command is talking to the device. Wait for it, then
+			// re-decide: if it produced an outcome this request replays it, and if it disappeared
+			// this request becomes the executor itself.
+			select {
+			case <-claim.record.done:
+				continue
+			case <-r.Context().Done():
+				return
+			}
+		}
+
+		// The command already has an outcome: reuse it rather than restarting a device.
+		g.mu.Lock()
+		claim.record.attempts++
+		replayed := *claim.record
+		g.mu.Unlock()
+		g.logger.Info("device command replayed", "command_id", commandID, "attempts", replayed.attempts)
+		writeCommandResponse(w, &replayed)
+		return
+	}
+}
+
+// simulate performs the device work and records the outcome.
+//
+// It returns ok=false when the request went away before the device answered, in which case the
+// placeholder has been cleared and no outcome was stored: a retry must be able to execute the
+// command, because nothing may claim a device accepted something it never received.
+func (g *mockGateway) simulate(ctx context.Context, commandID, chargerID, orderNo, action, traceID string) (status string, detail string, ok bool) {
+	if g.delay > 0 {
+		select {
+		case <-time.After(g.delay):
+		case <-ctx.Done():
+			g.abandon(commandID, "the request was cancelled before the device answered")
+			return "", "", false
+		}
+	}
+
+	status = g.result
+	if status == "" {
+		status = "COMPLETED"
+	}
+	if g.failing[chargerID] {
+		status = "FAILED"
+	}
+	detail = "mock gateway outcome"
+
+	g.mu.Lock()
+	record, exists := g.commands[commandID]
+	if !exists {
+		// Somebody abandoned this id while the device was answering. The work did happen, so a
+		// fresh record is written rather than dropping the outcome on the floor.
+		record = &commandRecord{commandID: commandID, chargerID: chargerID, orderNo: orderNo, action: action, done: make(chan struct{})}
+		g.commands[commandID] = record
+	}
+	record.status = status
+	record.detail = detail
+	record.inProgress = false
+	record.attempts = 1
+	g.executions++
+	g.mu.Unlock()
+	close(record.done)
+
+	g.logger.Info("device command handled",
+		"command_id", commandID, "charger_id", chargerID,
+		"action", action, "status", status, "trace_id", traceID)
+	return status, detail, true
+}
+
+// writeCommandError answers with the shared error shape.
+func writeCommandError(w http.ResponseWriter, status int, message, commandID string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":      message,
+		"command_id": commandID,
+	})
+}
+
+// commandClaim is what one request is allowed to do with a command id.
+type commandClaim struct {
+	// execute is true for the request that must simulate the device work.
+	execute bool
+	// waiter is true when another request is already executing this command.
+	waiter bool
+	// record is the stored record, for the execute and replay paths.
+	record *commandRecord
+}
+
+// claim resolves the command id in one critical section.
+//
+// The placeholder is created here, before the device delay, so a duplicate arriving during that
+// delay can only wait or conflict - it can never execute the same command again.
+func (g *mockGateway) claim(commandID, chargerID, orderNo, action string) (commandClaim, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	record, exists := g.commands[commandID]
+	if !exists {
+		record = &commandRecord{
+			commandID:   commandID,
+			chargerID:   chargerID,
+			orderNo:     orderNo,
+			action:      action,
+			done:        make(chan struct{}),
+			inProgress:  true,
+			attempts:    0,
+			firstSeenAt: time.Now().UTC(),
+		}
+		g.commands[commandID] = record
+		return commandClaim{execute: true, record: record}, false
+	}
+	if record.chargerID != chargerID || record.action != action || record.orderNo != orderNo {
+		// The stored outcome belongs to the first request; answering this one would report an
+		// outcome for work that was never done - and for a charge action it would report it against
+		// the wrong order, which is why order_no is part of the identity (BE-I-02 review).
+		return commandClaim{}, true
+	}
+	if record.inProgress {
+		return commandClaim{waiter: true, record: record}, false
+	}
+	return commandClaim{record: record}, false
+}
+
+// abandon clears a placeholder whose requester went away, so a retry can execute the command.
+func (g *mockGateway) abandon(commandID, detail string) {
+	g.mu.Lock()
+	record, ok := g.commands[commandID]
+	if !ok {
+		g.mu.Unlock()
+		return
+	}
+	delete(g.commands, commandID)
+	g.mu.Unlock()
+	close(record.done)
+	g.logger.Warn("device command abandoned without an outcome", "command_id", commandID, "detail", detail)
+}
+
+// executionsCount reports how often device work was simulated, for tests and the stop log.
+func (g *mockGateway) executionsCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.executions
+}
+
+func writeCommandResponse(w http.ResponseWriter, record *commandRecord) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(commandResponse{
+		CommandID: record.commandID,
+		ChargerID: record.chargerID,
+		Status:    record.status,
+		Detail:    record.detail,
+		Attempts:  record.attempts,
+	})
+}
+
+func (g *mockGateway) commandCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.commands)
+}
+
+// executedCount is what the shutdown line reports: how many commands actually reached the (mock)
+// device, which is the number a duplicate must not inflate.
+func (g *mockGateway) executedCount() int { return g.executionsCount() }
+
+func parseIDSet(raw string) map[string]bool {
+	set := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			set[part] = true
+		}
+	}
+	return set
+}
+
+func envOr(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func durationOr(raw string, fallback time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value < 0 {
+		fmt.Fprintf(os.Stderr, "invalid duration %q, using %s\n", raw, fallback)
+		return fallback
+	}
+	return value
+}
