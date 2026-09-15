@@ -48,7 +48,10 @@ finish() {
     echo "=== PITR drill report ==="
     echo "result:            $([[ ${status} -eq 0 ]] && echo PASS || echo FAIL)"
     echo "recovery target:   ${target_time:-not chosen}"
-    echo "recovery duration: $(( $(date +%s) - started_at )) seconds"
+    # Waiting for the target to age into the approved window is not recovery work, so the two numbers are
+    # reported apart: a single total would read as a slow replay when it is mostly the deliberate wait.
+    echo "wait for the window: ${measured_rewind_minutes:-0} minutes (the target aged to the approved band before recovery started)"
+    echo "recovery duration: ${replay_seconds:-$(( $(date +%s) - started_at ))} seconds (temporary instance start to ready)"
     echo "archive coverage:  ${coverage:-unknown}"
     if [[ ${status} -ne 0 ]]; then
         echo "failure reason:    ${reason}"
@@ -193,9 +196,28 @@ sleep 2
 # `2026-09-15 09:27:42.776091+00`, and the explicit offset keeps the value unambiguous regardless of
 # the server's own timezone. That difference cost one drill run and is recorded in the module note.
 target_time="$(psql "${source_dsn}" -tAc "SELECT to_char(CURRENT_TIMESTAMP AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'")"
+target_epoch="$(date -u +%s)"
 sleep 2
 psql "${source_dsn}" -q -c "INSERT INTO ncs_pitr_drill (label) VALUES ('after_target')"
 echo "target time: ${target_time} (between the two markers)"
+
+step "let the target age into the approved window"
+# The approved window is "recover to a point 5..15 minutes in the past", so the drill has to wait for
+# the target to be that old: recovering two seconds after it only proves that replay stops at a chosen
+# instant, not that the window the ruling asks for is reachable. WAL keeps streaming during the wait,
+# which is exactly what the archive is for. The measured age is what the report states and what the
+# assertion below checks.
+wait_seconds=$(( rewind_minutes * 60 ))
+while true; do
+    aged=$(( $(date -u +%s) - target_epoch ))
+    [[ "${aged}" -ge "${wait_seconds}" ]] && break
+    remaining=$(( wait_seconds - aged ))
+    echo "  target is ${aged}s old; waiting ${remaining}s more for the ${rewind_minutes}-minute window"
+    if [[ "${remaining}" -gt 30 ]]; then sleep 30; else sleep "${remaining}"; fi
+done
+measured_rewind_seconds=$(( $(date -u +%s) - target_epoch ))
+measured_rewind_minutes="$(python3 -c "print(f'{${measured_rewind_seconds}/60:.2f}')")"
+echo "target is now ${measured_rewind_minutes} minutes old (approved band: 5..15)"
 
 step "flush the WAL that contains the markers into the archive"
 # Two switches: the first completes the segment holding the markers, the second starts a fresh one so
@@ -235,6 +257,7 @@ if ! config_check="$(postgres -D "${base_dir}" -C max_connections 2>&1)"; then
 fi
 
 step "start the temporary instance and replay"
+replay_started_at="$(date +%s)"
 pg_ctl -D "${base_dir}" -l "${work_dir}/recovery.log" -w -t 120 start >/dev/null 2>&1
 temp_started="true"
 recovery_ok="false"
@@ -252,6 +275,7 @@ if [[ "${recovery_ok}" != "true" ]]; then
     reason="$(grep -i -m1 "fatal\|could not\|error" "${work_dir}/recovery.log" 2>/dev/null || echo 'the instance did not finish recovery within 120s')"
     fail "recovery did not complete: ${reason}"
 fi
+replay_seconds=$(( $(date +%s) - replay_started_at ))
 
 step "assert the recovered state is at the target, not past it"
 # The marker table lives in the SOURCE DATABASE, not in "postgres": pointing the assertion at the wrong
@@ -281,7 +305,12 @@ oldest_segment="$(ls -1t "${wal_dir}" | grep '^[0-9A-F]\{24\}$' | tail -1)"
 coverage="archive holds ${segments_now} segment(s) from the base backup at ${base_time} to now; the drill targeted ${target_time}"
 report_lines+=("markers: before_target present, after_target absent (recovery stopped at the target)")
 report_lines+=("latest recovered transaction: ${recovered_at}")
-report_lines+=("approved window: recovery target 5..15 minutes before a chosen point (this run used ${rewind_minutes} minutes as its nominal rewind)")
+# The band is asserted, not restated: a run whose target was not genuinely 5..15 minutes old when
+# recovery started does not verify the approved window and must not report that it did.
+if [[ "${measured_rewind_seconds}" -lt 300 || "${measured_rewind_seconds}" -gt 900 ]]; then
+    fail "the recovery target was ${measured_rewind_minutes} minutes old, outside the approved 5..15 minute window"
+fi
+report_lines+=("approved window: recovered to a target ${measured_rewind_minutes} minutes old (measured at recovery start, asserted 5..15)")
 
 echo
 finish 0
