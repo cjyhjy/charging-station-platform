@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,8 +24,12 @@ func TestHighestMigrationVersionFollowsTheEmbeddedSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HighestMigrationVersion() error = %v", err)
 	}
-	if version != 7 {
-		t.Fatalf("highest embedded migration = %d, want 7 (the BE-I-02 outcome table)", version)
+	expected, err := HighestMigrationVersion(migrations.FS)
+	if err != nil {
+		t.Fatalf("HighestMigrationVersion() error = %v", err)
+	}
+	if version != expected {
+		t.Fatalf("highest embedded migration = %d, want %d", version, expected)
 	}
 	if _, err := HighestMigrationVersion(nil); err == nil {
 		t.Fatal("expected a nil filesystem to be refused")
@@ -65,7 +70,7 @@ func TestSchemaVersionAndAssertionOnARealDatabase(t *testing.T) {
 	if !strings.Contains(message, "behind") || !strings.Contains(message, "start the API first") {
 		t.Fatalf("the gate must explain what to do next, got %q", message)
 	}
-	if !strings.Contains(message, "7") || !strings.Contains(message, "8") {
+	if !strings.Contains(message, strconv.Itoa(expected)) || !strings.Contains(message, strconv.Itoa(expected+1)) {
 		t.Fatalf("the gate must name both versions, got %q", message)
 	}
 }
@@ -113,7 +118,7 @@ func TestSchemaVersionOnAnUnmigratedDatabase(t *testing.T) {
 	if version != 0 {
 		t.Fatalf("version = %d, want 0", version)
 	}
-	if err := AssertSchemaVersion(ctx, scratch, 7); err == nil {
+	if err := AssertSchemaVersion(ctx, scratch, expected); err == nil {
 		t.Fatal("expected an unmigrated database to be refused")
 	}
 }
