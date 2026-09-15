@@ -260,6 +260,20 @@ func run() error {
 			logger.Error("shutdown metrics endpoint", "error", err)
 		}
 	}()
+	probeCtx, stopProbe := context.WithCancel(ctx)
+	probeDone := make(chan struct{})
+	go func() {
+		defer close(probeDone)
+		observability.ProbeDependencies(probeCtx, observability.ProbeConfig{
+			PostgresUp:      func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
+			RedisUp:         func(ctx context.Context) bool { return commands.Ping(ctx) == nil },
+			SchemaVersion:   func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
+			OutboxBacklog:   func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
+			OutboxOldestAge: func(ctx context.Context) (float64, error) { return postgres.OldestUnpublishedOutboxAge(ctx, db) },
+			Registry:        registry, Logger: logger, Interval: dependencyProbeInterval, Ready: server.SetReady,
+		})
+	}()
+	defer func() { stopProbe(); <-probeDone }()
 
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
