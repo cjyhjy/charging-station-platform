@@ -15,8 +15,7 @@ import (
 // Mutations run in one transaction covering the review/appeal row, the
 // order state and (for approved appeals) the wallet refund.
 type ReviewStore struct {
-	db    *sql.DB
-	clock func() time.Time
+	db *sql.DB
 }
 
 // NewReviewStore binds the store to a connection pool.
@@ -24,7 +23,7 @@ func NewReviewStore(db *sql.DB) (*ReviewStore, error) {
 	if db == nil {
 		return nil, errors.New("postgres: review store requires a database")
 	}
-	return &ReviewStore{db: db, clock: time.Now}, nil
+	return &ReviewStore{db: db}, nil
 }
 
 // reviewability check shared by CreateReview and CreateAppeal: the order
@@ -78,11 +77,14 @@ func (s *ReviewStore) CreateReview(ctx context.Context, userID int64, orderNo st
 
 	var existingStars int
 	var existingComment string
-	err = tx.QueryRowContext(ctx, `SELECT stars, comment FROM order_reviews WHERE order_no = $1`, orderNo).Scan(&existingStars, &existingComment)
+	var existingCreatedAt time.Time
+	err = tx.QueryRowContext(ctx, `SELECT stars, comment, created_at FROM order_reviews WHERE order_no = $1`, orderNo).Scan(&existingStars, &existingComment, &existingCreatedAt)
 	if err == nil {
 		// Same content replays the first result; different content conflicts.
+		// The replay carries the stored creation time, not a fabricated one —
+		// the replayed view must be identical to the first response.
 		if existingStars == stars && existingComment == comment {
-			return review.ReviewView{OrderNo: orderNo, Stars: existingStars, Comment: existingComment}, nil
+			return review.ReviewView{OrderNo: orderNo, Stars: existingStars, Comment: existingComment, CreatedAt: existingCreatedAt.UTC()}, nil
 		}
 		return review.ReviewView{}, review.ErrReviewConflict
 	}
@@ -90,32 +92,37 @@ func (s *ReviewStore) CreateReview(ctx context.Context, userID int64, orderNo st
 		return review.ReviewView{}, err
 	}
 
-	if _, err := tx.ExecContext(ctx, `INSERT INTO order_reviews (order_no, user_id, station_id, stars, comment)
-VALUES ($1, $2, (SELECT station_id FROM charging_orders WHERE order_no = $1), $3, $4)`,
-		orderNo, userID, stars, comment); err != nil {
+	var createdAt time.Time
+	if err := tx.QueryRowContext(ctx, `INSERT INTO order_reviews (order_no, user_id, station_id, stars, comment)
+VALUES ($1, $2, (SELECT station_id FROM charging_orders WHERE order_no = $1), $3, $4)
+RETURNING created_at`, orderNo, userID, stars, comment).Scan(&createdAt); err != nil {
 		return review.ReviewView{}, err
 	}
 
-	view := review.ReviewView{OrderNo: orderNo, Stars: stars, Comment: comment, CreatedAt: s.clock().UTC()}
+	view := review.ReviewView{OrderNo: orderNo, Stars: stars, Comment: comment, CreatedAt: createdAt.UTC()}
 	if err := tx.Commit(); err != nil {
 		return review.ReviewView{}, err
 	}
 	return view, nil
 }
 
-// GetReview returns the user's own review.
+// GetReview returns the user's own review. The review's association key is
+// the order business number (order_reviews.order_no, migration 0009), which
+// is UNIQUE on both sides of the join.
 func (s *ReviewStore) GetReview(ctx context.Context, userID int64, orderNo string) (review.ReviewView, error) {
-	const query = `SELECT r.order_no, r.stars, r.comment FROM order_reviews r
-JOIN charging_orders o ON o.id = r.order_id
+	const query = `SELECT r.order_no, r.stars, r.comment, r.created_at FROM order_reviews r
+JOIN charging_orders o ON o.order_no = r.order_no
 WHERE r.order_no = $1 AND o.user_id = $2`
 	var view review.ReviewView
-	err := s.db.QueryRowContext(ctx, query, orderNo, userID).Scan(&view.OrderNo, &view.Stars, &view.Comment)
+	var createdAt time.Time
+	err := s.db.QueryRowContext(ctx, query, orderNo, userID).Scan(&view.OrderNo, &view.Stars, &view.Comment, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return review.ReviewView{}, review.ErrNotFound
 	}
 	if err != nil {
 		return review.ReviewView{}, err
 	}
+	view.CreatedAt = createdAt.UTC()
 	return view, nil
 }
 
@@ -162,9 +169,11 @@ LIMIT $2 OFFSET $3`
 }
 
 // CreateAppeal records the appeal. Reviewability mirrors CreateReview: the
-// COMPLETED owner order, no existing appeal, unique order index as the
-// concurrency guard; identical-content replays return the stored appeal.
-// An unsettled (PENDING) bill has nothing to appeal yet — the confirmation
+// COMPLETED owner order. At most one appeal per order (UC-U-09): the unique
+// order index is the concurrency guard and, because the replay lookup runs
+// after the order lock, a same-content retry — including two racing submits
+// — returns the stored appeal, while a different-content one conflicts. An
+// unsettled (PENDING) bill has nothing to appeal yet — the confirmation
 // collects it first.
 func (s *ReviewStore) CreateAppeal(ctx context.Context, userID int64, orderNo string, reason string) (review.AppealView, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -181,12 +190,29 @@ func (s *ReviewStore) CreateAppeal(ctx context.Context, userID int64, orderNo st
 		return review.AppealView{}, review.ErrOrderNotAppealable
 	}
 
-	// At most one appeal per order (UC-U-09): a same-content replay returns
-	// the stored appeal, a different-content one conflicts.
-	var existingReason string
-	err = tx.QueryRowContext(ctx, `SELECT reason FROM order_appeals WHERE order_no = $1`, orderNo).Scan(&existingReason)
+	// At most one appeal per order: a same-content replay returns the first
+	// result, a different-content one conflicts. The read runs after the
+	// order lock, so an appeal another transaction just committed is visible
+	// here and replays instead of hitting the unique index.
+	var existing review.AppealView
+	var decidedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT a.id, a.reason, a.status, a.created_at, a.decided_at,
+COALESCE(o.amount_cents, 0), COALESCE(o.paid_cents, 0)
+FROM order_appeals a
+LEFT JOIN charging_orders o ON o.order_no = a.order_no
+WHERE a.order_no = $1`, orderNo).Scan(&existing.ID, &existing.Reason, &existing.Status,
+		&existing.CreatedAt, &decidedAt, &existing.OrderAmountCent, &existing.OrderPaidCent)
 	if err == nil {
-		return review.AppealView{}, review.ErrAppealConflict
+		if existing.Reason != reason {
+			return review.AppealView{}, review.ErrAppealConflict
+		}
+		existing.OrderNo = orderNo
+		existing.CreatedAt = existing.CreatedAt.UTC()
+		if decidedAt.Valid {
+			value := decidedAt.Time.UTC()
+			existing.DecidedAt = &value
+		}
+		return existing, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return review.AppealView{}, err
@@ -313,19 +339,23 @@ WHERE a.id = $1 FOR UPDATE OF a`, appealID).Scan(&orderNo, &appealStatus, &order
 	}
 
 	var walletUser int64
-	var userBalance int64
-	err = tx.QueryRowContext(ctx, `SELECT o.user_id, COALESCE(w.balance_cents, 0)
-FROM charging_orders o
-LEFT JOIN wallet_accounts w ON w.user_id = o.user_id
-WHERE o.id = $1 FOR UPDATE OF o`, orderID).Scan(&walletUser, &userBalance)
+	err = tx.QueryRowContext(ctx, `SELECT user_id FROM charging_orders WHERE id = $1 FOR UPDATE`, orderID).Scan(&walletUser)
 	if err != nil {
 		return false, err
 	}
 
 	// Refund what was actually deducted (appeal approvals never deduct).
 	if paidCents > 0 {
+		// Create the wallet row when missing and take its lock BEFORE the
+		// balance is read (B-07 pattern): a concurrent top-up can then
+		// neither slip between the read and the refund nor leave the ledger's
+		// balance_before pointing at a balance that never existed.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_accounts (user_id, balance_cents)
 VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`, walletUser); err != nil {
+			return false, err
+		}
+		var userBalance int64
+		if err := tx.QueryRowContext(ctx, `SELECT balance_cents FROM wallet_accounts WHERE user_id = $1 FOR UPDATE`, walletUser).Scan(&userBalance); err != nil {
 			return false, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE wallet_accounts

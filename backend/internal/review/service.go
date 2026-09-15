@@ -52,7 +52,9 @@ var (
 	// ErrAppealConflict maps to 409: a different-content appeal already
 	// exists for the order.
 	ErrAppealConflict = errors.New("review: appeal already exists with different content")
-	// ErrAppealAlreadyApproved maps to 409: the appeal was already decided.
+	// ErrAppealAlreadyApproved maps to 409. A repeated admin decision is a
+	// no-op success, so the service returns this only for a malformed admin
+	// identity.
 	ErrAppealAlreadyApproved = errors.New("review: appeal is already approved")
 	// ErrNotFound maps to 404 for a missing review or appeal.
 	ErrNotFound = errors.New("review: not found")
@@ -165,7 +167,8 @@ type Store interface {
 	GetAppeal(ctx context.Context, appealID int64) (AppealView, error)
 	// ApproveAppeal marks the appeal approved, cancels the order and
 	// refunds the settled amount to the user's wallet — all in the same
-	// transaction. It returns false when the appeal was already approved.
+	// transaction. It returns false when the appeal was already approved;
+	// the service treats that repeated decision as a no-op success.
 	ApproveAppeal(ctx context.Context, appealID int64, adminID int64) (bool, error)
 }
 
@@ -247,19 +250,15 @@ func (s *Service) Appeals(ctx context.Context, filter AppealFilter) (AppealPage,
 }
 
 // Approve applies the admin decision (UC-U-09 pt 5): the appeal is marked
-// approved, the order is cancelled and the settled amount refunded.
+// approved, the order is cancelled and the settled amount refunded. A
+// repeated decision is a no-op that succeeds with the current result
+// (UC-U-09: 相同申诉和重复审核不得重复记账).
 func (s *Service) Approve(ctx context.Context, appealID int64, adminID int64) error {
 	if adminID < 1 {
 		return ErrAppealAlreadyApproved
 	}
-	approved, err := s.store.ApproveAppeal(ctx, appealID, adminID)
-	if err != nil {
-		return err
-	}
-	if !approved {
-		return ErrAppealAlreadyApproved
-	}
-	return nil
+	_, err := s.store.ApproveAppeal(ctx, appealID, adminID)
+	return err
 }
 
 var _ = strings.TrimSpace

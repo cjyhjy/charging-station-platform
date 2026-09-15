@@ -214,3 +214,102 @@ func TestP0MigrationMatchesFrozenContract(t *testing.T) {
 		}
 	}
 }
+
+// A-01 persistence delivered 0008 and the A-05 comment wall masks deleted
+// authors through deleted_at, so the shape that keeps a half-deleted account
+// impossible is pinned here as well (the read paths filter on it).
+func TestUserProfileMigrationIsComplete(t *testing.T) {
+	schema := readMigration(t, "0008_user_profile_and_deletion.sql")
+
+	for _, needle := range []string{
+		"add column if not exists avatar_url text not null default ''",
+		"add column if not exists deleted_at timestamptz",
+		// invariants: deleted implies disabled, deleted implies no credentials, bounded avatar storage
+		"check (deleted_at is null or status = 'disabled')",
+		"check (deleted_at is null or password_hash = '')",
+		"check (char_length(avatar_url) <= 512)",
+		// the read paths all filter on deleted_at, and the partial index only pays for deleted rows
+		"create index if not exists idx_user_accounts_deleted_at",
+		"where deleted_at is not null",
+	} {
+		if !strings.Contains(schema, needle) {
+			t.Errorf("0008 is missing %q", needle)
+		}
+	}
+	if strings.Contains(schema, "drop column") {
+		t.Error("an up migration must not drop anything")
+	}
+
+	// The down script has to undo exactly what the up migration added, in an order PostgreSQL accepts
+	// (constraints before the columns they reference) and without touching other migrations.
+	down := readMigration(t, "down/0008_user_profile_and_deletion.down.sql")
+	for _, needle := range []string{
+		"drop constraint if exists user_accounts_avatar_url_length",
+		"drop constraint if exists user_accounts_deleted_has_no_credentials",
+		"drop constraint if exists user_accounts_deleted_is_disabled",
+		"drop index if exists idx_user_accounts_deleted_at",
+		"drop column if exists deleted_at",
+		"drop column if exists avatar_url",
+	} {
+		if !strings.Contains(down, needle) {
+			t.Errorf("the down script is missing %q", needle)
+		}
+	}
+}
+
+// The A-05 proposal (docs/migration/proposals/a-05-review-appeal-openapi.md)
+// keys reviews and appeals by the order business number, and every A-05 read
+// path joins charging_orders on order_no — order_reviews has no order_id
+// column, and this pin keeps it that way.
+func TestReviewAppealMigrationKeysOrdersByOrderNo(t *testing.T) {
+	schema := readMigration(t, "0009_review_appeal.sql")
+	blocks := tableBlocks(schema)
+
+	reviews, ok := blocks["order_reviews"]
+	if !ok {
+		t.Fatal("0009 must define order_reviews")
+	}
+	for _, needle := range []string{
+		// One review per order (UC-U-12), keyed by the business number.
+		"order_no text not null unique",
+		"user_id bigint not null references user_accounts (id)",
+		"station_id bigint not null references stations (id)",
+		"stars int not null check (stars between 1 and 5)",
+		"comment text not null check (length(comment) between 1 and 500)",
+		// the contract requires createdAt on every review view
+		"created_at timestamptz not null default current_timestamp",
+	} {
+		if !strings.Contains(reviews, needle) {
+			t.Errorf("order_reviews must declare %q", needle)
+		}
+	}
+
+	appeals, ok := blocks["order_appeals"]
+	if !ok {
+		t.Fatal("0009 must define order_appeals")
+	}
+	for _, needle := range []string{
+		// One appeal per order (UC-U-09), keyed by the business number.
+		"order_no text not null unique",
+		"reason text not null check (length(reason) between 1 and 500)",
+		"status text not null default 'pending' check (status in ('pending', 'approved'))",
+		"decided_by bigint references admin_accounts (id)",
+	} {
+		if !strings.Contains(appeals, needle) {
+			t.Errorf("order_appeals must declare %q", needle)
+		}
+	}
+
+	if strings.Contains(schema, "order_id") {
+		t.Error("0009 must key orders by order_no; a surrogate order_id would diverge from the A-05 read paths")
+	}
+
+	for _, needle := range []string{
+		"create index if not exists idx_order_reviews_station_created",
+		"create index if not exists idx_order_appeals_status_created",
+	} {
+		if !strings.Contains(schema, needle) {
+			t.Errorf("0009 is missing index %q", needle)
+		}
+	}
+}

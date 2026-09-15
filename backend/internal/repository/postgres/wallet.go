@@ -88,7 +88,10 @@ WHERE scope = $1 AND idempotency_key = $2`, scope, key, body)
 }
 
 // ensureWalletRow creates the zero wallet when missing and returns the
-// balance under a row lock.
+// balance under a row lock. The re-read after the upsert matters: a
+// concurrent transaction can create the row between the empty SELECT and
+// the INSERT, and its committed balance — not zero — is the truth the
+// caller's absolute balance update must build on.
 func (s *WalletStore) ensureWalletRow(tx *sql.Tx, ctx context.Context, userID int64) (int64, error) {
 	var balance int64
 	err := tx.QueryRowContext(ctx, `SELECT balance_cents FROM wallet_accounts WHERE user_id = $1 FOR UPDATE`, userID).Scan(&balance)
@@ -96,9 +99,11 @@ func (s *WalletStore) ensureWalletRow(tx *sql.Tx, ctx context.Context, userID in
 		if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_accounts (user_id, balance_cents) VALUES ($1, 0) ON CONFLICT DO NOTHING`, userID); err != nil {
 			return 0, err
 		}
-		return 0, nil
+		if err := tx.QueryRowContext(ctx, `SELECT balance_cents FROM wallet_accounts WHERE user_id = $1 FOR UPDATE`, userID).Scan(&balance); err != nil {
+			return 0, err
+		}
 	}
-	return balance, err
+	return balance, nil
 }
 
 // Wallet returns the balance view, auto-creating a zero wallet when the

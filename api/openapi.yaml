@@ -309,6 +309,30 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /stations/{stationId}/reviews:
+    get:
+      tags: [stations]
+      operationId: listStationReviews
+      description: |-
+        Station comment wall (UC-U-12): login required, newest first,
+        server-side pagination. Authors are masked — nickname, masked phone
+        or 已注销用户; never the full phone, user id or order number.
+      parameters:
+        - $ref: '#/components/parameters/StationId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Comment wall page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WallPageEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /chargers:
     get:
       tags: [chargers]
@@ -477,6 +501,106 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/OrderResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /orders/{orderNo}/review:
+    post:
+      tags: [orders]
+      operationId: createOrderReview
+      description: |-
+        Reviews the caller's own COMPLETED order (UC-U-12): 1..5 stars and a
+        1..500 code point comment after trimming. One review per order — a
+        same-content retry returns the first result (201), different content
+        conflicts (409). An order with an appeal cannot be reviewed.
+        Cross-user access is indistinguishable from a missing order.
+      parameters:
+        - $ref: '#/components/parameters/OrderNo'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stars, comment]
+              properties:
+                stars:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                comment:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+      responses:
+        '201':
+          description: Review stored. A same-content retry replays the first result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    get:
+      tags: [orders]
+      operationId: getOrderReview
+      description: Returns the caller's own review for the order (404 when none).
+      parameters:
+        - $ref: '#/components/parameters/OrderNo'
+      responses:
+        '200':
+          description: The caller's review
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /orders/{orderNo}/appeal:
+    post:
+      tags: [orders]
+      operationId: createOrderAppeal
+      description: |-
+        Appeals the caller's own COMPLETED order (UC-U-09 pt 4): a 1..500
+        code point reason after trimming. One appeal per order — a
+        same-content retry returns the first result, different content
+        conflicts (409).
+      parameters:
+        - $ref: '#/components/parameters/OrderNo'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+      responses:
+        '201':
+          description: Appeal stored. A same-content retry replays the first result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppealResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1022,6 +1146,68 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/WalletResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /admin/appeals:
+    get:
+      tags: [admin]
+      operationId: adminListAppeals
+      description: |-
+        The appeal queue (UC-U-09), newest first, optionally filtered by
+        status.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, APPROVED]
+      responses:
+        '200':
+          description: Appeal page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppealPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/appeals/{appealId}/approve:
+    post:
+      tags: [admin]
+      operationId: adminApproveAppeal
+      description: |-
+        Approves an appeal (UC-U-09 pt 5, 二次确认): the appeal becomes
+        APPROVED, the order is cancelled and the settled amount is refunded
+        to the user's wallet (REFUND ledger row), with the operation_logs
+        audit trail in the same transaction. A repeated decision is a no-op
+        that returns the current result (重复审核不得重复记账).
+      parameters:
+        - name: appealId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Approval applied, or a repeated decision returning the
+            current appeal state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppealResponseEnvelope'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -1595,6 +1781,84 @@ components:
         code: {type: integer, enum: [0]}
         message: {type: string}
         data: {$ref: '#/components/schemas/Command'}
+
+    Review:
+      type: object
+      required: [orderNo, stars, comment, createdAt]
+      properties:
+        orderNo: {type: string}
+        stars: {type: integer, minimum: 1, maximum: 5}
+        comment: {type: string, minLength: 1, maxLength: 500}
+        createdAt: {type: string, format: date-time}
+    ReviewResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/Review'}
+    WallEntry:
+      type: object
+      required: [stars, comment, author, createdAt]
+      properties:
+        stars: {type: integer, minimum: 1, maximum: 5}
+        comment: {type: string}
+        author:
+          type: string
+          description: Nickname, masked phone or 已注销用户 — never the full
+            phone, user id or order number.
+        createdAt: {type: string, format: date-time}
+    WallPageEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [items, meta]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/WallEntry'}
+            meta: {$ref: '#/components/schemas/PageMeta'}
+    Appeal:
+      type: object
+      required: [id, orderNo, reason, status, orderAmountCent, orderPaidCent, createdAt]
+      properties:
+        id: {type: integer, format: int64}
+        orderNo: {type: string}
+        reason: {type: string}
+        status: {type: string, enum: [PENDING, APPROVED]}
+        orderAmountCent: {type: integer, format: int64, minimum: 0}
+        orderPaidCent: {type: integer, format: int64, minimum: 0}
+        createdAt: {type: string, format: date-time}
+        decidedAt: {type: string, format: date-time}
+    AppealResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/Appeal'}
+    AppealPageEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [items, meta]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/Appeal'}
+            meta: {$ref: '#/components/schemas/PageMeta'}
 
     WalletView:
       type: object

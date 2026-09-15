@@ -18,13 +18,14 @@ import (
 )
 
 type fakeStore struct {
-	review     ReviewView
-	reviewErr  error
-	appeal     AppealView
-	appealErr  error
-	wall       WallPage
-	approved   bool
-	approveErr error
+	review        ReviewView
+	reviewErr     error
+	appeal        AppealView
+	appealErr     error
+	wall          WallPage
+	approved      bool
+	approveResult bool
+	approveErr    error
 }
 
 func (f *fakeStore) CreateReview(_ context.Context, userID int64, orderNo string, stars int, comment string) (ReviewView, error) {
@@ -57,7 +58,7 @@ func (f *fakeStore) GetAppeal(_ context.Context, appealID int64) (AppealView, er
 
 func (f *fakeStore) ApproveAppeal(context.Context, int64, int64) (bool, error) {
 	f.approved = true
-	return f.approved, f.approveErr
+	return f.approveResult, f.approveErr
 }
 
 type fakeAuthProvider struct {
@@ -154,6 +155,90 @@ func TestAppealApprovalEndpoint(t *testing.T) {
 	data := payload["data"].(map[string]any)
 	if data["status"] != AppealApproved {
 		t.Fatalf("status = %v", data["status"])
+	}
+}
+
+// UC-U-09: 重复审核不得重复记账 — the second decision succeeds as a no-op
+// and reports the appeal's current state instead of conflicting.
+func TestApproveDuplicateDecisionIsNoOpSuccess(t *testing.T) {
+	store := &fakeStore{}
+	service, err := NewService(store)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	// The store reports "already approved" (false) for both calls; the
+	// service must turn that into a successful no-op.
+	if err := service.Approve(context.Background(), 1, 2); err != nil {
+		t.Fatalf("first Approve() error = %v", err)
+	}
+	if err := service.Approve(context.Background(), 1, 2); err != nil {
+		t.Fatalf("duplicate Approve() error = %v, want a no-op success", err)
+	}
+
+	admin := newFixture(t, auth.Identity{ID: 2, Role: auth.RoleAdmin, AdminRole: auth.AdminRoleOperator, Status: auth.StatusActive}, true)
+	for i := 0; i < 2; i++ {
+		recorder := httptest.NewRecorder()
+		admin.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/admin/appeals/1/approve", nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("duplicate approve status = %d body = %s, want 200 with the current result", recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestGetReviewEndpoint(t *testing.T) {
+	user := auth.Identity{ID: 7, Role: auth.RoleUser, Status: auth.StatusActive}
+
+	store := &fakeStore{review: ReviewView{
+		OrderNo: "ORD20260915120000aaaa", Stars: 5, Comment: "充电很快",
+		CreatedAt: time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC),
+	}}
+	service, err := NewService(store)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	handlers, err := NewHandlers(service, fakeAuthProvider{identity: user, found: true}, fakeAuthProvider{identity: user, found: true})
+	if err != nil {
+		t.Fatalf("NewHandlers() error = %v", err)
+	}
+	server := httpapi.NewServer(config.Config{RequestIDHeader: "X-Request-ID"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handlers.Register(server)
+	server.SetReady(true)
+
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/orders/ORD20260915120000aaaa/review", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("get review status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	data := payload["data"].(map[string]any)
+	if data["orderNo"] != "ORD20260915120000aaaa" || data["stars"] != float64(5) {
+		t.Fatalf("data = %v", data)
+	}
+	// Review.createdAt is required by the contract: it must be present and
+	// carry the stored creation time.
+	if createdAt, _ := data["createdAt"].(string); createdAt == "" {
+		t.Fatalf("data.createdAt missing or empty: %v", data)
+	}
+
+	missing := &fakeStore{reviewErr: ErrNotFound}
+	missingService, err := NewService(missing)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	missingHandlers, err := NewHandlers(missingService, fakeAuthProvider{identity: user, found: true}, fakeAuthProvider{identity: user, found: true})
+	if err != nil {
+		t.Fatalf("NewHandlers() error = %v", err)
+	}
+	missingServer := httpapi.NewServer(config.Config{RequestIDHeader: "X-Request-ID"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	missingHandlers.Register(missingServer)
+	missingServer.SetReady(true)
+	recorder2 := httptest.NewRecorder()
+	missingServer.Handler().ServeHTTP(recorder2, httptest.NewRequest(http.MethodGet, "/api/v1/orders/ORD20260915120000aaaa/review", nil))
+	if recorder2.Code != http.StatusNotFound {
+		t.Fatalf("missing review status = %d body = %s, want 404", recorder2.Code, recorder2.Body.String())
 	}
 }
 
