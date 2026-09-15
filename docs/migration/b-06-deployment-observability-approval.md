@@ -25,6 +25,11 @@
 - `backend/scripts/local-stack.sh`：本地联调（一条命令起全栈，可选带 Nginx，`--seed` 载入开发种子）；
 - `backend/scripts/nginx-render.sh`：渲染 + `nginx -t`，`--drill` 在本机跑通静态/反代/限制/跳转；
 - `backend/scripts/backup-postgres.sh`、`restore-postgres.sh`、`drill-backup-restore.sh`；
+- `backend/scripts/verify-backup.sh`（每日完整性校验）、`wal-archive.sh`（WAL 归档，RPO 来源）、
+  `push-backup-remote.sh`（先加密再异地推送）；
+- `backend/deploy/systemd/ncs-backup{,-weekly,-verify}.{service,timer}`、`ncs-restore-drill.{service,timer}`、
+  `ncs-backup-wal.service`（备份编排，systemd timer）；
+- `backend/internal/observability/{probe.go,httpserver.go,process_metrics.go}` 及测试、`backend/.gitignore`。
 - `backend/scripts/fault-drill.sh`、`backend/scripts/loadtest-orders.sh`；
 - `backend/internal/observability/{prometheus.go,histogram.go}` 及测试；
 - `backend/internal/repository/postgres/{health.go,health_integration_test.go}`；
@@ -184,12 +189,91 @@ POST /metrics → 405（统一错误包络）
   无数据库迁移需要回滚。
 - 是否影响旧 C++ 系统：**否**。未修改旧站点与旧代码，Nginx 切换由集成人员按发布计划执行。
 
+## 第二轮：四项裁决的落地
+
+### ① `/metrics` / `/readyz` 口径
+
+```text
+- /metrics 不登记 OpenAPI（内部运维端点）；/readyz 保留登记但语义为系统运维接口；/healthz 保持公开；
+- 两者都只允许本机/内网/监控网段访问：API 业务监听 127.0.0.1:8080，指标在独立地址（默认 127.0.0.1:9090），
+  Nginx 对 /metrics、/readyz 保留 allow/deny，且不向公网暴露 /metrics；
+- H5 与普通 Agent 不使用这两个接口（模板未开放 CORS，文档明确禁用）；
+- envsubst 变量白名单沿用（nginx/README.md），脚本固定使用白名单，禁止无白名单调用。
+
+实测：三进程指标端点均绑定 127.0.0.1（9090/9091/9092）；从本机非环回地址访问 9091 返回连接被拒绝；
+Nginx drill 中 /metrics、/readyz、设备回执在允许网段外均 403。
+```
+
+### ② 生产域名、证书与密钥注入
+
+```text
+- NCS_PUBLIC_HOST 由部署环境注入，模板与代码均无默认域名（渲染脚本用 :? 强制要求）；
+- 公网 443 HTTPS；Go API 127.0.0.1:8080；H5 静态目录；metrics 仅内网；
+- 证书不入 Git、不通过普通环境变量传递：只传路径，固定挂载
+  /etc/ncs/tls/fullchain.pem 与 /etc/ncs/tls/privkey.pem，0600 root:ncs；
+- /etc/ncs/backend.env 由 systemd EnvironmentFile 加载，0600 root:ncs；
+- 数据库口令、Redis 口令、网关令牌只写入该文件或外部密钥系统；H5、日志、Nginx 配置均不输出，
+  访问日志只记录 trace ID 与状态码。
+```
+
+### ③ 备份编排与异地保留
+
+```text
+编排（systemd timer，不用 cron；新增 9 个单元，均通过 systemd-analyze verify）：
+  每日 03:20   ncs-backup.service          全量逻辑备份 → 本机保留 7 天，并触发异地推送
+  每周日 04:10 ncs-backup-weekly.service   周快照 → 保留 12 周
+  每日 05:30   ncs-backup-verify.service   完整性校验（checksum + pg_restore --list，可选真恢复）
+  每周日 06:00 ncs-restore-drill.service   恢复演练（实测 RPO/RTO）
+  常驻         ncs-backup-wal.service      pg_receivewal 持续归档 WAL —— RPO 的真正来源
+异地：加密传输、加密存储（openssl AES-256-CBC/PBKDF2）、独立凭据（/etc/ncs/backup-remote.env 0600）、
+  目的地版本保留、30 天保留、备份角色非超级用户（ncs_backup + pg_read_all_data + REPLICATION，附 SQL）、
+  凭据不进仓库。
+
+实测：
+  backup-postgres.sh           → 93 KB / 108 对象 / 1 s，manifest 带 sha256，打印本机 7 天保留
+  backup-postgres.sh --weekly  → 写入 weekly/ 并打印 12 周保留
+  verify-backup.sh             → sha256 与 108 对象可读："PASS: verified 1 backup(s)"
+  wal-archive.sh --once        → 以 ncs_test 角色连接成功、创建复制槽 ncs_wal_archive（wal_level=replica）
+  drill-backup-restore.sh      → RPO 15 分钟（备份后写入的行确认缺失）、RTO 0.00 分钟、schema 7
+未实测（不隐藏）：PITR 重放本身未演练（本机无第二个 PostgreSQL 实例，恢复演练走 dump 路径）；
+  异地对象存储推送未实测（本机无对象存储与 rclone），只交付脚本与配置约束。
+修正记录：wal-archive.sh 首版用未导出的 shell 变量传连接参数，pg_receivewal 退回默认 socket 与别的角色，
+  而 --once 又用 || true 吞掉退出码，给出"检查通过"的假成功。两处都已修正：变量一律 export，
+  smoke check 改为断言复制槽存在。
+```
+
+### ④ Worker / Publisher 指标
+
+```text
+三进程各自暴露 Prometheus 文本指标，默认 127.0.0.1:9090（API）/9091（Worker）/9092（Publisher），
+可用 NCS_METRICS_ADDR 覆盖；非环回、非私网地址默认拒绝启动
+（实测 NCS_METRICS_ADDR=0.0.0.0:9099 → 退出并打印 "metrics address must be a loopback or private address"）。
+
+裁决要求 → 实际系列（一次真实运行后的抓取结果，POST /orders 201 产生流量）：
+  消费成功数             ncs_worker_events_total{event_type="ORDER_CREATED",outcome="succeeded",stream="ncs:stream:order-event"} 1
+  消费失败数             ncs_worker_events_total{outcome="retried"|"dead_lettered"|"lease_held"}（首次出现后）
+  重试数                 ncs_worker_retries_total{attempt}（首次重试后）
+  死信数                 ncs_worker_dead_lettered_total{reason}（首次死信后）/ ncs_stream_dead_letter_length 0
+  Pending 数             ncs_stream_pending{stream=...} 0（三个 stream 齐全）
+  Stream 延迟            ncs_stream_lag{stream=...} 0
+  Outbox 未发布数量      ncs_pg_outbox_unpublished 0（API 与 Publisher 都暴露）
+  Publisher 失锁次数     ncs_publisher_lock_losses_total 0
+  Worker 最近成功时间    ncs_worker_last_success_timestamp_seconds 1.789463635e+09（真实消费后更新）
+  Publisher 最近成功时间 ncs_publisher_last_publish_timestamp_seconds 1.789463635e+09（真实发布后更新）
+  PG/Redis 连接状态      ncs_dependency_up{dependency="postgres"} 1、{dependency="redis"} 1
+
+固定系列（依赖状态、各 stream 的 Pending/Lag/Length、死信长度、未发布、迁移版本、Publisher 计数与
+时间戳）在启动时以初值创建，抓取始终能找到；**标签来自流量的系列不预造**——那会造出永远不动的幽灵 0，
+看起来像发生过却从未发生的流量。该规则由 TestRegisterProcessMetricsPreCreatesTheRequiredSeries 固定。
+```
+
 ## 待审批事项
 
-1. `/metrics` 不登记 OpenAPI、`/readyz` 保留但标记为系统运维接口——已按裁决实现，请确认登记口径；
-2. 生产 `NCS_PUBLIC_HOST`、证书来源与 `/etc/ncs/backend.env` 的密钥注入方式（KMS/文件/环境变量）由部署环境确定；
-3. 备份定时任务的实际编排（systemd timer / cron / 外部备份系统）与备份目录的异地保留策略；
-4. 是否需要在 Worker/Publisher 上同样开放 `/metrics`（当前 Worker 只把指标写日志；如需抓取需再接线）。
+1. 异地对象存储的目的地、rclone 远端与生命周期规则（30 天）由部署环境确定；本机无法验证该路径；
+2. PITR 重放演练的频率与载体（是否需要第二个 PostgreSQL 实例承担每周演练）；
+3. 监控侧抓取配置与告警阈值落地（`ncs_dependency_up`、`ncs_pg_outbox_unpublished`、
+   `ncs_worker_last_success_timestamp_seconds` 的陈旧阈值）；
+4. `ncs-restore-drill.service` 的 `NCS_TEST_PG_DSN` 指向哪个一次性实例（演练会创建并删除临时库）。
 
 ## 审批结论
 
