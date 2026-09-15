@@ -16,6 +16,7 @@ import (
 	"github.com/heguangV/charging-station-platform/backend/internal/auth"
 	"github.com/heguangV/charging-station-platform/backend/internal/config"
 	"github.com/heguangV/charging-station-platform/backend/internal/httpapi"
+	"github.com/heguangV/charging-station-platform/backend/internal/observability"
 	"github.com/heguangV/charging-station-platform/backend/internal/order"
 	"github.com/heguangV/charging-station-platform/backend/internal/repository/postgres"
 	bredis "github.com/heguangV/charging-station-platform/backend/internal/repository/redis"
@@ -38,10 +39,15 @@ func run() error {
 	if cfg.PostgresDSN == "" {
 		return fmt.Errorf("NCS_POSTGRES_DSN is required: the API serves business data from PostgreSQL")
 	}
-	// The charger gateway's receipt endpoint advances orders and starts bills.
-	// Without a token it cannot be exposed at all, so the process refuses to
-	// start instead of running an unauthenticated order-writing endpoint.
-	if cfg.ChargerGatewayToken == "" {
+	// A deploy brings the schema up to date with `ncs-api -migrate-only` (or NCS_MIGRATE_ONLY=true)
+	// before the worker and the publisher start. That step opens no port and serves no traffic, so
+	// it does not need the gateway token - requiring it would make the migration gate depend on a
+	// secret that only the serving process uses.
+	migrateOnly := migrateOnlyRequested()
+	if !migrateOnly && cfg.ChargerGatewayToken == "" {
+		// The charger gateway's receipt endpoint advances orders and starts bills. Without a token
+		// it cannot be exposed at all, so the process refuses to start instead of running an
+		// unauthenticated order-writing endpoint.
 		return fmt.Errorf("NCS_CHARGER_GATEWAY_TOKEN is required: the charger event endpoint advances orders and billing")
 	}
 
@@ -69,6 +75,23 @@ func run() error {
 	}
 	if len(report.Applied) > 0 {
 		logger.Info("database migrations applied", "count", len(report.Applied))
+	}
+	if migrateOnly {
+		// The gate reports what the database now holds, so a deploy log answers "did the schema
+		// step run" without a second query.
+		version, err := postgres.SchemaVersion(ctx, db)
+		if err != nil {
+			return err
+		}
+		expected, err := postgres.HighestMigrationVersion(migrations.FS)
+		if err != nil {
+			return err
+		}
+		if version < expected {
+			return fmt.Errorf("postgres: schema version %d is behind the expected %d after the migration gate", version, expected)
+		}
+		logger.Info("migration gate complete", "schema_version", version, "expected", expected, "applied_this_run", len(report.Applied))
+		return nil
 	}
 
 	// Redis carries sessions, login rate limiting and SMS codes. Sessions
@@ -194,11 +217,19 @@ func run() error {
 	}
 
 	server := httpapi.NewServer(cfg, logger)
-	authHandlers.Register(server)
-	stationHandlers.Register(server)
-	orderHandlers.Register(server)
-	adminHandlers.Register(server)
-	chargerEventHandlers.Register(server)
+
+	// Every registered route is instrumented with its route pattern as the label, and the metrics
+	// endpoint is added beside them. The registry is process-local: it describes this API instance,
+	// not the deployment.
+	registry := observability.NewRegistry()
+	registry.RegisterHistogram(observability.MetricRequestDuration, observability.DefaultDurationBuckets)
+	instrumented := registerWithMetrics{inner: server, registry: registry}
+	authHandlers.Register(instrumented)
+	stationHandlers.Register(instrumented)
+	orderHandlers.Register(instrumented)
+	adminHandlers.Register(instrumented)
+	chargerEventHandlers.Register(instrumented)
+	server.Register("/metrics", metricsHandler(registry, logger))
 
 	listener, err := net.Listen("tcp", cfg.HTTPAddr)
 	if err != nil {
@@ -263,7 +294,30 @@ func run() error {
 		<-janitorDone
 	}()
 
-	server.SetReady(true)
+	// Readiness follows the dependencies instead of a flag set once at startup: a process whose
+	// Redis is gone answers session failures, and the load balancer must stop sending it traffic.
+	// The probe gets its own cancellable context so shutdown stops it deterministically instead of
+	// waiting for the process context to be cancelled at the very end.
+	probeCtx, stopProbe := context.WithCancel(ctx)
+	probeDone := make(chan struct{})
+	go func() {
+		defer close(probeDone)
+		probeDependencies(probeCtx, probeConfig{
+			postgresUp:    func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
+			redisUp:       func(ctx context.Context) bool { return commands.Ping(ctx) == nil },
+			schemaVersion: func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
+			outboxBacklog: func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
+			registry:      registry,
+			logger:        logger,
+			interval:      dependencyProbeInterval,
+			setReady:      server.SetReady,
+		})
+	}()
+	defer func() {
+		stopProbe()
+		<-probeDone
+	}()
+
 	serverErr := make(chan error, 1)
 	go func() {
 		serverErr <- server.Serve(listener)

@@ -20,6 +20,7 @@ import (
 	"github.com/heguangV/charging-station-platform/backend/internal/repository/postgres"
 	redisrepo "github.com/heguangV/charging-station-platform/backend/internal/repository/redis"
 	"github.com/heguangV/charging-station-platform/backend/internal/worker"
+	"github.com/heguangV/charging-station-platform/backend/migrations"
 )
 
 // This executable wires the B-line event workers: charge and order lifecycle events
@@ -121,6 +122,23 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() { _ = db.Close() }()
+
+	// Migration gate: this process writes tables a migration introduces, and it does not run
+	// migrations itself. Starting against an older schema would fail later, in the middle of a
+	// device flow, instead of here where the fix is one command.
+	expectedSchema, err := postgres.HighestMigrationVersion(migrations.FS)
+	if err != nil {
+		logger.Error("read migration set", "error", err)
+		os.Exit(1)
+	}
+	if err := postgres.AssertSchemaVersion(ctx, db, expectedSchema); err != nil {
+		logger.Error("schema is out of date; run the migration gate first", "error", err,
+			"expected_schema_version", expectedSchema)
+		os.Exit(1)
+	}
+	if version, err := postgres.SchemaVersion(ctx, db); err == nil {
+		logger.Info("schema version verified", "schema_version", version, "expected", expectedSchema)
+	}
 
 	consumptionStore, err := postgres.NewConsumptionStore(db)
 	if err != nil {

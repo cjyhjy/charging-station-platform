@@ -300,3 +300,24 @@ func TestContextHandlerPreservesStructuredFields(t *testing.T) {
 		t.Fatalf("expected the trace id inside the group, got %v", event)
 	}
 }
+
+// A gauge that only ever rose would be a counter with a misleading name: in-flight requests rise and
+// fall, and a gauge must follow both directions without being clamped.
+func TestIncGaugeMovesBothWays(t *testing.T) {
+	registry := NewRegistry()
+	registry.IncGauge("ncs_test_in_flight", nil, 1)
+	registry.IncGauge("ncs_test_in_flight", nil, 1)
+	if value, ok := registry.Gauge("ncs_test_in_flight", nil); !ok || value != 2 {
+		t.Fatalf("gauge = %v (present %v), want 2", value, ok)
+	}
+	registry.IncGauge("ncs_test_in_flight", nil, -1)
+	if value, _ := registry.Gauge("ncs_test_in_flight", nil); value != 1 {
+		t.Fatalf("gauge = %v, want 1", value)
+	}
+	// No clamp: the caller's own numbers are reported as they are, so a leak is visible instead of
+	// hidden behind a zero.
+	registry.IncGauge("ncs_test_in_flight", nil, -5)
+	if value, _ := registry.Gauge("ncs_test_in_flight", nil); value != -4 {
+		t.Fatalf("gauge = %v, want -4: a gauge is not clamped and a leak must be visible", value)
+	}
+}
