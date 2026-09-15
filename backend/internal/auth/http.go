@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,7 +92,10 @@ func (h *Handlers) Register(server interface {
 	server.Register("/api/v1/auth/user/login", h.UserLogin)
 	server.Register("/api/v1/auth/admin/login", h.AdminLogin)
 	server.Register("/api/v1/auth/logout", h.Logout)
-	server.Register("/api/v1/me", h.Me)
+	server.Register("/api/v1/me", h.RequireIdentity(h.meRoutes))
+	server.Register("/api/v1/me/profile", h.RequireIdentity(h.Profile))
+	server.Register("/api/v1/admin/users/{userId}/freeze", h.RequireAdminWrite(h.freezeUser))
+	server.Register("/api/v1/admin/users/{userId}/unfreeze", h.RequireAdminWrite(h.unfreezeUser))
 }
 
 // RequestSMSCode handles POST /api/v1/auth/user/sms/code. Development
@@ -218,6 +222,171 @@ func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// meRoutes dispatches GET /api/v1/me (identity) and PUT/DELETE on the same
+// resource namespace.
+func (h *Handlers) meRoutes(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.Me(w, r)
+	case http.MethodPut:
+		h.updateProfile(w, r)
+	case http.MethodDelete:
+		h.deleteAccount(w, r)
+	default:
+		w.Header().Set("Allow", "GET, PUT, DELETE")
+		httpapi.WriteError(w, r, http.StatusMethodNotAllowed, httpapi.CodeMethodNotAllowed, "method not allowed", nil)
+	}
+}
+
+// Profile returns the user-center profile view (UC-U-05) on GET
+// /api/v1/me/profile and applies changes on PUT.
+func (h *Handlers) Profile(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.getProfile(w, r)
+	case http.MethodPut:
+		h.updateProfile(w, r)
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		httpapi.WriteError(w, r, http.StatusMethodNotAllowed, httpapi.CodeMethodNotAllowed, "method not allowed", nil)
+	}
+}
+
+type updateProfileRequest struct {
+	DisplayName *string `json:"displayName"`
+	AvatarURL   *string `json:"avatarUrl"`
+}
+
+func (h *Handlers) getProfile(w http.ResponseWriter, r *http.Request) {
+	identity, ok := identityFrom(w, r)
+	if !ok {
+		return
+	}
+	view, err := h.service.GetProfile(r.Context(), identity.ID)
+	if err != nil {
+		writeProfileError(w, r, err)
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, httpapi.Response{
+		Success: true,
+		Code:    httpapi.CodeOK,
+		Message: "ok",
+		Data:    view,
+	})
+}
+
+func (h *Handlers) updateProfile(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPut) {
+		return
+	}
+	identity, ok := identityFrom(w, r)
+	if !ok {
+		return
+	}
+
+	body, ok := decodeJSONBody(w, r, &updateProfileRequest{})
+	if !ok {
+		return
+	}
+	request := body.(*updateProfileRequest)
+	if request.DisplayName == nil && request.AvatarURL == nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "no profile change requested", nil)
+		return
+	}
+
+	view, err := h.service.UpdateProfile(r.Context(), identity.ID, ProfileUpdate{
+		DisplayName: request.DisplayName,
+		AvatarURL:   request.AvatarURL,
+	})
+	if err != nil {
+		writeProfileError(w, r, err)
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, httpapi.Response{
+		Success: true,
+		Code:    httpapi.CodeOK,
+		Message: "ok",
+		Data:    view,
+	})
+}
+
+// deleteAccount handles DELETE /api/v1/me (UC-U-05 申请注销): the account is
+// anonymized and every session of the user is revoked, including the
+// current one — the response is 204 with no further content.
+func (h *Handlers) deleteAccount(w http.ResponseWriter, r *http.Request) {
+	identity, ok := identityFrom(w, r)
+	if !ok {
+		return
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), bearerPrefix))
+	existed, err := h.service.DeleteAccount(r.Context(), identity.ID, token)
+	if err != nil {
+		writeProfileError(w, r, err)
+		return
+	}
+	_ = existed
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// freezeUser handles POST /api/v1/admin/users/{userId}/freeze.
+func (h *Handlers) freezeUser(w http.ResponseWriter, r *http.Request) {
+	h.setFrozen(w, r, true)
+}
+
+// unfreezeUser handles POST /api/v1/admin/users/{userId}/unfreeze.
+func (h *Handlers) unfreezeUser(w http.ResponseWriter, r *http.Request) {
+	h.setFrozen(w, r, false)
+}
+
+func (h *Handlers) setFrozen(w http.ResponseWriter, r *http.Request, frozen bool) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	identity, ok := identityFrom(w, r)
+	if !ok {
+		return
+	}
+	userID, err := strconv.ParseInt(r.PathValue("userId"), 10, 64)
+	if err != nil || userID < 1 {
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "invalid user id", nil)
+		return
+	}
+	if userID == identity.ID && frozen {
+		// An administrator must not freeze their own account (SRS: OWNER
+		// 不得停用自己的账号; the same self-protection applies here).
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "administrators cannot freeze their own account", nil)
+		return
+	}
+
+	if err := h.service.FreezeUser(r.Context(), identity.ID, userID); err != nil && frozen {
+		writeProfileError(w, r, err)
+		return
+	}
+	if err := h.service.UnfreezeUser(r.Context(), identity.ID, userID); err != nil && !frozen {
+		writeProfileError(w, r, err)
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, httpapi.Response{
+		Success: true,
+		Code:    httpapi.CodeOK,
+		Message: "ok",
+		Data:    map[string]any{"id": userID, "status": map[bool]string{true: "DISABLED", false: "ACTIVE"}[frozen]},
+	})
+}
+
+func writeProfileError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, ErrInvalidNickname):
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "nickname length is outside 1..20 or pure whitespace", nil)
+	case errors.Is(err, ErrProfileNotFound), errors.Is(err, ErrAccountDeleted):
+		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeResourceNotFound, "account not found", nil)
+	case errors.Is(err, ErrInvalidAdminActor):
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "administrator actor is required", nil)
+	default:
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable, httpapi.CodeDatabaseError, "profile is temporarily unavailable", nil)
+	}
+}
+
 // Me handles GET /api/v1/me.
 func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
@@ -341,6 +510,16 @@ func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 func isRateLimited(err error) bool {
 	var limited *RateLimitedError
 	return errors.As(err, &limited)
+}
+
+// identityFrom resolves the middleware-attached identity or writes 401.
+func identityFrom(w http.ResponseWriter, r *http.Request) (Identity, bool) {
+	identity, ok := IdentityFromContext(r.Context())
+	if !ok {
+		httpapi.WriteError(w, r, http.StatusUnauthorized, httpapi.CodeUnauthorized, "session is missing or expired", nil)
+		return Identity{}, false
+	}
+	return identity, true
 }
 
 func newIdentityBody(identity Identity) identityBody {

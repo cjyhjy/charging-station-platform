@@ -25,9 +25,11 @@ func newHandlerFixture(t *testing.T) handlerFixture {
 	reader := &fakeAccountReader{user: &UserAccount{
 		ID: 7, Phone: "13800000001", DisplayName: "开发用户", PasswordHash: hashForTest(t, testPassword), Status: StatusActive,
 	}}
+	mutations := NewInMemoryAccountMutation(map[int64]*UserAccount{reader.user.ID: reader.user})
 	service, err := NewService(
 		reader,
 		reader,
+		mutations,
 		NewInMemorySessionStore(time.Minute, nil),
 		NewFixedWindowLimiter(5, time.Minute, nil),
 		NewInMemorySMSCodeStore(nil),

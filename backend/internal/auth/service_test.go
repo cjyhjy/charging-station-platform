@@ -62,7 +62,21 @@ func hashForTest(t *testing.T, password string) string {
 
 func newTestService(t *testing.T, reader *fakeAccountReader, limiter LoginRateLimiter) *Service {
 	t.Helper()
-	service, err := NewService(reader, reader, NewInMemorySessionStore(time.Minute, nil), limiter, NewInMemorySMSCodeStore(nil), time.Minute, time.Hour)
+	return newTestServiceWithMutations(t, reader, limiter, NewInMemorySMSCodeStore(nil))
+}
+
+func newTestServiceWithMutations(t *testing.T, reader *fakeAccountReader, limiter LoginRateLimiter, codes *InMemorySMSCodeStore) *Service {
+	t.Helper()
+	mutations := NewInMemoryAccountMutation(map[int64]*UserAccount{})
+	if reader.user != nil {
+		mutations.accounts[reader.user.ID] = reader.user
+	}
+	if reader.admin != nil {
+		// Admin identities are outside the user-account namespace; nothing
+		// to mutate for them in profile tests.
+		_ = reader.admin
+	}
+	service, err := NewService(reader, reader, mutations, NewInMemorySessionStore(time.Minute, nil), limiter, codes, time.Minute, time.Hour)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -224,7 +238,7 @@ func TestLoginTokensAreUnique(t *testing.T) {
 func TestLoginDatabaseFailureIsNotACredentialError(t *testing.T) {
 	reader := &failingAccountReader{}
 	codes := NewInMemorySMSCodeStore(nil)
-	service, err := NewService(reader, reader, NewInMemorySessionStore(time.Minute, nil), NewFixedWindowLimiter(10, time.Minute, nil), codes, time.Minute, time.Hour)
+	service, err := NewService(reader, reader, NewInMemoryAccountMutation(map[int64]*UserAccount{}), NewInMemorySessionStore(time.Minute, nil), NewFixedWindowLimiter(10, time.Minute, nil), codes, time.Minute, time.Hour)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -239,22 +253,22 @@ func TestNewServiceValidation(t *testing.T) {
 	store := NewInMemorySessionStore(time.Minute, nil)
 	limiter := NewFixedWindowLimiter(1, time.Minute, nil)
 	codes := NewInMemorySMSCodeStore(nil)
-	if _, err := NewService(nil, &fakeAccountReader{}, store, limiter, codes, time.Minute, time.Hour); err == nil {
+	if _, err := NewService(nil, &fakeAccountReader{}, NewInMemoryAccountMutation(map[int64]*UserAccount{}), store, limiter, codes, time.Minute, time.Hour); err == nil {
 		t.Fatal("nil account reader accepted")
 	}
-	if _, err := NewService(&fakeAccountReader{}, nil, store, limiter, codes, time.Minute, time.Hour); err == nil {
+	if _, err := NewService(&fakeAccountReader{}, nil, NewInMemoryAccountMutation(map[int64]*UserAccount{}), store, limiter, codes, time.Minute, time.Hour); err == nil {
 		t.Fatal("nil account writer accepted")
 	}
-	if _, err := NewService(&fakeAccountReader{}, &fakeAccountReader{}, nil, limiter, codes, time.Minute, time.Hour); err == nil {
+	if _, err := NewService(&fakeAccountReader{}, &fakeAccountReader{}, nil, store, limiter, codes, time.Minute, time.Hour); err == nil {
 		t.Fatal("nil session store accepted")
 	}
-	if _, err := NewService(&fakeAccountReader{}, &fakeAccountReader{}, store, nil, codes, time.Minute, time.Hour); err == nil {
+	if _, err := NewService(&fakeAccountReader{}, &fakeAccountReader{}, NewInMemoryAccountMutation(map[int64]*UserAccount{}), store, nil, codes, time.Minute, time.Hour); err == nil {
 		t.Fatal("nil limiter accepted")
 	}
-	if _, err := NewService(&fakeAccountReader{}, &fakeAccountReader{}, store, limiter, nil, time.Minute, time.Hour); err == nil {
+	if _, err := NewService(&fakeAccountReader{}, &fakeAccountReader{}, NewInMemoryAccountMutation(map[int64]*UserAccount{}), store, limiter, nil, time.Minute, time.Hour); err == nil {
 		t.Fatal("nil sms code store accepted")
 	}
-	if _, err := NewService(&fakeAccountReader{}, &fakeAccountReader{}, store, limiter, codes, time.Hour, time.Minute); err == nil {
+	if _, err := NewService(&fakeAccountReader{}, &fakeAccountReader{}, NewInMemoryAccountMutation(map[int64]*UserAccount{}), store, limiter, codes, time.Hour, time.Minute); err == nil {
 		t.Fatal("absolute TTL shorter than idle TTL accepted")
 	}
 }
@@ -262,7 +276,11 @@ func TestNewServiceValidation(t *testing.T) {
 func TestLoginBySmsRegistersUnknownPhone(t *testing.T) {
 	reader := &fakeAccountReader{}
 	codes := NewInMemorySMSCodeStore(nil)
-	service, err := NewService(reader, reader, NewInMemorySessionStore(time.Minute, nil), NewFixedWindowLimiter(100, time.Minute, nil), codes, time.Minute, time.Hour)
+	mutations := NewInMemoryAccountMutation(map[int64]*UserAccount{})
+	if reader.user != nil {
+		mutations.accounts[reader.user.ID] = reader.user
+	}
+	service, err := NewService(reader, reader, mutations, NewInMemorySessionStore(time.Minute, nil), NewFixedWindowLimiter(100, time.Minute, nil), codes, time.Minute, time.Hour)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -308,7 +326,11 @@ func TestLoginBySmsRegistersUnknownPhone(t *testing.T) {
 func TestLoginBySmsLocksOutAfterFiveFailures(t *testing.T) {
 	reader := &fakeAccountReader{user: &UserAccount{ID: 5, Phone: "13611112222", Status: StatusActive}}
 	codes := NewInMemorySMSCodeStore(nil)
-	service, err := NewService(reader, reader, NewInMemorySessionStore(time.Minute, nil), NewFixedWindowLimiter(100, time.Minute, nil), codes, time.Minute, time.Hour)
+	mutations := NewInMemoryAccountMutation(map[int64]*UserAccount{})
+	if reader.user != nil {
+		mutations.accounts[reader.user.ID] = reader.user
+	}
+	service, err := NewService(reader, reader, mutations, NewInMemorySessionStore(time.Minute, nil), NewFixedWindowLimiter(100, time.Minute, nil), codes, time.Minute, time.Hour)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -335,7 +357,7 @@ func TestLoginBySmsLocksOutAfterFiveFailures(t *testing.T) {
 
 func TestIssueSMSCodeRequiresMockOrProvider(t *testing.T) {
 	reader := &fakeAccountReader{}
-	service, err := NewService(reader, reader, NewInMemorySessionStore(time.Minute, nil), NewFixedWindowLimiter(100, time.Minute, nil), NewInMemorySMSCodeStore(nil), time.Minute, time.Hour)
+	service, err := NewService(reader, reader, NewInMemoryAccountMutation(map[int64]*UserAccount{}), NewInMemorySessionStore(time.Minute, nil), NewFixedWindowLimiter(100, time.Minute, nil), NewInMemorySMSCodeStore(nil), time.Minute, time.Hour)
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}

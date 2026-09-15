@@ -119,6 +119,7 @@ type LoginResult struct {
 type Service struct {
 	accounts    AccountReader
 	writer      AccountWriter
+	mutations   AccountMutation
 	sessions    SessionStore
 	limiter     LoginRateLimiter
 	codes       SMSCodeStore
@@ -141,12 +142,15 @@ type Service struct {
 // absolute lifetime. The account writer and SMS code store back the SMS
 // login path; SMS codes live in Redis so verification works across
 // instances and restarts.
-func NewService(accounts AccountReader, writer AccountWriter, sessions SessionStore, limiter LoginRateLimiter, codes SMSCodeStore, idleTTL, absoluteTTL time.Duration) (*Service, error) {
+func NewService(accounts AccountReader, writer AccountWriter, mutations AccountMutation, sessions SessionStore, limiter LoginRateLimiter, codes SMSCodeStore, idleTTL, absoluteTTL time.Duration) (*Service, error) {
 	if accounts == nil {
 		return nil, errors.New("auth: account reader is required")
 	}
 	if writer == nil {
 		return nil, errors.New("auth: account writer is required")
+	}
+	if mutations == nil {
+		return nil, errors.New("auth: account mutation store is required")
 	}
 	if sessions == nil {
 		return nil, errors.New("auth: session store is required")
@@ -167,6 +171,7 @@ func NewService(accounts AccountReader, writer AccountWriter, sessions SessionSt
 	return &Service{
 		accounts:    accounts,
 		writer:      writer,
+		mutations:   mutations,
 		sessions:    sessions,
 		limiter:     limiter,
 		codes:       codes,
