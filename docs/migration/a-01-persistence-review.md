@@ -1,4 +1,9 @@
-# A-01 持久化复核与交付（B 线）
+# A-01 持久化收口（B 线）
+
+> 本轮是 **A-01 的数据库收口**，不是新的 B-07 钱包模块。理由：0008 服务于 A-01 的用户资料、冻结与注销；
+> `AccountMutationAdapter` 是 A-01 的 B 线交接物；B-07 的原定义是钱包/账务数据支撑，不能拿来覆盖 A-01 的
+> 数据库收口，而 A-04 的钱包表与 `WalletStore` 已经存在，B-07 也不应重复实现。
+> 收口完成并登记 OpenAPI 后，A-01 记为 APPROVED；B-07 另行按钱包/账务的真实缺口评估。
 
 范围：A-01「认证和用户账户」的四类新接口（`GET/PUT /me/profile`、`DELETE /me`、`POST /admin/users/{id}/freeze|unfreeze`）
 所依赖的 PostgreSQL 侧工作。A 线交付端口（`auth.AccountMutation`）、服务与处理器；**PostgreSQL 适配器属于 B 线**，
@@ -14,6 +19,36 @@
 `git rebase --onto origin/develop ac4e407 codex/backend/a-01-persistence` 即可落到 develop 顶端）。
 在此之前本分支不能单独合并；A-01 的 OpenAPI 登记仍待集成人员执行
 （提案：`docs/migration/proposals/a-01-openapi-profile-endpoints.md`）。
+
+## 0. 收口结论（第一步：迁移结论核对）
+
+```text
+问题 1：0008 是否覆盖 avatar_url、deleted_at？
+  是。两列由 0008 添加，且实测存在于测试库：
+  avatar_url TEXT NOT NULL DEFAULT ''、deleted_at TIMESTAMPTZ（可空，NULL = 未注销）。
+
+问题 2：是否与既有 user_accounts 结构冲突？
+  否。逐条核对既有结构，全部保留且与注销方案相容：
+    phone TEXT UNIQUE（可空）+ CHECK (phone IS NOT NULL OR email IS NOT NULL)
+        —— 匿名化写成 deleted-{id}@invalid，仍满足 phone 非空与唯一；
+    password_hash TEXT NOT NULL —— 注销写空串，满足非空，并由 0008 的约束保证"已注销 ⇒ 已清空"；
+    display_name TEXT NOT NULL DEFAULT '' —— 注销写 '已注销用户'；
+    status CHECK IN ('ACTIVE','DISABLED') —— 注销与冻结都写 DISABLED，枚举无需扩展；
+    另：A-01 代码还用到 email、created_at、updated_at、wallet_accounts 与 admin_accounts，
+       这些列/表在 0001 中均已存在（钱包开户由 A-01 的 EnsureUserWithWallet 完成）。
+
+问题 3：是否需要新增字段或索引？
+  字段：不需要。A-01 触及的列 = {phone, email, display_name, password_hash, status, created_at,
+        updated_at} ∪ {avatar_url, deleted_at}，前一集合来自 0001，后一集合来自 0008。
+  索引：需要的那一个已在 0008 里 —— idx_user_accounts_deleted_at (deleted_at) WHERE deleted_at IS NOT NULL。
+       读路径全部按 deleted_at IS NULL 过滤，部分索引只在真的存在注销数据时付出代价。
+
+问题 4：是否真的需要 0009？
+  不需要。上面四条已由 TestA01SchemaSatisfiesTheAdapterAndTheContract（真实 PostgreSQL）逐条断言：
+  列（含类型/可空性/默认值）、0008 的三条约束、既有 phone/email 唯一性与 status 枚举、部分索引、
+  以及 wallet_accounts 的必要列；全部通过即说明数据库侧没有缺口。
+  该测试还断言最高已应用迁移为 8：一旦将来出现 0009，它会失败并提示结论需要重新评估（而不是默认继续成立）。
+```
 
 ## 1. 正式迁移 0008
 
@@ -107,7 +142,8 @@ PG 已提交（账号已 DISABLED / 已匿名化）→ Redis 会话撤销失败 
 | 2 | `DELETE /me` 在"PG 已注销、Redis 撤销失败"的重试下第二次返回 404（`DeleteAccount` 返回 found=false → `ErrProfileNotFound`），客户端看到"账号不存在"而不是"已注销" | A 线：契约上 404 可辩护，但重试语义建议返回 204（幂等注销）。迁移与适配器无需改动 |
 | 3 | `SetFrozen(false)` 无条件写 `ACTIVE`：今天只有"冻结"会写 DISABLED，因此正确；若将来出现第二种禁用原因，这条会把它们一起解禁 | 已写进适配器注释；需要第二种禁用原因时改为记录禁用来源 |
 | 4 | 注销发生在**有活跃订单/正在充电**时：会话被撤销，但物理充电仍在继续，订单靠设备回执收尾，账单计入钱包 | 业务策略问题（是否需要先取消/拒绝注销）。迁移与适配器无需改动，但建议在 UC-U-05 文档里明确 |
-| 5 | `internal/auth/redis.go` 的 `RevokeAllForUser` 依赖每用户 token 索引（SET + 脚本）——本次未改动 | 已复核为脚本内原子执行；如需并发压力验证，属 A 线模块的用例范围 |
+| 5 | `internal/auth/redis.go` 的 `RevokeAllForUser` 依赖每用户 token 索引（SET + 脚本）——本次未改动 | 已复核为脚本内原子执行；A-01 的服务级测试已覆盖"冻结即撤销"（`profile_test.go` 调 `FreezeUser` 并断言撤销）；未覆盖的是**撤销失败**路径 |
+| 6 | **头像长度只在数据库侧有界（512），API 侧不校验**：昵称有 1..20 与纯空白校验（400），头像没有长度/协议校验，超长 URL 会打到 0008 的 CHECK 上变成 **500 而不是 400** | A 线：建议在 `updateProfileRequest` 的校验里加长度（≤512）与方案（http/https）检查，让客户端拿到 400；数据库的 CHECK 作为最后一道防线保留 |
 
 ### 2.4 复核中发现并修复的**与本模块相邻**的测试缺陷
 
@@ -129,6 +165,9 @@ PG 已提交（账号已 DISABLED / 已匿名化）→ Redis 会话撤销失败 
 | `TestDeletedAccountInvariantsAreEnforcedByTheDatabase` | 直接用 SQL 造"已注销但 ACTIVE""已注销但仍有凭据""头像超 512"三种行，数据库全部拒绝；两个账号注销后占位手机号互不冲突 |
 | `TestProfileColumnsSurviveAWalletProvisioning` | 钱包开户/重复开户不会清掉昵称，也不会给活跃账号写上 `deleted_at` |
 | `TestUserProfileMigrationIsComplete`（`schema_test.go`） | 0008 必须含两列、三条约束、部分索引，且 up 迁移不得包含 `DROP COLUMN`；down 脚本必须按"约束→索引→列"回退 |
+| `TestA01SchemaSatisfiesTheAdapterAndTheContract`（`a01_schema_contract_test.go`） | **第一步结论的可执行形式**：列（类型/可空性/默认值）、0008 三条约束、既有 phone/email 唯一性与 status 枚举、部分索引、wallet_accounts 两列、最高迁移版本 = 8 |
+| `TestAccountMutationErrorMapping` | 未知账号 → `ErrProfileNotFound`；**上下文取消不得被误报为"找不到"**（保留 `context.Canceled`）；空更新是调用方错误而非"找不到" |
+| `TestFrozenAccountIsDisabledForTheLoginPath` | 跨存储边界可被数据库侧证明的一半：冻结后登录路径用的 `FindUserByAccount` 返回 `DISABLED`；解冻后回到 `ACTIVE` |
 
 ### 反向验证（先破坏被保护的行为，确认用例失败）
 
@@ -140,6 +179,12 @@ PG 已提交（账号已 DISABLED / 已匿名化）→ Redis 会话撤销失败 
    这恰好证明了约束的作用面：没有它，"已注销但可登录"的行可以存在于任何一次疏忽之后。
 2) 适配器的 panic 路径真实存在：恢复复核前的三分支实现 →
    TestAccountMutationUpdateRequiresAField 失败（无字段调用触发 nil 解引用 panic）。
+3) 迁移结论测试真的会发现缺口：
+   - 删掉 idx_user_accounts_deleted_at → "the deleted_at index is missing: sql: no rows in result set"；
+   - 删掉 user_accounts_avatar_url_length 并临时要求一个不存在的列 →
+     "user_accounts.column_that_does_not_exist is missing from the schema" 与
+     "constraint user_accounts_avatar_url_length is missing"；
+   两者各自恢复后测试重新通过 —— 说明"0008 已足够"这个结论是被检查出来的，不是被声明的。
 ```
 
 ## 4. 验证命令与结果
@@ -171,6 +216,7 @@ PG 已提交（账号已 DISABLED / 已匿名化）→ Redis 会话撤销失败 
   backend/migrations/0008_user_profile_and_deletion.sql
   backend/migrations/down/0008_user_profile_and_deletion.down.sql
   backend/internal/repository/postgres/account_mutation_integration_test.go
+  backend/internal/repository/postgres/a01_schema_contract_test.go（第一步结论的可执行断言）
   docs/migration/a-01-persistence-review.md（本文件）
 修改：
   backend/internal/repository/postgres/accounts.go（适配器复核修复：单语句更新、拒绝空更新、列常量、边界注释）
@@ -180,4 +226,24 @@ PG 已提交（账号已 DISABLED / 已匿名化）→ Redis 会话撤销失败 
   backend/internal/auth/**（A 线）：端口、服务、处理器、Redis 会话实现均未改动
   api/openapi.yaml（集成人员）：仍待登记 A-01 的四类接口
   docs/migration/approval-log.md（集成人员）
+
+## 6. 收口状态
+
+```text
+B 线已完成（本分支）：
+  正式迁移 0008 + down 脚本；
+  迁移结论核对（0 节，无需 0009，且有可执行断言）；
+  AccountMutationAdapter 的 SQL / 事务边界 / 错误映射复核（含 4 项修复、6 项登记）；
+  真实 PostgreSQL 集成测试 10 个（含并发、注销、冻结、不变量、错误映射、schema 契约）；
+  反向验证 3 组。
+
+仍待集成人员（不属 B 线）：
+  1. 把 A-01 的四类接口登记到 api/openapi.yaml（提案：docs/migration/proposals/a-01-openapi-profile-endpoints.md）；
+  2. 合入 A-01 分支（codex/backend/a-01-auth）与本叠加分支（git rebase --onto origin/develop ac4e407）；
+  3. 更新 approval-log：A-01 记为 APPROVED（用户资料、注销、冻结/解冻 + 0008 收口）。
+
+A 线待办（已登记，不阻塞收口）：
+  头像长度/方案的 API 侧校验（400 而不是 500）；ProfileView.PhoneMasked 字段改名；
+  DELETE /me 重试返回 204 而非 404；SetFrozen(false) 的禁用来源记录；注销与活跃订单的业务策略。
+```
 ```
