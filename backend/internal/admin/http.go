@@ -55,10 +55,228 @@ func (h *Handlers) Register(server interface {
 	server.Register("/api/v1/admin/chargers/{chargerId}/restart", h.auth.RequireAdminWrite(h.restartCharger))
 	server.Register("/api/v1/admin/users", h.auth.RequireRole(auth.RoleAdmin, h.listUsers))
 	server.Register("/api/v1/admin/orders", h.auth.RequireRole(auth.RoleAdmin, h.listOrders))
+	server.Register("/api/v1/admin/users/{userId}", h.auth.RequireRole(auth.RoleAdmin, h.userDetail))
+	server.Register("/api/v1/admin/users/{userId}/transactions", h.auth.RequireRole(auth.RoleAdmin, h.userLedger))
+	server.Register("/api/v1/admin/chargers/{chargerId}/tariff", h.auth.RequireAdminWrite(h.tariffRoutes))
+	server.Register("/api/v1/admin/chargers/{chargerId}/release", h.auth.RequireAdminWrite(h.forceRelease))
+	server.Register("/api/v1/admin/audit", h.auth.RequireRole(auth.RoleAdmin, h.listAudit))
 }
 
 // identityFrom is enforced by the middleware; every admin handler needs the
 // acting administrator for audit trails and idempotency scopes.
+// tariffRoutes dispatches GET and PUT on /admin/chargers/{chargerId}/tariff.
+func (h *Handlers) tariffRoutes(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.getTariff(w, r)
+	case http.MethodPut:
+		h.updateTariff(w, r)
+	default:
+		w.Header().Set("Allow", "GET, PUT")
+		httpapi.WriteError(w, r, http.StatusMethodNotAllowed, httpapi.CodeMethodNotAllowed, "method not allowed", nil)
+	}
+}
+
+type updateTariffRequest struct {
+	ElectricityPriceCent int64  `json:"electricityPriceCentPerKwh"`
+	ServicePriceCent     int64  `json:"servicePriceCentPerKwh"`
+	OffPeakPriceCent     *int64 `json:"offPeakElectricityPriceCentPerKwh"`
+	OffPeakStartHour     *int16 `json:"offPeakStartHour"`
+	OffPeakEndHour       *int16 `json:"offPeakEndHour"`
+}
+
+func (h *Handlers) getTariff(w http.ResponseWriter, r *http.Request) {
+	chargerID, ok := chargerIDFrom(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.GetTariff(r.Context(), chargerID)
+	if err != nil {
+		writeAdminError(w, r, err)
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, httpapi.Response{
+		Success: true,
+		Code:    httpapi.CodeOK,
+		Message: "ok",
+		Data:    result,
+	})
+}
+
+func (h *Handlers) updateTariff(w http.ResponseWriter, r *http.Request) {
+	identity, ok := identityFrom(w, r)
+	if !ok {
+		return
+	}
+	chargerID, ok := chargerIDFrom(w, r)
+	if !ok {
+		return
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var request updateTariffRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "invalid request body", nil)
+		return
+	}
+
+	result, err := h.service.UpdateTariff(r.Context(), TariffUpdate{
+		AdminID:              identity.ID,
+		ChargerID:            chargerID,
+		ElectricityPriceCent: request.ElectricityPriceCent,
+		ServicePriceCent:     request.ServicePriceCent,
+		OffPeakPriceCent:     request.OffPeakPriceCent,
+		OffPeakStartHour:     request.OffPeakStartHour,
+		OffPeakEndHour:       request.OffPeakEndHour,
+	})
+	if err != nil {
+		writeAdminError(w, r, err)
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, httpapi.Response{
+		Success: true,
+		Code:    httpapi.CodeOK,
+		Message: "ok",
+		Data:    result,
+	})
+}
+
+type forceReleaseRequest struct {
+	Reason       string `json:"reason"`
+	TargetStatus string `json:"targetStatus"`
+}
+
+// forceRelease handles POST /api/v1/admin/chargers/{chargerId}/release
+// (BR-11 forced release with reason, target status and audit).
+func (h *Handlers) forceRelease(w http.ResponseWriter, r *http.Request) {
+	identity, ok := identityFrom(w, r)
+	if !ok {
+		return
+	}
+	chargerID, ok := chargerIDFrom(w, r)
+	if !ok {
+		return
+	}
+	body, ok := readBody(w, r)
+	if !ok {
+		return
+	}
+	var request forceReleaseRequest
+	if err := json.Unmarshal(body, &request); err != nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "invalid request body", nil)
+		return
+	}
+	key, ok := requireIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := h.service.ForceRelease(r.Context(), ForceReleaseCommand{
+		AdminID:        identity.ID,
+		ChargerID:      chargerID,
+		Reason:         request.Reason,
+		TargetStatus:   request.TargetStatus,
+		IdempotencyKey: key,
+		RequestHash:    requestHash(r, body),
+		TraceID:        httpapi.RequestID(r.Context()),
+	})
+	if err != nil {
+		writeAdminError(w, r, err)
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, httpapi.Response{
+		Success: true,
+		Code:    httpapi.CodeOK,
+		Message: "ok",
+		Data:    result,
+	})
+}
+
+// userDetail handles GET /api/v1/admin/users/{userId}.
+func (h *Handlers) userDetail(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	userID, err := strconv.ParseInt(r.PathValue("userId"), 10, 64)
+	if err != nil || userID < 1 {
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "invalid user id", nil)
+		return
+	}
+	result, err := h.service.UserDetail(r.Context(), userID)
+	if err != nil {
+		writeAdminError(w, r, err)
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, httpapi.Response{
+		Success: true,
+		Code:    httpapi.CodeOK,
+		Message: "ok",
+		Data:    result,
+	})
+}
+
+// userLedger handles GET /api/v1/admin/users/{userId}/transactions.
+func (h *Handlers) userLedger(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	userID, err := strconv.ParseInt(r.PathValue("userId"), 10, 64)
+	if err != nil || userID < 1 {
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "invalid user id", nil)
+		return
+	}
+	page, pageSize, ok := h.parsePagination(w, r)
+	if !ok {
+		return
+	}
+
+	result, err := h.service.UserLedger(r.Context(), UserLedgerFilter{
+		UserID: userID, Page: page, PageSize: pageSize, Type: r.URL.Query().Get("type"),
+	})
+	if err != nil {
+		writeAdminError(w, r, err)
+		return
+	}
+	writePage(w, r, http.StatusOK, result)
+}
+
+// listAudit handles GET /api/v1/admin/audit.
+func (h *Handlers) listAudit(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	page, pageSize, ok := h.parsePagination(w, r)
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+
+	result, err := h.service.Audit(r.Context(), AuditFilter{
+		Page:         page,
+		PageSize:     pageSize,
+		ActorID:      query.Get("actorId"),
+		Action:       query.Get("action"),
+		ResourceType: query.Get("resourceType"),
+		ResourceID:   query.Get("resourceId"),
+	})
+	if err != nil {
+		writeAdminError(w, r, err)
+		return
+	}
+	writePage(w, r, http.StatusOK, result)
+}
+
+func chargerIDFrom(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	chargerID, err := strconv.ParseInt(r.PathValue("chargerId"), 10, 64)
+	if err != nil || chargerID < 1 {
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "invalid charger id", nil)
+		return 0, false
+	}
+	return chargerID, true
+}
+
 func identityFrom(w http.ResponseWriter, r *http.Request) (auth.Identity, bool) {
 	identity, ok := auth.IdentityFromContext(r.Context())
 	if !ok {
@@ -349,7 +567,8 @@ func writeAdminError(w http.ResponseWriter, r *http.Request, err error) {
 		httpapi.WriteError(w, r, http.StatusConflict, codeChargerUnavailable, "charger is unavailable", nil)
 	case errors.Is(err, ErrInvalidStateTransition):
 		httpapi.WriteError(w, r, http.StatusConflict, codeInvalidStateTransition, "invalid state transition", nil)
-	case errors.Is(err, ErrInvalidStationFilter), errors.Is(err, ErrInvalidUserStatus), errors.Is(err, ErrInvalidReason):
+	case errors.Is(err, ErrInvalidStationFilter), errors.Is(err, ErrInvalidUserStatus), errors.Is(err, ErrInvalidReason),
+		errors.Is(err, ErrInvalidTariff), errors.Is(err, ErrInvalidLedgerFilter):
 		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "invalid request parameter", nil)
 	default:
 		httpapi.WriteError(w, r, http.StatusServiceUnavailable, httpapi.CodeDatabaseError, "administration is temporarily unavailable", nil)
