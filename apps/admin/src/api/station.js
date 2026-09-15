@@ -1,46 +1,54 @@
-import { api } from './http'
+import { api, unsupported } from './http'
+import { flattenPage } from './contract'
 
-/** 站点与价格接口（接口文档 §7.1–§7.5、§7.11–§7.13）。所有写入均携带幂等键。 */
+/** 站点接口（Go 契约）。所有写入均携带幂等键（16..128，服务端强制）。 */
 
-/** §7.1 站点列表；参数 status、adcode、keyword、page、pageSize。 */
+/**
+ * 站点列表；Go 契约仅支持 keyword + 分页（无 status/adcode 过滤，
+ * 这两个筛选在 Go 契约补齐前不提交，避免伪装成已生效的筛选）。
+ */
 export function fetchStations(params = {}) {
-  return api.get('/admin/stations', params)
+  const { keyword, page, pageSize } = params
+  return api.get('/admin/stations', { keyword, page, pageSize }).then(flattenPage)
 }
 
-/** §7.2 新增站点：initialCharger 必填，站点与初始设备在同一事务内创建。 */
+/**
+ * 新增站点：Go 契约字段为 code/name/address/latitudeE6/longitudeE6，
+ * 不含 initialCharger（建设备暂无端点）、adcode、businessHours。
+ */
 export function createStation(payload, { idempotencyKey } = {}) {
-  return api.post('/admin/stations', payload, { idempotent: true, idempotencyKey })
-}
-
-/** §7.3 修改站点：只允许 name/address/adcode/latitudeE6/longitudeE6/businessHours/version。 */
-export function updateStation(stationId, patch, { idempotencyKey } = {}) {
-  return api.put(`/admin/stations/${encodeURIComponent(stationId)}`, patch, {
-    idempotent: true,
-    idempotencyKey
-  })
-}
-
-/** §7.4/§7.5 停用或启用站点：需要原因与当前 version。 */
-export function setStationEnabled(stationId, enabled, { reason, version, idempotencyKey } = {}) {
-  const action = enabled ? 'enable' : 'disable'
   return api.post(
-    `/admin/stations/${encodeURIComponent(stationId)}/${action}`,
-    { reason, version },
+    '/admin/stations',
+    {
+      code: payload.code,
+      name: payload.name,
+      address: payload.address,
+      latitudeE6: payload.latitudeE6,
+      longitudeE6: payload.longitudeE6
+    },
     { idempotent: true, idempotencyKey }
   )
 }
 
-/** §7.11 基础价格版本；参数 adcode、effectiveAt、page、pageSize。 */
-export function fetchTariffs(params = {}) {
-  return api.get('/admin/tariffs', params)
+/** 修改站点：Go 契约暂无该端点（待 B-01 决策）。 */
+export function updateStation() {
+  return unsupported('修改站点在 Go 后端暂未提供（待 B-01 契约决策）')
 }
 
-/** §7.12 创建基础价格版本；同一行政区有效期不得重叠。 */
-export function createTariff(payload, { idempotencyKey } = {}) {
-  return api.post('/admin/tariffs', payload, { idempotent: true, idempotencyKey })
+/** 站点启停：Go 契约暂无该端点。 */
+export function setStationEnabled() {
+  return unsupported('站点启停在 Go 后端暂未提供（待 B-01 契约决策）')
 }
 
-/** §7.13 批准服务费调整；adjustmentBp 为 -2000~2000、步长 500。 */
-export function createPriceAdjustment(payload, { idempotencyKey } = {}) {
-  return api.post('/admin/price-adjustments', payload, { idempotent: true, idempotencyKey })
+/** 行政区基础价格版本：Go 契约的费率是设备级的（见 charger tariff），该域暂缺。 */
+export function fetchTariffs() {
+  return unsupported('基础价格版本在 Go 后端暂未提供（费率为设备级，见充电桩管理）')
+}
+
+export function createTariff() {
+  return unsupported('创建价格版本在 Go 后端暂未提供')
+}
+
+export function createPriceAdjustment() {
+  return unsupported('服务费调整在 Go 后端暂未提供')
 }

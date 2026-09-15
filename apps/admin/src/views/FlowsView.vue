@@ -17,9 +17,7 @@ import { formatDateTime } from '@/utils/format'
 const flows = useFlowsStore()
 
 const statusFilter = ref(null)
-const stationId = ref('')
-const chargerId = ref('')
-const userId = ref('')
+const orderNo = ref('')
 const releaseTarget = ref(null)
 
 onMounted(() => {
@@ -32,7 +30,6 @@ const columns = [
   { key: 'stationId', label: '站点 ID', align: 'right' },
   { key: 'chargerCode', label: '电桩编号' },
   { key: 'statusText', label: '状态' },
-  { key: 'version', label: '版本', align: 'right' },
   { key: 'createdAt', label: '创建时间', format: value => formatDateTime(value) }
 ]
 
@@ -56,17 +53,13 @@ const releaseHint = computed(() => {
 function applyFilters() {
   flows.setFilter({
     status: statusFilter.value,
-    stationId: stationId.value,
-    chargerId: chargerId.value,
-    userId: userId.value
+    orderNo: orderNo.value
   })
 }
 
 function resetFilters() {
   statusFilter.value = null
-  stationId.value = ''
-  chargerId.value = ''
-  userId.value = ''
+  orderNo.value = ''
   flows.resetFilters()
 }
 
@@ -110,15 +103,15 @@ async function submitRelease({ reason, nextChargerStatus }) {
         </label>
         <label class="field">
           <span>站点 ID</span>
-          <input v-model="stationId" type="search" inputmode="numeric" placeholder="按站点筛选" data-testid="flows-station" />
+          <input v-model="orderNo" type="search" placeholder="按订单号筛选" data-testid="flows-order" />
         </label>
         <label class="field">
           <span>电桩 ID</span>
-          <input v-model="chargerId" type="search" inputmode="numeric" placeholder="按设备筛选" data-testid="flows-charger" />
+
         </label>
         <label class="field">
           <span>用户 ID</span>
-          <input v-model="userId" type="search" inputmode="numeric" placeholder="按用户筛选" data-testid="flows-user" />
+
         </label>
         <template #actions>
           <button type="button" class="btn" data-testid="flows-reset" @click="resetFilters">重置</button>

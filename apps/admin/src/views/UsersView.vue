@@ -18,8 +18,7 @@ import { formatAmount, formatDateTime, formatEnergy, formatInt } from '@/utils/f
 
 const users = useUsersStore()
 
-const phoneExact = ref('')
-const phoneLast4 = ref('')
+const keyword = ref('')
 const statusFilter = ref(null)
 const sort = ref('-registeredAt')
 
@@ -65,18 +64,14 @@ function statusTone(text) {
 
 function applyFilters() {
   users.setFilter({
-    phoneExact: phoneExact.value,
-    phoneLast4: phoneLast4.value,
-    status: statusFilter.value,
-    sort: sort.value
+    keyword: keyword.value,
+    status: statusFilter.value
   })
 }
 
 function resetFilters() {
-  phoneExact.value = ''
-  phoneLast4.value = ''
+  keyword.value = ''
   statusFilter.value = null
-  sort.value = '-registeredAt'
   users.resetFilters()
 }
 
@@ -116,11 +111,11 @@ async function openOrders(row) {
       <FilterBar test-id="users-filter" :busy="users.loading" @submit="applyFilters">
         <label class="field">
           <span>完整手机号</span>
-          <input v-model="phoneExact" type="search" inputmode="numeric" placeholder="11 位手机号" data-testid="users-phone-exact" />
+          <input v-model="keyword" type="search" placeholder="按昵称关键字搜索" data-testid="users-keyword" />
         </label>
         <label class="field">
           <span>手机号后四位</span>
-          <input v-model="phoneLast4" type="search" inputmode="numeric" placeholder="4 位数字" data-testid="users-phone-last4" />
+
         </label>
         <label class="field">
           <span>账号状态</span>

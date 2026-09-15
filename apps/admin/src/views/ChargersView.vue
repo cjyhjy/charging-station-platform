@@ -20,8 +20,6 @@ const chargers = useChargersStore()
 
 const stationId = ref(null)
 const statusFilter = ref(null)
-const typeFilter = ref(null)
-const keyword = ref('')
 
 const batchOpen = ref(false)
 const statusTarget = ref(null)
@@ -99,17 +97,13 @@ function statusTone(text) {
 function applyFilters() {
   chargers.setFilter({
     stationId: stationId.value,
-    status: statusFilter.value,
-    chargerType: typeFilter.value,
-    keyword: keyword.value
+    status: statusFilter.value
   })
 }
 
 function resetFilters() {
   stationId.value = null
   statusFilter.value = null
-  typeFilter.value = null
-  keyword.value = ''
   chargers.resetFilters()
 }
 
@@ -188,17 +182,6 @@ async function submitRestart({ reason }) {
             <option :value="null">全部状态</option>
             <option v-for="item in CHARGER_STATUS" :key="item.value" :value="item.value">{{ item.label }}</option>
           </select>
-        </label>
-        <label class="field">
-          <span>类型</span>
-          <select v-model="typeFilter" data-testid="chargers-type">
-            <option :value="null">全部类型</option>
-            <option v-for="item in CHARGER_TYPES" :key="item.value" :value="item.value">{{ item.label }}</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>编号关键词</span>
-          <input v-model="keyword" type="search" placeholder="按电桩编号搜索" data-testid="chargers-keyword" />
         </label>
         <template #actions>
           <button type="button" class="btn" data-testid="chargers-reset" @click="resetFilters">重置</button>

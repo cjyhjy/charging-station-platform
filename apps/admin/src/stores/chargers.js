@@ -28,7 +28,7 @@ export const useChargersStore = defineStore('adminChargers', {
     total: 0,
     page: 1,
     pageSize: 20,
-    filters: { stationId: null, status: null, chargerType: null, keyword: '' },
+    filters: { stationId: null, status: null },
     loading: false,
     saving: false,
     error: '',
@@ -53,11 +53,10 @@ export const useChargersStore = defineStore('adminChargers', {
 
   actions: {
     params() {
+      // Go 契约仅支持 stationId/status 过滤；keyword/chargerType 在契约补齐前不提交。
       return {
         stationId: this.filters.stationId === null ? undefined : this.filters.stationId,
         status: this.filters.status === null ? undefined : this.filters.status,
-        chargerType: this.filters.chargerType === null ? undefined : this.filters.chargerType,
-        keyword: this.filters.keyword.trim() || undefined,
         page: this.page,
         pageSize: this.pageSize
       }
@@ -101,7 +100,7 @@ export const useChargersStore = defineStore('adminChargers', {
     },
 
     resetFilters() {
-      this.filters = { stationId: null, status: null, chargerType: null, keyword: '' }
+      this.filters = { stationId: null, status: null }
       this.page = 1
       return this.load()
     },
@@ -174,7 +173,7 @@ export const useChargersStore = defineStore('adminChargers', {
       }
     },
 
-    /** §7.9 远程重启：创建命令后立刻开始轮询。 */
+    /** 远程重启（Go 契约）：202 返回 {commandNo, status(PENDING)}；无命令查询端点，不自动轮询。 */
     async restart(charger, reason) {
       const auth = useAuthStore()
       this.saving = true
@@ -187,18 +186,15 @@ export const useChargersStore = defineStore('adminChargers', {
         this.command = {
           commandNo: data.commandNo || '',
           status: data.status || 'PENDING',
-          chargerStatus: toInteger(data.chargerStatus),
+          chargerStatus: null,
           createdAt: toInteger(data.createdAt) ?? 0,
           completedAt: null,
           errorSummary: '',
-          chargerCode: charger.code
+          chargerCode: charger.code,
+          /** Go 契约暂无命令查询端点：面板仅展示受理结果，最新状态以设备列表刷新为准。 */
+          noQueryEndpoint: true
         }
-        this.mergeRow(charger.id, {
-          status: toInteger(data.chargerStatus) ?? charger.status,
-          statusText: '重启中'
-        })
-        this.notice = `重启指令已提交（${data.commandNo || '无编号'}），正在等待设备响应`
-        if (this.command.commandNo) this.startPolling()
+        this.notice = `重启指令已受理（${data.commandNo || '无编号'}），Go 后端暂无命令查询接口，请稍后刷新列表查看设备状态`
         return true
       } catch (error) {
         this.error = error?.userMessage || '远程重启失败'

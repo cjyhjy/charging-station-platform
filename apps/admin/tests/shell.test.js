@@ -18,6 +18,7 @@ const EXPECTED_DESTINATIONS = [
   { key: 'chargers', to: '/chargers', label: '充电桩' },
   { key: 'users', to: '/users', label: '用户' },
   { key: 'flows', to: '/flows', label: '活动流程' },
+  { key: 'appeals', to: '/appeals', label: '申诉管理' },
   { key: 'predictions', to: '/predictions', label: '智能预测' },
   { key: 'accounts', to: '/accounts', label: '管理员' },
   { key: 'ops', to: '/ops', label: '运维' }
@@ -75,7 +76,7 @@ afterEach(() => {
 })
 
 describe('唯一路由表', () => {
-  it('只有一套页面：登录 + 一个 Shell + 8 个目的地 + 通配回落', () => {
+  it('只有一套页面：登录 + 一个 Shell + 9 个目的地 + 通配回落', () => {
     expect(routes).toHaveLength(3)
 
     const login = routes.find(route => route.path === '/login')
@@ -83,8 +84,8 @@ describe('唯一路由表', () => {
 
     const shell = routes.find(route => Array.isArray(route.children))
     expect(shell.path).toBe('/')
-    expect(shell.children).toHaveLength(8)
-    expect(shell.children.map(child => child.path)).toEqual(['', 'stations', 'chargers', 'users', 'flows', 'predictions', 'accounts', 'ops'])
+    expect(shell.children).toHaveLength(9)
+    expect(shell.children.map(child => child.path)).toEqual(['', 'stations', 'chargers', 'users', 'flows', 'appeals', 'predictions', 'accounts', 'ops'])
     expect(routes[routes.length - 1].path).toBe('/:pathMatch(.*)*')
     expect(routes[routes.length - 1].redirect).toBe('/')
   })
@@ -101,7 +102,7 @@ describe('唯一路由表', () => {
   })
 
   it('侧栏目的地与路由表一一对应', () => {
-    expect(NAV_ITEMS).toHaveLength(8)
+    expect(NAV_ITEMS).toHaveLength(9)
     expect(NAV_ITEMS.map(item => ({ key: item.key, to: item.to, label: item.label }))).toEqual(EXPECTED_DESTINATIONS)
 
     const shell = routes.find(route => Array.isArray(route.children))
@@ -119,7 +120,7 @@ describe('页面骨架与侧栏', () => {
     for (const item of EXPECTED_DESTINATIONS) {
       expect(wrapper.find(`[data-testid="rail-${item.key}"]`).exists()).toBe(true)
     }
-    expect(wrapper.findAll('.rail-item')).toHaveLength(8)
+    expect(wrapper.findAll('.rail-item')).toHaveLength(9)
 
     // 当前路由为 '/'，只有“总览”处于选中态
     expect(wrapper.get('[data-testid="rail-overview"]').classes()).toContain('is-active')
@@ -163,7 +164,7 @@ describe('页面骨架与侧栏', () => {
     await flush(6)
     await settle(2)
 
-    expect(harness.indexOf('POST', '/admin/auth/logout')).toBe(0)
+    expect(harness.indexOf('POST', '/auth/logout')).toBe(0)
     expect(auth.isLoggedIn).toBe(false)
     expect(auth.token).toBeNull()
     expect(sessionStorage.getItem('ncs.admin.accessToken')).toBeNull()

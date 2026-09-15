@@ -48,6 +48,12 @@ export const routes = [
         meta: { title: '活动流程', crumb: '运营 / 活动流程' }
       },
       {
+        path: 'appeals',
+        name: 'appeals',
+        component: () => import('@/views/AppealsView.vue'),
+        meta: { title: '申诉管理', crumb: '运营 / 申诉管理' }
+      },
+      {
         path: 'predictions',
         name: 'predictions',
         component: () => import('@/views/PredictionsView.vue'),

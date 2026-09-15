@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { fetchUser, fetchUserOrders, fetchUsers, setUserStatus } from '../api/user'
+import { fetchUser, fetchUserOrders, fetchUserTransactions, fetchUsers, setUserStatus } from '../api/user'
 import { ERROR_CODES } from '../api/http'
 import { toInteger } from '../utils/format'
 import { useAuthStore } from './auth'
@@ -28,7 +28,7 @@ export const useUsersStore = defineStore('adminUsers', {
     total: 0,
     page: 1,
     pageSize: 20,
-    filters: { status: null, phoneExact: '', phoneLast4: '', sort: '-registeredAt' },
+    filters: { status: null, keyword: '' },
     loading: false,
     saving: false,
     error: '',
@@ -41,6 +41,10 @@ export const useUsersStore = defineStore('adminUsers', {
     ordersTotal: 0,
     ordersLoading: false,
     ordersError: '',
+    transactions: [],
+    transactionsTotal: 0,
+    transactionsLoading: false,
+    transactionsError: '',
     /** 冻结时保留的进行中流程提示（服务端返回 activeFlowPreserved）。 */
     activeFlowPreserved: false
   }),
@@ -53,35 +57,20 @@ export const useUsersStore = defineStore('adminUsers', {
   },
 
   actions: {
-    /** 过滤参数校验：返回错误文案或空字符串。 */
-    validateFilters() {
-      const exact = this.filters.phoneExact.trim()
-      const last4 = this.filters.phoneLast4.trim()
-      if (exact !== '' && !PHONE_EXACT_PATTERN.test(exact)) return '完整手机号必须是 11 位数字'
-      if (last4 !== '' && !PHONE_LAST4_PATTERN.test(last4)) return '手机号后四位必须是 4 位数字'
-      if (exact !== '' && last4 !== '') return '完整手机号与后四位只能选择一种查询方式'
-      return ''
-    },
-
+    /**
+     * 过滤参数：Go 契约仅支持 keyword/status + 分页（无手机号精确/后四位扫描，
+     * 与隐私基线一致）。keyword 为空串时不下发。
+     */
     params() {
       return {
         status: this.filters.status === null ? undefined : this.filters.status,
-        phoneExact: this.filters.phoneExact.trim() || undefined,
-        phoneLast4: this.filters.phoneLast4.trim() || undefined,
-        sort: this.filters.sort || undefined,
+        keyword: this.filters.keyword.trim() || undefined,
         page: this.page,
         pageSize: this.pageSize
       }
     },
 
     async load() {
-      const invalid = this.validateFilters()
-      if (invalid) {
-        this.items = []
-        this.total = 0
-        this.error = invalid
-        return false
-      }
       this.loading = true
       this.error = ''
       try {
@@ -107,7 +96,7 @@ export const useUsersStore = defineStore('adminUsers', {
     },
 
     resetFilters() {
-      this.filters = { status: null, phoneExact: '', phoneLast4: '', sort: '-registeredAt' }
+      this.filters = { status: null, keyword: '' }
       this.page = 1
       return this.load()
     },
@@ -144,6 +133,29 @@ export const useUsersStore = defineStore('adminUsers', {
     },
 
     /** §6.7 用户订单历史（管理员访问会写审计日志）。 */
+    /** 用户账务查询（A-04 第 7 步）：/admin/users/{userId}/transactions。 */
+    async loadTransactions(userId, { page = 1, type = null } = {}) {
+      this.transactionsLoading = true
+      this.transactionsError = ''
+      try {
+        const data = await fetchUserTransactions(userId, {
+          page,
+          pageSize: 20,
+          type: type === null || type === '' ? undefined : type
+        })
+        this.transactions = Array.isArray(data.items) ? data.items : []
+        this.transactionsTotal = toInteger(data.total) ?? this.transactions.length
+        return this.transactions
+      } catch (error) {
+        this.transactions = []
+        this.transactionsTotal = 0
+        this.transactionsError = error?.userMessage || '账务查询加载失败'
+        return []
+      } finally {
+        this.transactionsLoading = false
+      }
+    },
+
     async loadOrders(userId, { page = 1, status = null } = {}) {
       this.ordersLoading = true
       this.ordersError = ''

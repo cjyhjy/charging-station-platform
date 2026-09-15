@@ -301,7 +301,11 @@ export async function request(path, options = {}) {
         (typeof envelope.userMessage === 'string' && envelope.userMessage) ||
         (typeof envelope.message === 'string' && envelope.message) ||
         statusUserMessage(response.status),
-      requestId: typeof envelope.requestId === 'string' && envelope.requestId ? envelope.requestId : requestId,
+      requestId:
+        (typeof envelope.requestId === 'string' && envelope.requestId) ||
+        // Go 契约的错误信封把请求 ID 放在 traceId 字段。
+        (typeof envelope.traceId === 'string' && envelope.traceId) ||
+        requestId,
       sessionExpired: expired,
       reauthRequired
     })
@@ -316,4 +320,15 @@ export const api = {
   get: (path, params, options = {}) => request(`${path}${buildQuery(params)}`, { ...options, method: 'GET' }),
   post: (path, body, options = {}) => request(path, { ...options, method: 'POST', body }),
   put: (path, body, options = {}) => request(path, { ...options, method: 'PUT', body })
+}
+
+/**
+ * Go 契约暂缺能力的统一拒绝：携带 userMessage，使 store/视图直接展示
+ * "暂未开放"提示，而不是落到 503 兜底文案。任何此类能力都不得伪装成功。
+ */
+export function unsupported(message) {
+  const error = new Error(message)
+  error.userMessage = message
+  error.unsupported = true
+  return Promise.reject(error)
 }

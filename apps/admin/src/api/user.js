@@ -1,30 +1,50 @@
-import { api } from './http'
+import { api, unsupported } from './http'
+import { flattenPage, mapUser, mapWalletEntry, legacyToUserStatus } from './contract'
 
 /**
- * 用户管理接口（接口文档 §6.4–§6.7）。
- * 手机号只支持完整精确匹配或后四位匹配，不提供任意模糊扫描。
+ * 用户管理接口（Go 契约）。
+ * 手机号不提供模糊扫描：列表仅 keyword/status 过滤，与隐私基线一致。
  */
 
-/** §6.4 用户列表；参数 status、phoneExact、phoneLast4、page、pageSize、sort。 */
+/** 用户列表；参数 keyword、status(1/0)、page、pageSize。 */
 export function fetchUsers(params = {}) {
-  return api.get('/admin/users', params)
+  const { status, keyword, page, pageSize } = params
+  return api
+    .get('/admin/users', {
+      keyword,
+      status: status === undefined || status === null ? undefined : legacyToUserStatus(status),
+      page,
+      pageSize
+    })
+    .then(flattenPage)
+    .then(data => ({ ...data, items: (Array.isArray(data.items) ? data.items : []).map(mapUser) }))
 }
 
-/** §6.5 用户详情：脱敏手机号、钱包汇总、会话数量与活动流程摘要。 */
+/** 用户详情：脱敏手机号、余额、注册时间；Go 契约无会话数/活动流程摘要。 */
 export function fetchUser(userId) {
-  return api.get(`/admin/users/${encodeURIComponent(userId)}`)
+  return api.get(`/admin/users/${encodeURIComponent(userId)}`).then(mapUser)
 }
 
-/** §6.6 冻结或解冻：status 0 冻结 / 1 解冻，需要原因与当前 version。 */
-export function setUserStatus(userId, { status, reason, version }, { idempotencyKey } = {}) {
-  return api.put(
-    `/admin/users/${encodeURIComponent(userId)}/status`,
-    { status, reason, version },
-    { idempotent: true, idempotencyKey }
-  )
+/**
+ * 冻结或解冻：Go 契约是两个 POST 端点（无 body），映射旧 status 0 冻结 / 1 解冻。
+ * 乐观锁 version 在 Go 契约中不存在，参数保留但不再提交。
+ */
+export function setUserStatus(userId, { status }, { idempotencyKey } = {}) {
+  const action = status === 0 ? 'freeze' : 'unfreeze'
+  return api
+    .post(`/admin/users/${encodeURIComponent(userId)}/${action}`, undefined, { idempotent: true, idempotencyKey })
+    .then(mapUser)
 }
 
-/** §6.7 用户订单历史；status 只允许 60/70/90，管理员访问会写审计日志。 */
-export function fetchUserOrders(userId, params = {}) {
-  return api.get(`/admin/users/${encodeURIComponent(userId)}/orders`, params)
+/** 用户账务查询（A-04 第 7 步）：Go 契约 /admin/users/{userId}/transactions。 */
+export function fetchUserTransactions(userId, { type, page, pageSize } = {}) {
+  return api
+    .get(`/admin/users/${encodeURIComponent(userId)}/transactions`, { type, page, pageSize })
+    .then(flattenPage)
+    .then(data => ({ ...data, items: (Array.isArray(data.items) ? data.items : []).map(mapWalletEntry) }))
+}
+
+/** 用户订单历史：Go 契约 /admin/orders 暂无按用户过滤（待 B-01 补参数）。 */
+export function fetchUserOrders() {
+  return unsupported('按用户查询订单在 Go 后端暂未提供（待 B-01 补充过滤参数）')
 }

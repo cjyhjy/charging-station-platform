@@ -3,18 +3,38 @@ import { createPinia, setActivePinia } from 'pinia'
 import { useUsersStore } from '../src/stores/users'
 import { failResponse, installFetch, okResponse } from './helpers'
 
-const USER_ROW = {
+/** Go UserSummary 契约字段（列表不含手机号，隐私基线：无模糊扫描）。 */
+const GO_USER = {
   id: 7,
-  username: 'driver_lee',
-  phoneMasked: '138****8888',
-  nickname: '李先生',
-  status: 1,
-  balanceCent: 12800,
-  debtCent: 0,
-  registeredAt: 1788134400
+  displayName: '李先生',
+  status: 'ACTIVE',
+  balanceCent: 12800
 }
 
-const USER_DETAIL = { ...USER_ROW, statusText: '正常', version: 3, activeSessionCount: 2, hasActiveFlow: true }
+/** Go UserDetail 契约字段。 */
+const GO_USER_DETAIL = {
+  id: 7,
+  phone: '138****8888',
+  displayName: '李先生',
+  avatarUrl: '',
+  status: 'ACTIVE',
+  balanceCent: 12800,
+  registeredAt: '2026-09-02T12:00:00Z'
+}
+
+/** 适配层归一化后的行形状。 */
+const USER_ROW = {
+  id: 7,
+  displayName: '李先生',
+  status: 1,
+  statusText: '正常',
+  balanceCent: 12800,
+  version: 0
+}
+
+function goPage(items, total = items.length) {
+  return { items, meta: { page: 1, pageSize: 20, total } }
+}
 
 let users = null
 let harness = null
@@ -30,36 +50,22 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('用户查询', () => {
-  it('完整手机号必须是 11 位数字，非法输入不发请求', async () => {
-    harness = installFetch([okResponse({ items: [], total: 0, page: 1, pageSize: 20 })])
-    await users.setFilter({ phoneExact: '1380013' })
-    expect(users.error).toBe('完整手机号必须是 11 位数字')
-    expect(harness.count()).toBe(0)
-  })
-
-  it('后四位与完整手机号不能同时提交', async () => {
-    harness = installFetch([okResponse({ items: [], total: 0, page: 1, pageSize: 20 })])
-    await users.setFilter({ phoneExact: '13800138000', phoneLast4: '8000' })
-    expect(users.error).toBe('完整手机号与后四位只能选择一种查询方式')
-    expect(harness.count()).toBe(0)
-  })
-
-  it('合法的后四位进入查询参数，排序使用白名单值', async () => {
-    harness = installFetch([okResponse({ items: [USER_ROW], total: 1, page: 1, pageSize: 20 })])
-    await users.setFilter({ phoneExact: '', phoneLast4: '8888', status: 1, sort: '-balanceCent' })
+describe('用户查询（Go 契约）', () => {
+  it('keyword/status 过滤；status 数字码映射为 Go 枚举', async () => {
+    harness = installFetch([okResponse(goPage([GO_USER]))])
+    await users.setFilter({ keyword: '李', status: 1 })
 
     const query = harness.queryOf(0)
     expect(harness.urlOf(0).startsWith('/api/v1/admin/users')).toBe(true)
-    expect(query.get('phoneLast4')).toBe('8888')
-    expect(query.has('phoneExact')).toBe(false)
-    expect(query.get('status')).toBe('1')
-    expect(query.get('sort')).toBe('-balanceCent')
+    expect(query.get('keyword')).toBe('李')
+    expect(query.get('status')).toBe('ACTIVE')
     expect(users.total).toBe(1)
+    expect(users.items[0].status).toBe(1)
+    expect(users.items[0].statusText).toBe('正常')
   })
 
   it('空结果与加载失败分别落到空状态与错误文案', async () => {
-    harness = installFetch([okResponse({ items: [], total: 0, page: 1, pageSize: 20 })])
+    harness = installFetch([okResponse(goPage([]))])
     await users.load()
     expect(users.isEmpty).toBe(true)
     expect(users.error).toBe('')
@@ -71,80 +77,70 @@ describe('用户查询', () => {
   })
 })
 
-describe('用户详情与订单历史', () => {
-  it('用户详情包含脱敏手机号、会话数与活动流程摘要', async () => {
-    harness = installFetch([okResponse(USER_DETAIL)])
+describe('用户详情与账务', () => {
+  it('用户详情包含脱敏手机号、余额与注册时间（ISO → 秒）', async () => {
+    harness = installFetch([okResponse(GO_USER_DETAIL)])
     await users.loadDetail(7)
     expect(harness.urlOf(0)).toBe('/api/v1/admin/users/7')
-    expect(users.detail.phoneMasked).toBe('138****8888')
-    expect(users.detail.activeSessionCount).toBe(2)
-    expect(users.detail.hasActiveFlow).toBe(true)
-    expect(users.detail.version).toBe(3)
+    expect(users.detail.phone).toBe('138****8888')
+    expect(users.detail.status).toBe(1)
+    expect(users.detail.registeredAt).toBe(1788350400)
+    // Go 契约没有会话数/活动流程摘要/版本乐观锁。
+    expect(users.detail.version).toBe(0)
   })
 
-  it('订单历史按用户维度请求，并支持状态过滤', async () => {
-    harness = installFetch([
-      okResponse({
-        items: [{ orderNo: 'ORD-1', stationName: '中关村站', chargerCode: 'ZGC-DC-01', status: 60, statusText: '已完成', energyMwh: 12500000, amountCent: 3200 }],
-        total: 1,
-        page: 1,
-        pageSize: 20
-      })
-    ])
+  it('按用户查询订单在 Go 契约中暂未提供：显式失败且不发起请求', async () => {
+    harness = installFetch([])
     await users.loadOrders(7, { status: 60 })
-    expect(harness.urlOf(0).startsWith('/api/v1/admin/users/7/orders')).toBe(true)
-    expect(harness.queryOf(0).get('status')).toBe('60')
-    expect(users.orders[0].orderNo).toBe('ORD-1')
-    expect(users.ordersError).toBe('')
+    expect(users.orders).toEqual([])
+    expect(users.ordersError).toContain('暂未提供')
+    expect(harness.count()).toBe(0)
   })
 
-  it('订单历史失败时清空列表并给出错误', async () => {
-    harness = installFetch([failResponse({ status: 403, code: 403, userMessage: '无权访问该资源' })])
-    await users.loadOrders(7)
-    expect(users.orders).toEqual([])
-    expect(users.ordersError).toBe('无权访问该资源')
+  it('用户账务查询走 /admin/users/{id}/transactions', async () => {
+    harness = installFetch([
+      okResponse(goPage([
+        { id: 1, transactionType: 'TOP_UP', amountCent: 10000, balanceBeforeCent: 0, balanceAfterCent: 10000, createdAt: '2026-09-02T12:00:00Z' }
+      ]))
+    ])
+    await users.loadTransactions(7, { type: 'TOP_UP' })
+    expect(harness.urlOf(0)).toBe('/api/v1/admin/users/7/transactions?type=TOP_UP&page=1&pageSize=20')
+    expect(users.transactions[0].transactionType).toBe('TOP_UP')
   })
 })
 
-describe('冻结与解冻', () => {
-  it('使用详情返回的 version 提交，成功后就地更新列表与详情', async () => {
+describe('冻结与解冻（Go 契约：两个 POST 端点，无 body）', () => {
+  it('冻结走 /freeze，成功后就地更新列表与详情', async () => {
     harness = installFetch([
-      okResponse(USER_DETAIL),
-      okResponse({ id: 7, status: 0, statusText: '冻结', version: 4, activeFlowPreserved: true })
+      okResponse(GO_USER_DETAIL),
+      okResponse({ id: 7, status: 'DISABLED' })
     ])
     users.items = [{ ...USER_ROW }]
     await users.loadDetail(7)
     await expect(users.setStatus(users.detail, 0, '人工审核冻结')).resolves.toBe(true)
 
-    const index = harness.indexOf('PUT', '/admin/users/7/status')
-    expect(harness.bodyOf(index)).toEqual({ status: 0, reason: '人工审核冻结', version: 3 })
+    const index = harness.indexOf('POST', '/admin/users/7/freeze')
+    expect(index).toBe(1)
     expect(harness.headersOf(index)['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/)
     expect(users.items[0].status).toBe(0)
     expect(users.items[0].statusText).toBe('冻结')
-    expect(users.items[0].version).toBe(4)
     expect(users.detail.status).toBe(0)
-    // 冻结不取消进行中的充电，服务端通过 activeFlowPreserved 明确告知
-    expect(users.activeFlowPreserved).toBe(true)
     expect(users.notice).toContain('已冻结')
   })
 
-  it('解冻写回正常状态', async () => {
-    harness = installFetch([okResponse({ id: 7, status: 1, statusText: '正常', version: 5, activeFlowPreserved: false })])
-    users.items = [{ ...USER_ROW, status: 0, statusText: '冻结', version: 4 }]
+  it('解冻走 /unfreeze 并写回正常状态', async () => {
+    harness = installFetch([okResponse({ id: 7, status: 'ACTIVE' })])
+    users.items = [{ ...USER_ROW, status: 0, statusText: '冻结' }]
     await expect(users.setStatus(users.items[0], 1, '申诉通过解冻')).resolves.toBe(true)
+    expect(harness.indexOf('POST', '/admin/users/7/unfreeze')).toBe(0)
     expect(users.items[0].status).toBe(1)
     expect(users.notice).toContain('已解冻')
   })
 
-  it('版本冲突时提示并重载用户列表', async () => {
-    harness = installFetch([
-      failResponse({ status: 409, code: 22, userMessage: '版本落后' }),
-      okResponse({ items: [{ ...USER_ROW, version: 9 }], total: 1, page: 1, pageSize: 20 })
-    ])
-    users.items = [{ ...USER_ROW, version: 1 }]
+  it('服务端失败时保留可读错误', async () => {
+    harness = installFetch([failResponse({ status: 404, code: 4, userMessage: '用户不存在' })])
+    users.items = [{ ...USER_ROW, status: 1 }]
     await expect(users.setStatus(users.items[0], 0, '人工审核冻结')).resolves.toBe(false)
-    expect(users.conflict).toContain('其他管理员')
-    expect(harness.indexOf('GET', '/admin/users')).toBe(1)
-    expect(users.items[0].version).toBe(9)
+    expect(users.error).toBe('用户不存在')
   })
 })

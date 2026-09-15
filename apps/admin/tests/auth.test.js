@@ -8,17 +8,17 @@ import { failResponse, flush, installFetch, okResponse } from './helpers'
 /** 每个用例自行安装的 fetch 替身（用于断言请求次数与请求头）。 */
 let harness = null
 
-const ADMIN = {
+/** Go 契约登录响应：身份携带 adminRole（SUPER_ADMIN/OPERATOR/AUDITOR），无 OWNER。 */
+const GO_IDENTITY = {
   id: 1,
-  username: 'admin',
-  roles: ['OWNER'],
-  status: 1,
-  mustChangePassword: false,
-  version: 1
+  role: 'ADMIN',
+  adminRole: 'SUPER_ADMIN',
+  displayName: 'admin',
+  status: 'ACTIVE'
 }
 
-function loginEnvelope(admin = ADMIN) {
-  return okResponse({ accessToken: 'admin-token-1', expiresAt: 1893456000, sessionId: 11, admin })
+function loginEnvelope(identity = GO_IDENTITY) {
+  return okResponse({ accessToken: 'admin-token-1', expiresAt: 1893456000, identity })
 }
 
 let auth = null
@@ -52,19 +52,20 @@ describe('登录与令牌存储', () => {
     expect(localStorage.length).toBe(0)
     expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull()
     expect(auth.isLoggedIn).toBe(true)
+    // Go 契约的身份 displayName 即管理员用户名。
     expect(auth.displayName).toBe('admin')
-    expect(auth.isOwner).toBe(true)
+    // Go 契约没有 OWNER 角色：SUPER_ADMIN/OPERATOR/AUDITOR，isOwner 恒为 false。
+    expect(auth.isOwner).toBe(false)
   })
 
-  it('登录请求体包含账号、密码与设备标识', async () => {
+  it('登录请求体包含账号与密码（Go 契约不收 deviceId）', async () => {
     harness = installFetch([loginEnvelope()])
     await auth.login({ username: 'ops_wang', password: 'ncs-Initial-2026' })
     expect(harness.bodyOf(0)).toEqual({
       username: 'ops_wang',
-      password: 'ncs-Initial-2026',
-      deviceId: 'ncs-admin-web'
+      password: 'ncs-Initial-2026'
     })
-    expect(harness.urlOf(0)).toBe('/api/v1/admin/auth/login')
+    expect(harness.urlOf(0)).toBe('/api/v1/auth/admin/login')
   })
 
   it('刷新页面后可从 sessionStorage 恢复令牌与资料快照', async () => {
@@ -79,12 +80,12 @@ describe('登录与令牌存储', () => {
     expect(restored.restore()).toBe(true)
     expect(restored.isLoggedIn).toBe(true)
     expect(restored.displayName).toBe('admin')
-    expect(restored.roles).toEqual(['OWNER'])
+    expect(restored.roles).toEqual(['SUPER_ADMIN'])
   })
 })
 
-describe('退出与首次改密', () => {
-  it('退出清理令牌、资料与 sessionStorage', async () => {
+describe('退出与改密', () => {
+  it('退出清理令牌、资料与 sessionStorage（Go 为统一注销端点）', async () => {
     harness = installFetch([loginEnvelope(), okResponse({})])
     await auth.login({ username: 'admin', password: 'example-password' })
     await auth.logout()
@@ -93,7 +94,7 @@ describe('退出与首次改密', () => {
     expect(auth.admin).toBeNull()
     expect(auth.notice).toBe('已退出登录')
     expect(sessionStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull()
-    expect(harness.urlOf(1)).toBe('/api/v1/admin/auth/logout')
+    expect(harness.urlOf(1)).toBe('/api/v1/auth/logout')
   })
 
   it('退出接口失败也要清理本地会话', async () => {
@@ -104,22 +105,15 @@ describe('退出与首次改密', () => {
     expect(getAccessToken()).toBeNull()
   })
 
-  it('mustChangePassword=true 时暴露改密状态，改密成功后清除', async () => {
-    harness = installFetch([
-      loginEnvelope({ ...ADMIN, mustChangePassword: true }),
-      okResponse({ ...ADMIN, mustChangePassword: false, version: 2 })
-    ])
+  it('Go 契约暂无改密端点：mustChangePassword 恒为 false，改密调用显式失败', async () => {
+    harness = installFetch([loginEnvelope()])
     await auth.login({ username: 'ops_wang', password: 'ncs-Initial-2026' })
-    expect(auth.mustChangePassword).toBe(true)
-    expect(auth.notice).toContain('首次登录')
+    expect(auth.mustChangePassword).toBe(false)
 
     await expect(
       auth.changeOwnPassword({ currentPassword: 'ncs-Initial-2026', newPassword: 'ncs-New-2026-pw' })
-    ).resolves.toBe(true)
-    expect(auth.mustChangePassword).toBe(false)
-    expect(harness.urlOf(1)).toBe('/api/v1/admin/me/password')
-    // 修改本人密码按文档不需要幂等键（§6.11）。
-    expect(harness.headersOf(1)['Idempotency-Key']).toBeUndefined()
+    ).rejects.toThrow('暂未提供')
+    expect(harness.count()).toBe(1)
   })
 })
 
@@ -151,63 +145,18 @@ describe('登录锁定（连续失败 5 次锁定 30 秒）', () => {
   })
 })
 
-describe('重新验证（REAUTH_REQUIRED）', () => {
-  it('敏感写入失败后重新验证，并用同一个幂等键重试一次', async () => {
+describe('重新验证（REAUTH_REQUIRED，Go 契约休眠路径）', () => {
+  it('Go 契约无重新验证端点：密码提交后显式失败，不产生第二次业务写入', async () => {
     auth.setReauthProvider(async () => 'admin-password')
     const users = useUsersStore()
     users.items = [{ id: 7, phoneMasked: '138****8888', status: 1, statusText: '正常', version: 3 }]
 
-    harness = installFetch([
-      failResponse({ status: 401, code: 23, userMessage: '需要重新验证管理员密码' }),
-      okResponse({ reauthExpiresAt: 1893456000 }),
-      okResponse({ id: 7, status: 0, statusText: '冻结', version: 4, activeFlowPreserved: true })
-    ])
-
-    await expect(users.setStatus(users.items[0], 0, '人工审核冻结')).resolves.toBe(true)
-
-    const statusCall = harness.indexOf('PUT', '/admin/users/7/status')
-    const reauthCall = harness.indexOf('POST', '/admin/auth/reauth')
-    expect(statusCall).toBe(0)
-    expect(reauthCall).toBe(1)
-    expect(harness.count()).toBe(3)
-
-    // 重试使用完全相同的幂等键，重新验证请求本身不需要幂等键。
-    expect(harness.headersOf(0)['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/)
-    expect(harness.headersOf(2)['Idempotency-Key']).toBe(harness.headersOf(0)['Idempotency-Key'])
-    expect(harness.headersOf(1)['Idempotency-Key']).toBeUndefined()
-    expect(auth.reauthExpiresAt).toBe(1893456000)
-    expect(users.items[0].status).toBe(0)
-  })
-
-  it('重试后仍要求重新验证时不再循环，只重试一次', async () => {
-    auth.setReauthProvider(async () => 'admin-password')
-    const users = useUsersStore()
-    users.items = [{ id: 9, status: 1, statusText: '正常', version: 1 }]
-
-    harness = installFetch([
-      failResponse({ status: 401, code: 23, userMessage: '需要重新验证管理员密码' }),
-      okResponse({ reauthExpiresAt: 1 }),
-      failResponse({ status: 401, code: 23, userMessage: '需要重新验证管理员密码' })
-    ])
+    // 模拟未来契约返回 REAUTH_REQUIRED(23)：弹窗提交密码后，因 Go 暂无 reauth 端点而显式失败。
+    harness = installFetch([failResponse({ status: 401, code: 23, userMessage: '需要重新验证管理员密码' })])
 
     await expect(users.setStatus(users.items[0], 0, '人工审核冻结')).resolves.toBe(false)
-    const statusCalls = harness.calls.filter(call => String(call.url).includes('/admin/users/9/status'))
-    expect(statusCalls).toHaveLength(2)
-    expect(users.error).toContain('重新验证')
-  })
-
-  it('取消重新验证时放弃原请求，不产生第二次业务写入', async () => {
-    const users = useUsersStore()
-    users.items = [{ id: 5, status: 1, version: 1 }]
-    harness = installFetch([failResponse({ status: 401, code: 23 })])
-
-    const pending = users.setStatus(users.items[0], 0, '人工审核冻结')
-    await flush()
-    expect(auth.reauthActive).toBe(true)
-
-    auth.cancelReauth()
-    await expect(pending).resolves.toBe(false)
-    expect(harness.calls.filter(call => String(call.url).includes('/admin/users/5/status'))).toHaveLength(1)
+    expect(harness.count()).toBe(1)
+    expect(users.error).toContain('暂未提供')
   })
 
   it('弹窗提交空密码时保留弹窗并提示', async () => {

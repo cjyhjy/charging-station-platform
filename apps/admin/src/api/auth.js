@@ -1,23 +1,30 @@
-import { api } from './http'
+import { api, unsupported } from './http'
+import { mapAdminIdentity } from './contract'
 
-/** 管理员认证接口（接口文档 §6.1、§6.2、§6.3、§6.11）。 */
+/** 管理员认证接口（Go 契约）。 */
 
-/** §6.1 管理员登录；deviceId 用于会话审计，重复登录不产生新的设备维度。 */
-export function login({ username, password, deviceId = 'ncs-admin-web' }) {
-  return api.post('/admin/auth/login', { username, password, deviceId })
+/** 管理员登录；Go 契约不收 deviceId，身份里带 adminRole（SUPER_ADMIN/OPERATOR/AUDITOR）。 */
+export function login({ username, password }) {
+  return api.post('/auth/admin/login', { username, password }).then(session => ({
+    ...session,
+    admin: mapAdminIdentity(session?.identity)
+  }))
 }
 
-/** §6.2 敏感操作重新验证，成功后 15 分钟内免再次验证。 */
-export function reauth(password) {
-  return api.post('/admin/auth/reauth', { password })
+/**
+ * 重新验证（旧 §6.2）与修改本人密码（旧 §6.11）在 Go 契约中暂缺：
+ * runWithReauth 由服务端 REAUTH_REQUIRED(23) 驱动，Go 永不返回该码，机制自然休眠；
+ * 这里保留显式的不可用语义，防止未来误用打在真实 404 上。
+ */
+export function reauth() {
+  return unsupported('重新验证在 Go 后端暂未提供（待 B-01 契约决策）')
 }
 
-/** §6.3 管理员退出；重复退出幂等成功，因此不带幂等键。 */
+export function changeOwnPassword() {
+  return unsupported('修改本人密码在 Go 后端暂未提供（待 B-01 契约决策）')
+}
+
+/** 管理员退出；重复退出幂等成功，Go 为用户/管理员统一端点。 */
 export function logout() {
-  return api.post('/admin/auth/logout')
-}
-
-/** §6.11 修改本人密码：成功后清除 mustChangePassword，其他终端会话失效。 */
-export function changeOwnPassword({ currentPassword, newPassword }) {
-  return api.put('/admin/me/password', { currentPassword, newPassword })
+  return api.post('/auth/logout')
 }
