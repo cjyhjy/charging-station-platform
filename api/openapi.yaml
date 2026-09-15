@@ -66,6 +66,15 @@ paths:
     post:
       tags: [auth]
       operationId: requestUserSmsCode
+      description: |-
+        Issues a code for one phone.
+
+        Codes are stored per phone and are not isolated by `purpose`: the request
+        accepts LOGIN / REGISTER / RESET_PASSWORD and returns success, but the
+        code it issues can be used for any of them. The parameter is kept in the
+        contract so clients can send it today; purpose isolation is a separate
+        behaviour change that has not been implemented, and no client should rely
+        on a code being refused outside the purpose it was requested for.
       security: []
       requestBody:
         required: true
@@ -127,6 +136,9 @@ paths:
         ALREADY_EXISTS - registration never takes an existing account over - and
         that check happens after the code check, so a caller cannot use this
         endpoint to find out which phones are registered without a code for them.
+
+        The code itself is the phone's code, not a registration-specific one: see
+        /auth/user/sms/code for what `purpose` does and does not do today.
       security: []
       requestBody:
         required: true
@@ -808,7 +820,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/StationResponseEnvelope'
+                $ref: '#/components/schemas/StationCreateResponseEnvelope'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2025,6 +2037,47 @@ components:
               type: array
               items: {$ref: '#/components/schemas/Station'}
             meta: {$ref: '#/components/schemas/PageMeta'}
+    StationCreateResponse:
+      type: object
+      description: |-
+        The station a write returns (create, or a status change). The seven
+        required properties are what the write itself produces. The aggregates the
+        Station read schema also carries are declared here as optional: a create
+        answers with zeros for them, which is true for a station that has no
+        chargers yet, but a write is not required to compute numbers it cannot
+        change - the read endpoints are where they are computed.
+      required: [id, code, name, address, status, latitudeE6, longitudeE6]
+      properties:
+        id: {type: integer, format: int64}
+        code: {type: string}
+        name: {type: string}
+        address: {type: string}
+        status:
+          type: string
+          enum: [OPEN, CLOSED, DISABLED]
+        latitudeE6: {type: integer, format: int64}
+        longitudeE6: {type: integer, format: int64}
+        chargerCount:
+          type: integer
+          format: int64
+          description: Optional on a write; computed by the station read endpoints.
+        idleChargerCount:
+          type: integer
+          format: int64
+          description: Optional on a write; computed by the station read endpoints.
+        minPriceCentPerKwh:
+          type: integer
+          format: int64
+          description: Optional on a write; computed by the station read endpoints.
+    StationCreateResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/StationCreateResponse'}
+
     StationResponseEnvelope:
       type: object
       required: [success, code, message, data]
@@ -2118,19 +2171,6 @@ components:
             FAULT->IDLE/DISABLED are accepted; OCCUPIED and RESTARTING are
             refused with 409 because a charger in use must be force-released
             first and a restart in flight is decided by its receipt.
-    StationStatusRecord:
-      type: object
-      required: [id, code, name, address, status, latitudeE6, longitudeE6]
-      properties:
-        id: {type: integer, format: int64}
-        code: {type: string}
-        name: {type: string}
-        address: {type: string}
-        latitudeE6: {type: integer, format: int64}
-        longitudeE6: {type: integer, format: int64}
-        status:
-          type: string
-          enum: [OPEN, CLOSED, DISABLED]
     ChargerStatusRecord:
       type: object
       required: [chargerId, chargerCode, status]
@@ -2147,7 +2187,7 @@ components:
         success: {type: boolean, enum: [true]}
         code: {type: integer, enum: [0]}
         message: {type: string}
-        data: {$ref: '#/components/schemas/StationStatusRecord'}
+        data: {$ref: '#/components/schemas/StationCreateResponse'}
     ChargerStatusResponseEnvelope:
       type: object
       required: [success, code, message, data]

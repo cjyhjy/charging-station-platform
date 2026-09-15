@@ -395,9 +395,47 @@ B 线随后登记并实现：① 注册；② 用户订单列表（**已完成**
 
 ### 9.4 实施中顺带发现的既有缺陷
 
-**D-5 `StationRecord` 没有 JSON tag**：`POST /admin/stations` 的响应一直返回 Go 风格键（`ID`/`Code`/`Status`），而该操作登记的是 `Station` schema（camelCase）。新状态接口的测试第一次就撞上了它。已补 tag（`id/code/name/address/latitudeE6/longitudeE6/status`），并加 `TestCreateStationResponseUsesContractKeys` 防回归。**遗留**：`Station` schema 还包含 `chargerCount/idleChargerCount/minPriceCentPerKwh`，而创建响应不含这三个聚合字段（读路径才有），属 A-06 契约待收口项。
+**D-5 `StationRecord` 没有 JSON tag（已修，并附一次勘误）**：状态变更端点此前返回 Go 风格键（`ID`/`Code`/`Status`），而登记的是 camelCase 的 `Station` schema；新测试第一次就撞上了它。已补 tag（`id/code/name/address/latitudeE6/longitudeE6/status`）并加 `TestCreateStationResponseUsesContractKeys` 防回归。
+
+**勘误**：上一轮报告里"`POST /admin/stations` 的响应不含 `chargerCount/idleChargerCount/minPriceCentPerKwh` 三个聚合字段"是**错的**。核对 `internal/admin/http.go` 的 `createStation` 后确认：创建响应是显式构造的 map，**包含全部 10 个 `Station` 字段**，三个聚合被写成 0——对新站而言这是**真实值**（0 个桩、0 个空闲、无价格），不是占位符。真正有 Go 风格键问题的只有状态变更端点。据此按二审口径实现见第 10.2 节。
 
 ### 9.5 第二批质量门禁
 
 `gofmt` 干净、`go build ./...`、`go vet ./...`、`go test -count=1 -race ./...`（见提交信息中的包数），OpenAPI YAML 可解析且操作数 49。
+
+## 10. 第二批收口（二审要求的两项 + 验证码口径）
+
+### 10.1 收口项一：前端 `commandNo` → `commandId`（A 线文件，本线只产出补丁）
+
+改动落在 fork 分支 `feat/postgres-agent-web-migration`（`apps/*` 属 A 线，B 线不改这些文件），补丁见 `pr42-command-id-rename.patch`。
+
+**必须改 4 个文件，不是二审点名的 2 个**（只改那 2 个会留下两处坏点）：
+
+| 文件 | 处数 | 不改的后果 |
+| ---- | ---- | ---------- |
+| `apps/admin/src/api/charger.js` | 2 | 轮询参数名与后端 `{commandId}` 不匹配 |
+| `apps/admin/src/stores/chargers.js` | 7 | 重启响应读不到标识 → 轮询不启动 |
+| `apps/admin/src/views/ChargersView.vue` | 1 | 页面显示"命令编号 "（空值） |
+| `apps/admin/tests/chargers.test.js` | 8 | 前端测试直接失败 |
+
+替换后静态核对：`grep -rn "commandNo" apps agent` = **0**；两个被改的 ESM 文件 `node --check` 通过；补丁 17 行改动（4 文件）。
+
+**未完成的一步（如实说明）**：本机为验证改名后前端仍可用，在 fork 的临时克隆里执行了 `npm ci`（admin 有 lockfile，registry 可达），但安装未在本次窗口内完成（node v18 低于包要求的 20+，仅 EBADENGINE 警告），因此**前端 `vitest` 尚未跑过**。补丁是纯标识符重命名（无逻辑改动），静态检查已通过；建议 A 线应用后跑一次 `npm test`。
+
+### 10.2 收口项二：`POST /admin/stations` 响应契约
+
+按二审建议采用**独立 schema**，但依据勘误后的实施事实做了精确处理：
+
+- 新增 `StationCreateResponse`：**required 只含写操作真正产出的 7 个字段**（`id/code/name/address/status/latitudeE6/longitudeE6`）；三个聚合字段**声明为可选属性**并注明"写操作可不计算，读端点才计算"。
+- 创建接口的 201 响应改登记该 schema（信封 `StationCreateResponseEnvelope`）；状态变更端点复用同一 schema，删除了重复的 `StationStatusRecord` 定义。
+- **响应体未改**：创建仍返回 10 个字段（三个聚合为 0，对新站是真实值），只是 schema 不再**要求**它们——这样将来创建接口不再计算聚合也依然合规，符合二审"避免创建接口额外查询"的意图，也不会让前端表格里少字段。
+- 新增 `backend/internal/admin/schema_contract_test.go`：把响应键与 schema 双向对拍（响应的键必须恰好等于契约命名的键；schema 的 `required` 列表必须与该列表一致），覆盖创建、站点状态、充电桩状态、命令查询四处。**不引入任何新依赖**（用标准库定点抽取 schema 的 `required` 列表；若该列表被改格式，测试会明确报错而不是静默通过）——这正是能抓出 D-5 那一类问题的检查。
+- 反向验证：把 `chargerCount` 写回 `required` → `StationCreateResponse requires [address chargerCount code id ...], want [address code id ...]`。
+
+### 10.3 验证码 `purpose` 口径（本轮裁定：继续复用手机号验证码）
+
+在 OpenAPI 里明确写出，避免前端误以为已实现用途隔离：
+
+- `/auth/user/sms/code` 新增 description：验证码按手机号存储，**不按 `purpose` 隔离**；请求接受 `LOGIN/REGISTER/RESET_PASSWORD` 并返回成功，但发出的码对三者通用；参数保留在契约中以便客户端今天就传，**用途隔离是未实现的行为变更**，客户端不得依赖"非本用途的码会被拒"。
+- `/auth/user/register` 的描述里指向该说明（注册用的是手机号的码，不是注册专用码）。
 
