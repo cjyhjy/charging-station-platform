@@ -531,3 +531,49 @@ B 线审批命令：
 - 事件重复消费测试通过；
 - 集成分支没有未解决冲突；
 - 我明确将 H5 状态改为 READY。
+
+
+## 11. 本轮边界裁决（集成人员确认）
+
+### 11.1 B 线基础设施文件所有权
+
+以下文件归 B 线：
+
+- backend/cmd/api/；
+- backend/internal/observability/；
+- backend/cmd/worker/；
+- backend/cmd/outbox-publisher/；
+- backend/cmd/mock-gateway/；
+- backend/internal/repository/；
+- backend/internal/event/；
+- backend/internal/worker/；
+- backend/migrations/；
+- nginx/。
+
+B 线可以在 backend/cmd/api/ 中接入 metrics、healthz、readyz、配置校验和进程启动方式。A 线只负责业务 Handler、Service 和领域接口，不直接修改 API 进程的基础设施接线。涉及业务路由挂载的变更必须补充契约测试并由集成人员审核。
+
+### 11.2 B-06 验收口径
+
+B-06 不等待 H5 业务代码完成。验收内容为：
+
+- 可用的 Nginx 站点和 API 代理模板；
+- TLS 证书、密钥注入和生产配置说明；
+- 使用现有静态目录验证 H5 静态资源通路；
+- Go API、Worker、Publisher 的启动配置；
+- healthz、readyz、metrics 和日志通路；
+- 设备回执路径的网络限制说明；
+- 本地联调、备份恢复和故障演练脚本。
+
+H5 业务页面接入属于后续客户端工作，不作为 B-06 的前置条件。
+
+### 11.3 B-06 基线
+
+B-06 必须从 backend P0 PR 合入 develop 后的最新 develop 顶端开出：
+
+    codex/backend/b-06-deployment-observability
+
+在 PR #39 尚未合入 develop 前，不从旧 migration 分支或未合入的 P0 分支创建正式 B-06 实现分支。codex/backend-p0-pr 只作为当前审查基线。
+
+### 11.4 confirm 接口
+
+POST /api/v1/orders/{orderNo}/confirm 当前维持删除状态。该接口属于 A-04 钱包/账务/支付范围，只有在后端实现、测试和审批完成后，才允许重新登记到 OpenAPI。
