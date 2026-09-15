@@ -26,7 +26,7 @@ BE-B-04、BE-B-05 的行仍需按最终审批结论逐项追溯补齐；旧行�
 | A-02 | 站点和充电桩 | APPROVED（历史 P0） | Go P0 查询接口已交付 |
 | A-03 | 订单和充电流程 | APPROVED（历史 P0） | Go P0 订单与 START/STOP 闭环已交付 |
 | A-04 | 钱包、账务和支付 | APPROVED | APPROVED | `c54c303`；四端点契约、退款语义与 WalletStore 已审查通过，B-07 持久化收口已合入集成线 |
-| A-05 | 评价、申诉和售后 | NOT_STARTED | 依赖 A-03、A-06 |
+| A-05 | 评价、申诉和售后 | APPROVED | `443e204`；终审问题闭环后合入 develop（`f87ca05`）：六端点契约已登记 OpenAPI，评价 createdAt 读库、申诉同内容幂等、重复审核无操作、钱包退款按 B-07 upsert 锁；全新库 runner 应用 0001..0009（0008 仅一次），全量 `-race` 通过 |
 | A-06 | 管理端扩展业务 | NOT_STARTED | 依赖 A-01 至 A-04 |
 | A-07 | 导航、统计、ML、WebSocket | NOT_STARTED | 扩展阶段 |
 | B-01 | Go API 和公共配置 | APPROVED（历史 P0） | 基础能力已交付 |
