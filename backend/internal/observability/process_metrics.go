@@ -39,6 +39,7 @@ func RegisterProcessMetrics(registry *Registry, cfg ProcessMetricsConfig) {
 	registry.SetGauge(MetricDeadLetterLength, nil, 0)
 	registry.SetGauge(MetricMigrationsVersion, nil, 0)
 	registry.SetGauge(MetricOutboxUnpublished, nil, 0)
+	registry.SetGauge(MetricOutboxOldestUnpublished, nil, 0)
 
 	if cfg.Worker {
 		registry.SetGauge(MetricWorkerLastSuccess, nil, 0)

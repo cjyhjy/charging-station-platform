@@ -219,13 +219,14 @@ func main() {
 	go func() {
 		defer close(probeDone)
 		observability.ProbeDependencies(probeCtx, observability.ProbeConfig{
-			PostgresUp:    func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
-			RedisUp:       func(ctx context.Context) bool { return capabilities.Ready(ctx) == nil },
-			SchemaVersion: func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
-			OutboxBacklog: func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
-			Registry:      registry,
-			Logger:        logger,
-			Interval:      dependencyProbeInterval,
+			PostgresUp:      func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
+			RedisUp:         func(ctx context.Context) bool { return capabilities.Ready(ctx) == nil },
+			SchemaVersion:   func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
+			OutboxBacklog:   func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
+			OutboxOldestAge: func(ctx context.Context) (float64, error) { return postgres.OldestUnpublishedOutboxAge(ctx, db) },
+			Registry:        registry,
+			Logger:          logger,
+			Interval:        dependencyProbeInterval,
 		})
 	}()
 	defer func() {

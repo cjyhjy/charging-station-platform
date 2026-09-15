@@ -58,12 +58,30 @@ PARSE
 mkdir -p "${wal_dir}"
 echo "archiving WAL from ${PGHOST}:${PGPORT}/${PGDATABASE} to ${wal_dir}"
 
+# --create-slot creates the slot AND EXITS. Running it in the streaming invocation therefore produces a
+# process that creates a slot, exits immediately, and (under systemd) restarts forever without ever
+# archiving a byte. The slot is created first, in its own invocation, and streaming then runs without
+# that flag.
+ensure_slot() {
+    local existing
+    existing="$(psql -tAc "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'ncs_wal_archive'" 2>/dev/null || true)"
+    if [[ "${existing}" == "1" ]]; then
+        return 0
+    fi
+    echo "creating replication slot ncs_wal_archive"
+    pg_receivewal --directory="${wal_dir}" --slot=ncs_wal_archive --create-slot --if-not-exists --verbose
+}
+
 if [[ "${once}" == "true" ]]; then
     # A bounded smoke check that actually asserts: connect, create the slot if it is missing, and
     # verify the slot exists afterwards. Swallowing the exit code here would report success for a
     # stream that never connected, which is the one thing this check exists to catch.
+    # A replication slot that nobody serves pins WAL on the server until the disk fills, so a check
+    # must not leave one behind: the slot is created to prove the connection works, and dropped again
+    # unless it was already there. The service recreates it on start.
+    slot_existed_before="$(psql -tAc "SELECT 1 FROM pg_replication_slots WHERE slot_name = 'ncs_wal_archive'" 2>/dev/null || true)"
     set +e
-    output="$(timeout 15 pg_receivewal --directory="${wal_dir}" --slot=ncs_wal_archive --create-slot --if-not-exists --verbose --no-loop 2>&1)"
+    output="$(ensure_slot 2>&1)"
     status=$?
     set -e
     echo "${output}" | tail -3
@@ -75,8 +93,17 @@ if [[ "${once}" == "true" ]]; then
     # is not. The slot is the proof that the server accepted this client.
     slot="$(psql -tAc "SELECT slot_name FROM pg_replication_slots WHERE slot_name = 'ncs_wal_archive'" 2>/dev/null || true)"
     [[ "${slot}" == "ncs_wal_archive" ]] || { echo "FAIL: the replication slot was not created (exit ${status})" >&2; exit 1; }
-    echo "smoke check complete: connected as ${PGUSER}@${PGHOST}:${PGPORT}/${PGDATABASE}, slot ${slot} present, archive dir ${wal_dir}"
+
+    if [[ "${slot_existed_before}" != "1" ]]; then
+        psql -q -c "SELECT pg_drop_replication_slot('ncs_wal_archive')" >/dev/null \
+            || { echo "FAIL: the check created a replication slot and could not drop it; an inactive slot pins WAL" >&2; exit 1; }
+        echo "smoke check complete: connected as ${PGUSER}@${PGHOST}:${PGPORT}/${PGDATABASE}, slot created and dropped again (the service recreates it), archive dir ${wal_dir}"
+    else
+        echo "smoke check complete: connected as ${PGUSER}@${PGHOST}:${PGPORT}/${PGDATABASE}, existing slot ${slot} left in place, archive dir ${wal_dir}"
+    fi
     exit 0
 fi
 
-exec pg_receivewal --directory="${wal_dir}" --slot=ncs_wal_archive --create-slot --if-not-exists --verbose
+ensure_slot
+# Streaming mode: no --create-slot here, or this process would create the slot and exit.
+exec pg_receivewal --directory="${wal_dir}" --slot=ncs_wal_archive --verbose

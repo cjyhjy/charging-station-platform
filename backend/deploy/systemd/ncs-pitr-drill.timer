@@ -1,0 +1,12 @@
+[Unit]
+Description=NCS PITR drill timer (monthly, per the approved drill policy)
+
+[Timer]
+# First Sunday of every month at 07:00, after the weekly dump restore drill.
+OnCalendar=Sun *-*-1..7 07:00:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=ncs-pitr-drill.service
+
+[Install]
+WantedBy=timers.target

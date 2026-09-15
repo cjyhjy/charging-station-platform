@@ -84,6 +84,13 @@ const (
 	// MetricDependencyUp is 1 while a dependency answers, 0 while it does not. It is what the
 	// readiness probe and the alert "the API is up but its database is not" are built on.
 	MetricDependencyUp = "ncs_dependency_up"
+	// MetricOutboxOldestUnpublished is the age in seconds of the oldest unpublished outbox row, or 0
+	// when the outbox is empty.
+	//
+	// The backlog count alone cannot distinguish "one row waiting for the next pass" from "the oldest
+	// row has been stuck for twenty minutes": an alert on the age is what catches a publisher that is
+	// running but not making progress, and it is the approved threshold table's second dimension.
+	MetricOutboxOldestUnpublished = "ncs_pg_outbox_oldest_unpublished_seconds"
 	// MetricMigrationsVersion is the highest applied migration version. A worker that cannot
 	// reach the expected version refuses to start, so an operator needs to see the number the
 	// database actually holds.

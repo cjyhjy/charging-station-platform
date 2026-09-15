@@ -22,7 +22,7 @@
 # WAL archiving, which this deployment does not enable).
 set -euo pipefail
 
-: "${NCS_TEST_PG_DSN:?set NCS_TEST_PG_DSN to a disposable PostgreSQL}"
+: "${NCS_TEST_PG_DSN:?NCS_TEST_PG_DSN is required: the restore drill creates and drops databases, and it refuses to run against an unset variable rather than falling back to a real database}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 backend_dir="$(cd "${script_dir}/.." && pwd)"
 
@@ -33,16 +33,58 @@ work_dir="$(mktemp -d)"
 backup_dir="${work_dir}/backups"
 quiet="${NCS_DRILL_QUIET:-false}"
 
+# The drill is destructive: it creates, restores into and drops databases. The ruling therefore
+# requires a dedicated throwaway instance, and this guard is what enforces it - a shared development
+# database would be mutated by every run, and a production one would be destroyed.
+drill_database_name="$(python3 - "$NCS_TEST_PG_DSN" <<'READDB'
+import sys, urllib.parse
+print(urllib.parse.urlparse(sys.argv[1]).path.lstrip('/') or '')
+READDB
+)"
+case "${drill_database_name}" in
+    ncs_drill_*|*drill*|*test*|*scratch*|*sandbox*|ncs_a03) ;;
+    *)
+        echo "refusing to run: NCS_TEST_PG_DSN points at \"${drill_database_name}\", which is not a throwaway instance." >&2
+        echo "the drill creates and drops databases named ncs_drill_*; use a dedicated instance (see backend/deploy/README.md)" >&2
+        exit 2
+        ;;
+esac
+case "${drill_database_name}" in
+    *prod*|*production*)
+        echo "refusing to run: NCS_TEST_PG_DSN points at a production database name" >&2
+        exit 2
+        ;;
+esac
+
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { printf '\n=== %s ===\n' "$*"; }
 run_quiet() { if [[ "${quiet}" == "true" ]]; then "$@" >/dev/null; else "$@"; fi; }
 
+reported="false"
+report_failure() {
+    local status=$?
+    if [[ ${status} -ne 0 && "${reported}" != "true" ]]; then
+        reported="true"
+        echo
+        echo "=== drill failed ==="
+        echo "exit status:  ${status}"
+        echo "instance:     ${drill_database_name:-unknown}"
+        echo "reason:       see the last step above; the report records it rather than hiding it"
+    fi
+}
+
 cleanup() {
     local status=$?
+    report_failure
     for name in "${source_db:-}" "${restore_db:-}"; do
         [[ -n "${name}" ]] || continue
         psql "${maintenance_dsn}" -q -c "DROP DATABASE IF EXISTS \"${name}\"" >/dev/null 2>&1 || true
     done
+    # The ruling requires the drill to clean up after itself: no temporary database may survive it.
+    remaining="$(psql "${maintenance_dsn}" -tAc "SELECT count(*) FROM pg_database WHERE datname LIKE 'ncs_drill_%'" 2>/dev/null || echo 0)"
+    if [[ "${remaining}" != "0" ]]; then
+        echo "warning: ${remaining} ncs_drill_* database(s) survived the drill" >&2
+    fi
     rm -rf "${work_dir}"
     exit "${status}"
 }
@@ -69,6 +111,14 @@ restore_dsn="$(dsn_for "${restore_db}")"
 
 step "build the migration gate"
 (cd "${backend_dir}" && go build -o "${work_dir}/ncs-api" ./cmd/api)
+
+step "check the instance can create and drop databases"
+# The drill's whole flow depends on these privileges; checking once here turns a confusing mid-run
+# failure into a clear statement about the instance.
+psql "${maintenance_dsn}" -q -v ON_ERROR_STOP=1 -c "CREATE DATABASE ncs_drill_capability_check" >/dev/null \
+    || fail "the instance does not allow creating a database with this account; the drill needs a dedicated instance whose role may create and drop ncs_drill_* databases"
+psql "${maintenance_dsn}" -q -c "DROP DATABASE ncs_drill_capability_check" >/dev/null
+echo "instance allows create/drop: ok"
 
 step "create ${source_db} and migrate it through the real runner"
 psql "${maintenance_dsn}" -q -c "CREATE DATABASE \"${source_db}\""

@@ -307,13 +307,14 @@ func streamNames() []string {
 // gone is holding messages it cannot apply, which is exactly the state the gauges describe.
 func probeDependencies(ctx context.Context, db *sql.DB, redisPing func(context.Context) error, registry *observability.Registry, logger *slog.Logger) {
 	observability.ProbeDependencies(ctx, observability.ProbeConfig{
-		PostgresUp:    func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
-		RedisUp:       func(ctx context.Context) bool { return redisPing(ctx) == nil },
-		SchemaVersion: func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
-		OutboxBacklog: func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
-		Registry:      registry,
-		Logger:        logger,
-		Interval:      dependencyProbeInterval,
+		PostgresUp:      func(ctx context.Context) bool { return db.PingContext(ctx) == nil },
+		RedisUp:         func(ctx context.Context) bool { return redisPing(ctx) == nil },
+		SchemaVersion:   func(ctx context.Context) (int, error) { return postgres.SchemaVersion(ctx, db) },
+		OutboxBacklog:   func(ctx context.Context) (int64, error) { return postgres.OutboxBacklog(ctx, db) },
+		OutboxOldestAge: func(ctx context.Context) (float64, error) { return postgres.OldestUnpublishedOutboxAge(ctx, db) },
+		Registry:        registry,
+		Logger:          logger,
+		Interval:        dependencyProbeInterval,
 	})
 }
 

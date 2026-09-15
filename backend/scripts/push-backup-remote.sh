@@ -23,8 +23,17 @@
 #       backend/scripts/push-backup-remote.sh [--dump FILE] [--all] [--dry-run]
 #
 # /etc/ncs/backup-remote.env (0600 root:ncs, not in the repository):
-#   NCS_BACKUP_REMOTE=myremote:ncs-backups/prod
+#   NCS_BACKUP_REMOTE=ncs-backup-prod:ncs-prod-backup          # remote name and bucket are frozen
 #   NCS_BACKUP_ENCRYPTION_KEY_FILE=/etc/ncs/backup.key
+#   NCS_RCLONE_CONFIG=/etc/ncs/rclone/rclone.conf              # optional; rclone's own default otherwise
+#
+# The bucket carries three protections that this script cannot turn on and the deployment must:
+#   object versioning      so a wrong delete or overwrite is recoverable
+#   server-side encryption so the stored object is encrypted at rest as well as in transit
+#   a lifecycle rule       that expires the daily/ prefix at 30 days and the weekly/ prefix at 12 weeks
+#
+# Retention here mirrors the approved baseline: local dumps 7 days, remote daily 30 days, remote weekly
+# 12 weeks. The prefixes make those three policies expressible as one lifecycle rule each.
 set -euo pipefail
 
 config="${NCS_BACKUP_REMOTE_CONFIG:-/etc/ncs/backup-remote.env}"
@@ -47,8 +56,18 @@ step() { printf '\n=== %s ===\n' "$*"; }
 create it with 0600 root:ncs and the two variables documented in this script's header"
 # shellcheck disable=SC1090
 source "${config}"
-: "${NCS_BACKUP_REMOTE:?set NCS_BACKUP_REMOTE in ${config}}"
+: "${NCS_BACKUP_REMOTE:?set NCS_BACKUP_REMOTE in ${config} (the approved value is ncs-backup-prod:ncs-prod-backup)}"
 : "${NCS_BACKUP_ENCRYPTION_KEY_FILE:?set NCS_BACKUP_ENCRYPTION_KEY_FILE in ${config}}"
+rclone_config="${NCS_RCLONE_CONFIG:-/etc/ncs/rclone/rclone.conf}"
+rclone_args=()
+# The remote configuration and its access keys live outside the repository by rule; when the file is
+# absent rclone falls back to its own default location, which the deployment is expected to provision.
+if [[ -r "${rclone_config}" ]]; then
+    rclone_args+=(--config "${rclone_config}")
+fi
+# Server-side encryption is requested per upload as well, so the object is encrypted at rest even if the
+# bucket default were changed by mistake.
+rclone_args+=(--s3-server-side-encryption AES256)
 [[ -r "${NCS_BACKUP_ENCRYPTION_KEY_FILE}" ]] || fail "encryption key file not readable: ${NCS_BACKUP_ENCRYPTION_KEY_FILE}"
 
 command -v rclone >/dev/null 2>&1 || fail "rclone is required for the off-site copy; install it on the backup host"
@@ -76,21 +95,33 @@ for source_dump in "${dumps[@]}"; do
         -in "${source_dump}" -out "${encrypted}"
     cat "${source_dump}.manifest" > "${encrypted}.manifest" 2>/dev/null || true
 
-    target="${NCS_BACKUP_REMOTE}/$(date -u +%Y/%m/%d)/"
+    # daily/ and weekly/ are separate prefixes because they have different retention (30 days versus
+    # 12 weeks); a single prefix could only carry one lifecycle rule.
+    if [[ "${source_dump}" == *"/weekly/"* ]]; then
+        prefix="weekly"
+    else
+        prefix="daily"
+    fi
+    target="${NCS_BACKUP_REMOTE}/${prefix}/$(date -u +%Y/%m/%d)/"
     step "upload to ${target}"
-    args=(copy "${work_dir}" "${target}" --include "*.dump.enc*" --s3-no-check-bucket)
+    args=("${rclone_args[@]}" copy "${work_dir}" "${target}" --include "*.dump.enc*" --s3-no-check-bucket)
     [[ "${dry_run}" == "true" ]] && args+=(--dry-run)
     rclone "${args[@]}"
     pushed="$((pushed + 1))"
 done
 
-step "retention at the destination (30 days)"
-# A lifecycle rule on the bucket is the primary mechanism; this pass is the belt to that pair of
-# braces and is intentionally conservative (it only deletes encrypted objects older than 30 days).
-args=(delete "${NCS_BACKUP_REMOTE}" --min-age 30d --include "*.dump.enc*" --s3-no-check-bucket)
-[[ "${dry_run}" == "true" ]] && args+=(--dry-run)
-rclone "${args[@]}"
+step "retention at the destination (daily 30 days, weekly 12 weeks)"
+# A lifecycle rule on the bucket is the primary mechanism and is what the deployment must configure;
+# this pass is the belt to that pair of braces and only deletes encrypted objects past their window.
+for retention in "daily:30d" "weekly:12w"; do
+    prefix="${retention%%:*}"
+    age="${retention##*:}"
+    args=("${rclone_args[@]}" delete "${NCS_BACKUP_REMOTE}/${prefix}" --min-age "${age}" --include "*.dump.enc*" --s3-no-check-bucket)
+    [[ "${dry_run}" == "true" ]] && args+=(--dry-run)
+    rclone "${args[@]}"
+done
 
 echo
-echo "pushed ${pushed} encrypted backup(s) to ${NCS_BACKUP_REMOTE}"
+echo "pushed ${pushed} encrypted backup(s) to ${NCS_BACKUP_REMOTE} (daily prefix kept 30 days, weekly prefix kept 12 weeks)"
+echo "remote configuration: ${rclone_config} (keys stay outside the repository)"
 echo "REMOTE_PUSHED=${pushed}"

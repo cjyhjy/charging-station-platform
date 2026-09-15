@@ -91,6 +91,29 @@ func OutboxBacklog(ctx context.Context, db *sql.DB) (int64, error) {
 	return backlog, nil
 }
 
+// OldestUnpublishedOutboxAge reports how long the oldest unpublished outbox row has been waiting, in
+// seconds, or 0 when there is nothing waiting.
+//
+// COALESCE keeps an empty outbox at 0 rather than NULL: a gauge that disappears when the backlog is
+// empty makes an alert rule flicker, and 0 is the honest answer to "how long has the oldest row
+// waited" when there is no row. The age is measured from next_attempt_at, which is the moment the
+// publisher became allowed to send it - a row deliberately held back by a backoff is not late.
+func OldestUnpublishedOutboxAge(ctx context.Context, db *sql.DB) (float64, error) {
+	if db == nil {
+		return 0, fmt.Errorf("postgres: database is nil")
+	}
+	var age float64
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - min(next_attempt_at))), 0)
+FROM outbox_events WHERE published_at IS NULL`).Scan(&age); err != nil {
+		return 0, fmt.Errorf("read the oldest unpublished outbox age: %w", err)
+	}
+	if age < 0 {
+		// A row scheduled slightly in the future is not late.
+		age = 0
+	}
+	return age, nil
+}
+
 // isUndefinedTable reports whether an error is PostgreSQL's undefined_table (SQLSTATE 42P01),
 // which is what a query against schema_migrations returns before the first migration runs.
 //

@@ -1,0 +1,29 @@
+# Monthly PITR (point-in-time recovery) drill.
+#
+# The weekly unit rehearses a dump restore; this one rehearses recovery to a chosen instant from the
+# WAL archive, which is the capability the 15-minute RPO claim depends on. It runs against an isolated
+# temporary PostgreSQL instance that it creates and removes, never against the server it is backing up,
+# and it records the recovery target, the duration and the failure reason.
+#
+# The source is named by NCS_PITR_SOURCE_DSN or NCS_TEST_PG_DSN; the drill refuses to run without one
+# and refuses a production database name. The role needs REPLICATION and CREATEDB.
+[Unit]
+Description=NCS PITR drill (measured recovery to a point in time)
+After=network-online.target postgresql.service ncs-backup-wal.service
+
+[Service]
+Type=oneshot
+User=ncs
+Group=ncs
+# NCS_PITR_SOURCE_DSN must name a disposable instance: this drill creates a replication slot and a
+# temporary cluster, and it will not fall back to a default.
+EnvironmentFile=/etc/ncs/backend.env
+ExecStart=/opt/ncs/backend/scripts/pitr-drill.sh
+TimeoutStartSec=3600
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp /var/backups/ncs

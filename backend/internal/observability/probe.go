@@ -28,6 +28,9 @@ type ProbeConfig struct {
 	SchemaVersion func(context.Context) (int, error)
 	// OutboxBacklog counts unpublished outbox rows. Optional, same reason.
 	OutboxBacklog func(context.Context) (int64, error)
+	// OutboxOldestAge reports how long the oldest unpublished row has waited, in seconds. Optional;
+	// the approved alert table alerts on it, so a deployment that wants those rules needs it wired.
+	OutboxOldestAge func(context.Context) (float64, error)
 	// Registry receives the gauges and counters. Required.
 	Registry *Registry
 	// Logger receives one line per failed dependency. Required.
@@ -66,6 +69,13 @@ func ProbeDependencies(ctx context.Context, cfg ProbeConfig) {
 					cfg.Logger.Error("outbox backlog probe failed", "error", err)
 				} else {
 					cfg.Registry.SetGauge(MetricOutboxUnpublished, nil, float64(backlog))
+				}
+			}
+			if cfg.OutboxOldestAge != nil {
+				if age, err := cfg.OutboxOldestAge(ctx); err != nil {
+					cfg.Logger.Error("oldest outbox age probe failed", "error", err)
+				} else {
+					cfg.Registry.SetGauge(MetricOutboxOldestUnpublished, nil, age)
 				}
 			}
 		} else {
