@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/heguangV/charging-station-platform/backend/internal/wallet"
@@ -48,7 +49,9 @@ ON CONFLICT (scope, idempotency_key) DO NOTHING`,
 	err = tx.QueryRowContext(ctx, `SELECT request_hash, status, response_body, expires_at
 FROM idempotency_records WHERE scope = $1 AND idempotency_key = $2 FOR UPDATE`, scope, key).Scan(&storedHash, &status, &body, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, false, wallet.ErrOrderNotRefundable
+		// The row vanished between the conflict and the select: another transaction is still writing it,
+		// so this request must come back rather than be told the order cannot be refunded.
+		return nil, false, wallet.ErrIdempotencyInProgress
 	}
 	if err != nil {
 		return nil, false, err
@@ -80,6 +83,29 @@ WHERE scope = $1 AND idempotency_key = $2`, scope, key); err != nil {
 	}
 }
 
+// replayAppliedCredit answers a retry whose credit is already in the ledger: the response is built from
+// the stored after-balance, the cache is finalized with it, and nothing is credited again.
+func (s *WalletStore) replayAppliedCredit(tx *sql.Tx, ctx context.Context, scope, key string, after int64) (wallet.WalletView, error) {
+	view := wallet.WalletView{BalanceCent: after}
+	body, err := json.Marshal(view)
+	if err != nil {
+		return wallet.WalletView{}, err
+	}
+	if err := s.finalizeWalletIdempotency(tx, ctx, scope, key, body); err != nil {
+		return wallet.WalletView{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return wallet.WalletView{}, err
+	}
+	return view, nil
+}
+
+// errOrderNotFound is the B-line half of the refund contract's 404: the adapter can tell a missing order
+// apart from an order with nothing to refund, and this error carries that distinction. Mapping it to a
+// 404 response is one case in internal/wallet's error writer, which is an A-line file - see the module
+// review for the two-line patch and the open decision.
+var errOrderNotFound = errors.New("postgres: refund order does not exist")
+
 func (s *WalletStore) finalizeWalletIdempotency(tx *sql.Tx, ctx context.Context, scope, key string, body []byte) error {
 	_, err := tx.ExecContext(ctx, `UPDATE idempotency_records
 SET status = 'SUCCEEDED', response_code = 0, response_body = $3, updated_at = CURRENT_TIMESTAMP
@@ -87,18 +113,106 @@ WHERE scope = $1 AND idempotency_key = $2`, scope, key, body)
 	return err
 }
 
-// ensureWalletRow creates the zero wallet when missing and returns the
-// balance under a row lock.
-func (s *WalletStore) ensureWalletRow(tx *sql.Tx, ctx context.Context, userID int64) (int64, error) {
+// walletBalanceForUpdate returns the balance with the wallet row locked, creating a zero wallet when
+// the user has none.
+//
+// The upsert is the fix for a lost update that this module shipped with. `SELECT ... FOR UPDATE` locks
+// nothing when the row does not exist, so the previous two-step version let two concurrent first
+// credits both read zero; because the credit then wrote an absolute balance, the second transaction
+// overwrote the first while the ledger recorded both. Taking the lock in the same statement that
+// creates the row removes the window entirely: whatever this call returns is a balance the caller may
+// build on.
+//
+// A user that does not exist fails the foreign key. That is reported as a missing wallet (404) rather
+// than as an internal error, because a wallet cannot exist without its account.
+func (s *WalletStore) walletBalanceForUpdate(tx *sql.Tx, ctx context.Context, userID int64) (int64, error) {
 	var balance int64
-	err := tx.QueryRowContext(ctx, `SELECT balance_cents FROM wallet_accounts WHERE user_id = $1 FOR UPDATE`, userID).Scan(&balance)
-	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_accounts (user_id, balance_cents) VALUES ($1, 0) ON CONFLICT DO NOTHING`, userID); err != nil {
-			return 0, err
+	err := tx.QueryRowContext(ctx, `INSERT INTO wallet_accounts (user_id, balance_cents)
+VALUES ($1, 0)
+ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+RETURNING balance_cents`, userID).Scan(&balance)
+	if err != nil {
+		if isForeignKeyViolation(err) {
+			return 0, wallet.ErrWalletNotFound
 		}
-		return 0, nil
+		return 0, err
 	}
-	return balance, err
+	return balance, nil
+}
+
+// creditWalletLocked adds amount to a wallet the caller has already locked and returns the balance the
+// database computed.
+//
+// The arithmetic happens in the statement, not in Go: `balance_cents = balance_cents + $2` cannot lose
+// a concurrent credit even if the caller's earlier read were stale, and RETURNING is the authoritative
+// after-value for the ledger row. The non-negative CHECK on the column stays the last line of defence.
+func (s *WalletStore) creditWalletLocked(tx *sql.Tx, ctx context.Context, userID, amount int64) (int64, error) {
+	var after int64
+	if err := tx.QueryRowContext(ctx, `UPDATE wallet_accounts
+SET balance_cents = balance_cents + $2, version = version + 1, updated_at = CURRENT_TIMESTAMP
+WHERE user_id = $1
+RETURNING balance_cents`, userID, amount).Scan(&after); err != nil {
+		return 0, err
+	}
+	return after, nil
+}
+
+// walletBalance reads the balance without locking, creating the zero wallet when the user has none.
+//
+// A read must not take a write lock and must not rewrite the row on every call, so this path inserts
+// only when the wallet is missing and re-reads afterwards: a concurrent creator's row is then observed
+// instead of being reported as zero.
+func (s *WalletStore) walletBalance(tx *sql.Tx, ctx context.Context, userID int64) (int64, error) {
+	var balance int64
+	err := tx.QueryRowContext(ctx, `SELECT balance_cents FROM wallet_accounts WHERE user_id = $1`, userID).Scan(&balance)
+	if err == nil {
+		return balance, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_accounts (user_id, balance_cents) VALUES ($1, 0)
+ON CONFLICT (user_id) DO NOTHING`, userID); err != nil {
+		if isForeignKeyViolation(err) {
+			return 0, wallet.ErrWalletNotFound
+		}
+		return 0, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT balance_cents FROM wallet_accounts WHERE user_id = $1`, userID).Scan(&balance); err != nil {
+		return 0, err
+	}
+	return balance, nil
+}
+
+// ledgerResult returns the balance a previously applied ledger row produced for this idempotency key.
+//
+// The ledger is the durable record of a credit; idempotency_records is a 24-hour response cache. When
+// the cache has expired, a retry must still be answered with the result the first request produced and
+// must not credit again - reading the ledger is what makes that true, instead of letting the retry
+// reach the ledger's unique index and fail with a duplicate-key error for a request that succeeded.
+func (s *WalletStore) ledgerResult(tx *sql.Tx, ctx context.Context, ledgerKey string) (int64, bool, error) {
+	var after int64
+	err := tx.QueryRowContext(ctx, `SELECT balance_after_cents FROM wallet_transactions WHERE idempotency_key = $1`, ledgerKey).Scan(&after)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return after, true, nil
+}
+
+// isForeignKeyViolation reports whether an error is a missing referenced row (SQLSTATE 23503): for this
+// store it means the account behind the wallet does not exist.
+func isForeignKeyViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var state interface{ SQLState() string }
+	if errors.As(err, &state) {
+		return state.SQLState() == "23503"
+	}
+	return strings.Contains(err.Error(), "23503")
 }
 
 // Wallet returns the balance view, auto-creating a zero wallet when the
@@ -110,7 +224,7 @@ func (s *WalletStore) Wallet(ctx context.Context, userID int64) (wallet.WalletVi
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	balance, err := s.ensureWalletRow(tx, ctx, userID)
+	balance, err := s.walletBalance(tx, ctx, userID)
 	if err != nil {
 		return wallet.WalletView{}, err
 	}
@@ -142,21 +256,27 @@ func (s *WalletStore) TopUp(ctx context.Context, command wallet.TopUpCommand) (w
 		return view, nil
 	}
 
-	balance, err := s.ensureWalletRow(tx, ctx, command.UserID)
+	ledgerKey := fmt.Sprintf("topup:%d:%s", command.UserID, command.IdempotencyKey)
+	if after, applied, err := s.ledgerResult(tx, ctx, ledgerKey); err != nil {
+		return wallet.WalletView{}, err
+	} else if applied {
+		// This credit already happened; the response cache simply forgot it. Answering with the stored
+		// result keeps the endpoint idempotent past the cache's lifetime.
+		return s.replayAppliedCredit(tx, ctx, scope, command.IdempotencyKey, after)
+	}
+
+	balance, err := s.walletBalanceForUpdate(tx, ctx, command.UserID)
 	if err != nil {
 		return wallet.WalletView{}, err
 	}
-	after := balance + command.AmountCent
-	if _, err := tx.ExecContext(ctx, `UPDATE wallet_accounts
-SET balance_cents = $2, version = version + 1, updated_at = CURRENT_TIMESTAMP
-WHERE user_id = $1`, command.UserID, after); err != nil {
+	after, err := s.creditWalletLocked(tx, ctx, command.UserID, command.AmountCent)
+	if err != nil {
 		return wallet.WalletView{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_transactions
     (user_id, transaction_type, amount_cents, balance_before_cents, balance_after_cents, idempotency_key)
 VALUES ($1, 'TOP_UP', $2, $3, $4, $5)`,
-		command.UserID, command.AmountCent, balance, after,
-		fmt.Sprintf("topup:%d:%s", command.UserID, command.IdempotencyKey)); err != nil {
+		command.UserID, command.AmountCent, balance, after, ledgerKey); err != nil {
 		return wallet.WalletView{}, err
 	}
 
@@ -240,12 +360,27 @@ func (s *WalletStore) RefundOrder(ctx context.Context, command wallet.RefundComm
 		return view, nil
 	}
 
+	// The ledger key identifies the REFUND REQUEST, not the order: it carries the order number and the
+	// caller's idempotency key. A retry of the same request - before or after the response cache expires
+	// - returns the refund that already happened; a different key is a different request, which the
+	// order's own payment state rejects with "nothing to refund". Carrying only the order number would
+	// make a later, unrelated refund request look like a success, which is the wrong answer for an
+	// operator's books.
+	ledgerKey := fmt.Sprintf("refund:%s:%s", command.OrderNo, command.IdempotencyKey)
+	if after, applied, err := s.ledgerResult(tx, ctx, ledgerKey); err != nil {
+		return wallet.WalletView{}, err
+	} else if applied {
+		return s.replayAppliedCredit(tx, ctx, scope, command.IdempotencyKey, after)
+	}
+
 	var orderID, userID, paidCents int64
 	var orderStatus, paymentStatus string
 	err = tx.QueryRowContext(ctx, `SELECT id, user_id, paid_cents, status, payment_status FROM charging_orders
 WHERE order_no = $1 FOR UPDATE`, command.OrderNo).Scan(&orderID, &userID, &paidCents, &orderStatus, &paymentStatus)
 	if errors.Is(err, sql.ErrNoRows) {
-		return wallet.WalletView{}, wallet.ErrOrderNotRefundable
+		// The order does not exist. This is deliberately distinct from "nothing to refund": the caller
+		// cannot fix it by looking at the order state, which is why the contract asks for 404 here.
+		return wallet.WalletView{}, errOrderNotFound
 	}
 	if err != nil {
 		return wallet.WalletView{}, err
@@ -254,21 +389,18 @@ WHERE order_no = $1 FOR UPDATE`, command.OrderNo).Scan(&orderID, &userID, &paidC
 		return wallet.WalletView{}, wallet.ErrOrderNotRefundable
 	}
 
-	balance, err := s.ensureWalletRow(tx, ctx, userID)
+	balance, err := s.walletBalanceForUpdate(tx, ctx, userID)
 	if err != nil {
 		return wallet.WalletView{}, err
 	}
-	after := balance + paidCents
-	if _, err := tx.ExecContext(ctx, `UPDATE wallet_accounts
-SET balance_cents = $2, version = version + 1, updated_at = CURRENT_TIMESTAMP
-WHERE user_id = $1`, userID, after); err != nil {
+	after, err := s.creditWalletLocked(tx, ctx, userID, paidCents)
+	if err != nil {
 		return wallet.WalletView{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO wallet_transactions
     (user_id, order_id, transaction_type, amount_cents, balance_before_cents, balance_after_cents, idempotency_key)
 VALUES ($1, $2, 'REFUND', $3, $4, $5, $6)`,
-		userID, orderID, paidCents, balance, after,
-		fmt.Sprintf("refund:%s", command.OrderNo)); err != nil {
+		userID, orderID, paidCents, balance, after, ledgerKey); err != nil {
 		return wallet.WalletView{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE charging_orders
