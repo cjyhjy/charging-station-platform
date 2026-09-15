@@ -5,12 +5,12 @@
 | 项目   | 内容                                       |
 | ---- | ---------------------------------------- |
 | 项目名称 | 东软电动汽车充电桩应用管理平台 NCS                      |
-| 文档版本 | V1.1                                     |
+| 文档版本 | V1.2                                     |
 | 文档类型 | 软件需求规格说明书                                |
 | 目标平台 | Ubuntu 22.04+ 用户端/PC 管理端/Crow 服务端；Windows 10/11 保持源码构建能力；Android 使用 Qt Quick 用户端，支持短信登录、REST 业务和拍照头像 |
-| 技术栈  | Qt 6.2 / Qt Widgets / Crow / HTTPS REST + WebSocket / C++17 / CMake / SQLite 3 / Python 3.10+ / Vue 3 + ECharts；增强任务按需使用 Qt Multimedia / Qt WebSockets |
+| 技术栈  | Qt 6.2 / Qt Widgets / Crow / HTTPS REST + WebSocket / C++17 / CMake / PostgreSQL 18 / Python 3.10+ / Vue 3 + ECharts；增强任务按需使用 Qt Multimedia / Qt WebSockets |
 | 开发工具 | Qt Creator 6.2+ |
-| 数据库  | SQLite 3，单文件 `charge_platform.db`，仅由同机 Crow 服务端访问 |
+| 数据库  | PostgreSQL 18；仅 `ncs_server` 使用受限数据库账号访问，客户端不得直连 |
 
 ---
 
@@ -70,7 +70,7 @@ BR-<序号>               业务规则
 | AI 出行助手      | 服务端一级模块（供用户端调用） | C++17 + LLM Tool Calling + 腾讯地图 WebService | P0   |
 | PC 管理端       | 响应式 Web 管理控制台（宽屏优先，窄屏可用） | Vue 3 + Vite + ECharts | P0   |
 | 业务服务端       | 独立 HTTPS REST/WebSocket 服务 | Crow + C++17 | P0   |
-| 数据库端         | 单文件数据库           | SQLite 3               | P0   |
+| 数据库端         | 独立关系数据库服务        | PostgreSQL 18          | P0   |
 | 大数据可视化大屏     | Web 页面           | Vue 3 + ECharts        | P1   |
 | 机器学习智能分析     | 离线脚本 + 结果回写      | Python + scikit-learn  | P1   |
 
@@ -88,8 +88,8 @@ BR-<序号>               业务规则
 
 - Web 用户端在 PC 与手机浏览器上运行，单一页面集合同时适配两类终端：手机使用底部导航，PC 使用侧边栏；不得维护第二套移动端页面。
 - Web 车主端与 Web 管理端都在浏览器中运行，通过 `/api/v1` HTTPS REST 和鉴权 WebSocket 访问业务；服务端部署在 Ubuntu 环境。
-- `ncs_server` 作为唯一可信业务与数据边界，承载鉴权、事务、设备模拟、持续计费、排队调度、到期处理、实时通知与 AI 出行助手；只有该进程可打开 SQLite。
-- 开发、测试数据库使用不同 SQLite 文件。VM 在校园网环境固定使用 NAT；跨机器部署属于远期路线，不通过网络共享 SQLite 文件。
+- `ncs_server` 作为唯一可信业务与数据边界，承载鉴权、事务、设备模拟、持续计费、排队调度、到期处理、实时通知与 AI 出行助手；只有该进程可使用业务数据库账号访问 PostgreSQL。
+- 开发、测试使用不同 PostgreSQL 数据库和最小权限账号。VM 在校园网环境固定使用 NAT；数据库默认与服务端同机或位于受保护网络，不得向客户端或公网暴露端口。
 - 用户位置优先由浏览器标准 Geolocation API 取得（WGS84）；无定位权限或定位失败时，界面提供预设位置与地址输入作为等价入口，定位失败不得阻断查站与充电主流程。
 - 无真实充电桩硬件，充电过程由定时器按功率模拟累积电量。
 - 腾讯地图分工明确：前端使用腾讯地图 JavaScript API 只做地图显示（仅持有受来源限制的 JS Key）；服务端使用腾讯地图 WebService 承担地理编码、POI 检索与路线规划（Server Key 只在服务端进程）。
@@ -221,7 +221,7 @@ BR-<序号>               业务规则
 
 1. 底部导航点击"我的"进入用户中心。
 2. 展示：头像（圆形，未设置时显示默认灰色头像）、昵称、手机号（中间 4 位打码）、钱包余额、注册时间。
-3. **更换头像**：点击头像 → 文件选择对话框（限 `*.png *.jpg *.jpeg *.bmp`）→ 客户端先校验格式和大小并上传 → Crow 服务端再次校验真实格式、大小和尺寸，重新编码并剥离元数据后保存到服务端文件目录 → 返回受权 `avatarUrl` → 界面立即刷新。客户端不得保存服务端文件路径或直接写 SQLite。
+3. **更换头像**：点击头像 → 文件选择对话框（限 `*.png *.jpg *.jpeg *.bmp`）→ 客户端先校验格式和大小并上传 → Crow 服务端再次校验真实格式、大小和尺寸，重新编码并剥离元数据后保存到服务端文件目录 → 返回受权 `avatarUrl` → 界面立即刷新。客户端不得保存服务端文件路径或直接写数据库。
 4. **修改昵称**：点击编辑 → 输入框可编辑 → 通过 REST 接口保存并刷新。昵称长度 1-20 字符，不允许纯空白。
 5. **余额充值**：输入金额（0.01 - 10000，两位小数）→ 点击充值 → 通过幂等 REST 接口完成虚拟支付 → 余额累加并生成充值流水 → 界面显示"支付成功"并刷新余额。
 6. **退出登录**：返回登录窗口，清空当前会话。
@@ -320,7 +320,7 @@ BR-<序号>               业务规则
 2. 选择“拍照”后立即显示加载状态，对话框在可用摄像头的验收环境中应在 1 秒内展示预览。
 3. 用户点击“拍摄”后定格画面，可重拍或确认使用；处理期间拍摄按钮禁用。
 4. 确认时在内存中居中裁剪为正方形并压缩，摄像头生成的上传载荷不超过 200 KiB，然后调用现有 `POST /api/v1/user/me/avatar`。
-5. 只有服务端返回成功后才刷新头像；客户端不保存服务端文件路径、不直接访问 SQLite，也不因拍照留下未受控临时文件。
+5. 只有服务端返回成功后才刷新头像；客户端不保存服务端文件路径、不直接访问 PostgreSQL，也不因拍照留下未受控临时文件。
 
 **异常流**
 
@@ -364,7 +364,7 @@ BR-<序号>               业务规则
 
 **异常流**：定位被拒绝、定位超时或浏览器不支持定位时，展示明确文字提示并提供预设位置与地址输入；腾讯地图 JS API 加载失败或未配置 JS Key 时，地图区域展示失败态与重试入口并给出配置指引，站点列表与充电主流程仍可正常使用；接口返回 401 时清理会话并回到登录；查询失败或空结果时展示加载、空数据、失败与恢复状态，不得静默失败。
 
-**业务规则**：只有一套页面集合，不得建立第二套移动端 Web 页面；不得使用 User-Agent 嗅探分流到不同页面；前端只能通过已定义的 `/api/v1` REST/WebSocket 契约取数，不得直接打开 SQLite；前端不得持有大模型 API Key 或腾讯地图 Server Key；金额、电量与时间的单位换算只在展示层进行。
+**业务规则**：只有一套页面集合，不得建立第二套移动端 Web 页面；不得使用 User-Agent 嗅探分流到不同页面；前端只能通过已定义的 `/api/v1` REST/WebSocket 契约取数，不得直连 PostgreSQL；前端不得持有大模型 API Key 或腾讯地图 Server Key；金额、电量与时间的单位换算只在展示层进行。
 
 **验收标准**：同一套页面在 390×844 与 1440×900 视口下均可用，移动端底部导航与桌面端侧边栏均出现且各自可见性由断点决定；地图加载、地图失败、定位成功、定位失败、附近站点展示、Agent loading、Agent error 与 Agent 结构化结果渲染均有前端自动化测试证据；构建产物中不出现任何 Server Key 或 AI Key。
 
@@ -383,7 +383,7 @@ BR-<序号>               业务规则
 
 **异常流**：未配置大模型或调用失败、超时、返回空内容时，返回确定性工具结果与固定说明文案，并置 `degraded=true`；腾讯地图 POI 或路线不可用时，POI 返回空数组、路线以 Haversine 直线降级并标注 `LOCAL_FALLBACK`，站点结果仍然返回；无定位时使用关键词地理编码，仍失败则使用默认位置并在响应中体现降级；工具返回空结果时如实说明，不得编造；工具调用次数与轮次有上限，模型给出未注册工具名或越界参数时必须被忽略或回落而不是抛错。
 
-**业务规则**：Agent 是服务端一级模块，依赖方向固定为 `server → agent → core/infrastructure`，`core` 与 `infrastructure` 不得依赖 `agent`；Agent 不直接访问 SQLite、不重新实现订单/充电/余额逻辑、不修改任何业务状态；请求用户身份只取自 Bearer 会话，请求体中的用户标识一律拒绝；响应、日志与错误消息不得包含密钥、SQL、内部路径或完整手机号。
+**业务规则**：Agent 是服务端一级模块，依赖方向固定为 `server → agent → core/infrastructure`，`core` 与 `infrastructure` 不得依赖 `agent`；Agent 不直接访问 PostgreSQL、不重新实现订单/充电/余额逻辑、不修改任何业务状态；请求用户身份只取自 Bearer 会话，请求体中的用户标识一律拒绝；响应、日志与错误消息不得包含密钥、SQL、内部路径或完整手机号。
 
 **验收标准**：覆盖 Agent Controller 契约（鉴权、字段白名单、`message` 长度、`location` 成对与范围、`coordinateType` 与 `chargerType` 取值、未知字段）、AgentService 工具调度与降级、四个工具的独立契约、大模型调用失败与超时、地图服务失败、无定位、无结果与非法请求；前端覆盖 Agent loading、Agent error 与结构化结果渲染。
 
@@ -452,7 +452,7 @@ BR-<序号>               业务规则
 1. `QTableView` 列表展示：电桩编号、所属电站、类型、功率(kW)、当前状态、累计充电次数、累计充电时长（小时）。
 2. 支持按电站筛选、按状态筛选、按编号搜索。
 3. 选中某电桩后可执行操作：
-   - **远程重启**：空闲或故障设备经二次确认后模拟重启，显示 2 秒进度并记录运维日志；待确认、已预约或待结算设备优先登记释放后自动重启，确需立即处理时先完成受控释放；充电中设备经二次确认并填写原因后，由 Crow 服务端在 SQLite 事务中停止计费，按已产生电量幂等结算或生成待处理结算，通过 WebSocket 通知用户并记录完整审计，再模拟重启。任一步失败不得直接释放设备或丢失订单数据。
+   - **远程重启**：空闲或故障设备经二次确认后模拟重启，显示 2 秒进度并记录运维日志；待确认、已预约或待结算设备优先登记释放后自动重启，确需立即处理时先完成受控释放；充电中设备经二次确认并填写原因后，由 Crow 服务端在 PostgreSQL 事务中停止计费，按已产生电量幂等结算或生成待处理结算，通过 WebSocket 通知用户并记录完整审计，再模拟重启。任一步失败不得直接释放设备或丢失订单数据。
    - **强制释放**：仅对待确认或已预约设备可用，二次确认并必填原因，选择释放后为空闲、故障或停用，通知用户并记录审计；充电中设备禁止执行。
    - **标记故障 / 恢复正常**：手动切换状态。
 4. 支持新增电桩（选择所属电站、填编号、类型、功率）与停用电桩；活动流程中的电桩禁止停用，历史数据不物理删除。
@@ -538,13 +538,13 @@ BR-<序号>               业务规则
 
 ### UC-D-01 数据表要求
 
-必须至少包含说明书规定的 `user_account`、`admin_account`、`station`、`charger`、`charging_flow`、`charging_order`、`wallet_account`、`ops_log`、`load_prediction` 和 `recharge_order`，并覆盖设备命令、排队/报价/预约、钱包/欠费、审计/备份及模型版本等增强数据。会话与验证码状态由服务内存管理并设置容量上限，重启后全部失效，不要求落库。数据库使用 SQLite 3；主键优先使用 `INTEGER PRIMARY KEY`，金额和单价保存为整数分，电量保存为整数毫瓦时，时间保存为 UTC Unix 秒 `INTEGER`，状态使用带 `CHECK` 的 `INTEGER`。
+必须至少包含说明书规定的 `user_account`、`admin_account`、`station`、`charger`、`charging_flow`、`charging_order`、`wallet_account`、`ops_log`、`load_prediction` 和 `recharge_order`，并覆盖设备命令、排队/报价/预约、钱包/欠费、审计/备份及模型版本等增强数据。会话与验证码状态由服务内存管理并设置容量上限，重启后全部失效，不要求落库。数据库使用 PostgreSQL 18；数值主键使用 `BIGINT GENERATED BY DEFAULT AS IDENTITY`，金额和单价保存为整数分，电量保存为整数毫瓦时，时间保存为 UTC Unix 秒 `BIGINT`，状态使用带 `CHECK` 的整数类型。
 
 ### UC-D-02 初始化与种子数据
 
-- `ncs_server` 首次启动时若 `charge_platform.db` 不存在，在初始化锁保护下自动执行建表和种子脚本；已存在数据库则按 `schema_version` 执行版本升级，失败时服务端拒绝写入并通过健康检查返回明确状态。
+- `ncs_server` 首次连接空 PostgreSQL 数据库时，在事务级迁移锁保护下按 v1→v9 顺序执行外部 SQL 迁移和种子；已存在数据库则按 `schema_version` 升级，版本过新、校验和不符或升级失败时服务端拒绝写入并通过健康检查返回明确状态。
 - 自动写入种子数据：1 个管理员（`admin/123456`）、5 个固定北京站点、共 48 个电桩以及最近 90 天的订单、充值、设备状态和负荷数据；管理端和大屏默认展示最近 30 天，ML 使用完整 90 天数据。
-- 已存在数据库时不重复播种，通过 `schema_version` 表管理版本；已执行迁移不得修改，演示种子与结构迁移同批次幂等执行（`INSERT OR IGNORE`），重复执行不产生重复数据。
+- 已存在数据库时不重复播种，通过 `schema_version` 表管理版本；已执行迁移不得修改，演示种子与结构迁移同一事务执行，幂等写入使用带明确冲突列的 `ON CONFLICT`，重复执行不产生重复数据。
 
 北京演示站点固定为：
 
@@ -585,9 +585,9 @@ BR-<序号>               业务规则
 ### UC-D-03 数据一致性
 
 - 所有跨表写操作（预约、结算、批量建桩）必须在事务中执行。
-- Crow 服务端的每个数据库连接执行 `PRAGMA foreign_keys = ON`、`PRAGMA journal_mode = WAL` 和合理的 `busy_timeout`；连接归属服务端专用数据库工作线程，同一进程不得跨线程复用连接。
-- 设备分配与结算使用 `BEGIN IMMEDIATE`、条件更新、唯一索引和幂等键；跨表写操作整体事务化，冲突最多重试 3 次。
-- Web 车主端、Web 管理端与大屏只通过 HTTPS REST / WebSocket 访问 Crow 服务端；只有服务端数据访问层可打开 SQLite。开发和测试环境分别使用独立数据库文件。
+- Crow 服务端通过 QPSQL/libpq 连接 PostgreSQL，设置受限 `application_name`、连接超时、`lock_timeout` 和 `statement_timeout`；连接归属服务端专用数据库工作线程，同一连接不得跨线程复用，并发连接数不得超过配置池上限。
+- 写事务使用 `READ COMMITTED`，钱包、活动流程、订单和设备分配读取使用 `SELECT … FOR UPDATE`；候选设备和队列使用 `SKIP LOCKED`，费率区间与一次性 OWNER 引导使用事务级 advisory lock，另以条件更新、部分唯一索引和幂等键兜底。跨表写操作整体事务化，冲突重试不得超过 3 次，包含外部副作用的事务不得自动重放。
+- Web 车主端、Web 管理端与大屏只通过 HTTPS REST / WebSocket 访问 Crow 服务端；只有服务端数据访问层可连接 PostgreSQL。开发和测试环境分别使用独立数据库与最小权限账号。
 
 ---
 
@@ -604,7 +604,7 @@ BR-<序号>               业务规则
 
 ### UC-W-02 数据来源
 
-Crow 服务端每 30 秒聚合数据并原子替换 `apps/dashboard/public/data/dashboard.json`；大屏优先访问受权 `/api/v1/dashboard/*`，断线时每 30 秒拉取最近成功快照。JSON 包含版本与数据截止时间，生成失败时保留上一份成功文件并显示错误，大屏和 Python 脚本均不直接打开 SQLite 文件。
+Crow 服务端每 30 秒聚合数据并原子替换 `apps/dashboard/public/data/dashboard.json`；大屏优先访问受权 `/api/v1/dashboard/*`，断线时每 30 秒拉取最近成功快照。JSON 包含版本与数据截止时间，生成失败时保留上一份成功文件并显示错误，大屏和 Python 脚本均不直连 PostgreSQL。
 
 ### UC-W-03 交互
 
@@ -692,25 +692,25 @@ Crow 服务端每 30 秒聚合数据并原子替换 `apps/dashboard/public/data/
 | NFR-C-02 | 可移植性 | 所有路径使用 `QDir`/`QStandardPaths` 拼接，禁止硬编码盘符与反斜杠 |
 | NFR-C-03 | 可移植性 | 源文件统一 UTF-8 编码，MSVC 下加 `/utf-8` 选项       |
 | NFR-C-04 | 并发/可移植性 | 仅在真实业务中使用 `QThread`、`QThreadPool`、Qt 异步事件和 `QProcess`；数据库连接仅归属 Crow 服务端专用工作线程，所有耗时任务不得阻塞 UI 或服务器事件循环，后台线程不得直接操作 UI |
-| NFR-M-01 | 可维护性 | 单个源文件不超过 700 行，超出必须拆分；存量超限的 `sqlite_repository.cpp`、`admin_routes.cpp`、`charge_flow_service.cpp` 列入技术债限期拆分，拆分完成前豁免 |
-| NFR-M-02 | 可维护性 | UI、Controller、应用服务和领域层不出现 SQL；SQL 仅存在于 `infrastructure/sqlite` 数据访问实现 |
+| NFR-M-01 | 可维护性 | 单个源文件不超过 700 行，超出必须拆分；存量超限的 `admin_routes.cpp`、`charge_flow_service.cpp` 列入技术债限期拆分，拆分完成前豁免 |
+| NFR-M-02 | 可维护性 | UI、Controller、应用服务和领域层不出现 SQL；SQL 仅存在于 `infrastructure/postgres` 数据访问实现与不可变迁移文件 |
 | NFR-M-03 | 可维护性 | 所有数据库访问使用参数化查询（`bindValue`），禁止字符串拼接 SQL  |
 | NFR-M-04 | 可维护性 | 日志统一写入 `logs/ncs_YYYYMMDD.log`，包含级别、时间、模块和请求 ID；应用日志保留 30 天，审计/运维日志保留 180 天 |
-| NFR-M-05 | 可维护性 | Agent 为根目录一级模块 `agent/`，依赖方向固定为 `server → agent → core/infrastructure`；`core` 与 `infrastructure` 不得依赖 `agent`，Agent 不得直接访问 SQLite；大模型与地图厂商协议只允许出现在 `infrastructure/ai` 与 `infrastructure/map`，Agent 核心逻辑只依赖抽象端口 |
+| NFR-M-05 | 可维护性 | Agent 为根目录一级模块 `agent/`，依赖方向固定为 `server → agent → core/infrastructure`；`core` 与 `infrastructure` 不得依赖 `agent`，Agent 不得直接访问 PostgreSQL；大模型与地图厂商协议只允许出现在 `infrastructure/ai` 与 `infrastructure/map`，Agent 核心逻辑只依赖抽象端口 |
 | NFR-S-01 | 安全性  | 用户和管理员密码使用专用密码哈希，优先 Argon2id；默认演示密码只允许开发配置 |
 | NFR-S-02 | 安全性  | 界面展示手机号时中间 4 位打码                         |
-| NFR-S-03 | 安全性  | SQLite 文件仅允许同机 `ncs_server` 和授权开发人员访问，客户端不得打开，不提交 Git、不放在网络共享目录 |
+| NFR-S-03 | 安全性  | PostgreSQL 使用独立最小权限业务账号；凭据只来自进程环境或指定 `.env`，不得记录、返回或提交 Git；生产连接必须 `sslmode=verify-full` 并校验受信 CA，数据库端口不得向客户端或公网开放 |
 | NFR-S-04 | 安全性  | 普通用户会话最长 30 天且最多 3 个桌面终端；管理员最多 2 个终端，退出或注销立即撤销会话 |
 | NFR-S-05 | 安全性  | 队列和预约通过鉴权 WebSocket 站内通知，通知不含手机号、余额或完整订单；Android 系统推送不属于当前验收范围 |
 | NFR-S-06 | 安全性  | 大模型 API Key 与腾讯地图 Server Key 只存在于服务端进程环境；Web 用户端只允许内联受来源限制的腾讯地图 JS Key，构建产物、响应与日志中不得出现 Server Key、AI Key、SQL、内部路径或完整手机号 |
-| NFR-S-07 | 安全性  | AI 助手只读且不可越权：不得修改余额或任何业务状态，不得绕过应用服务直接访问 SQLite，模型给出的未注册工具名与越界参数必须被忽略 |
+| NFR-S-07 | 安全性  | AI 助手只读且不可越权：不得修改余额或任何业务状态，不得绕过应用服务直接访问 PostgreSQL，模型给出的未注册工具名与越界参数必须被忽略 |
 | NFR-R-01 | 可靠性  | 程序异常退出后重启，充电中订单可恢复继续计费                   |
-| NFR-R-02 | 可靠性  | SQLite 打开失败、文件损坏、版本不匹配、锁超时或事务失败时给出明确提示而非崩溃或静默丢数据 |
-| NFR-R-03 | 可靠性  | Crow 服务端使用 SQLite 在线备份生成一致性快照，每日保留 7 份、每周保留 4 份并可加密同步云服务器；RPO 24 小时、RTO 4 小时 |
+| NFR-R-02 | 可靠性  | PostgreSQL 连接失败、认证/证书失败、版本不匹配、锁超时、死锁或事务失败时给出明确且脱敏的提示，不得崩溃、泄露连接信息或静默丢数据 |
+| NFR-R-03 | 可靠性  | 服务端以 `pg_dump` custom archive 生成逻辑一致性备份，每日保留 7 份、每周保留 4 份；正式环境另启用周期性 base backup 与 WAL 归档，恢复必须在隔离数据库演练；RPO 24 小时、RTO 4 小时 |
 | NFR-D-01 | 部署   | 开发/验收 VM 推荐 2 核/4GB/40GB；默认及测试、验收、生产环境只允许 HTTPS/WSS 并仅监听受控本机或 VM 网络接口，不要求公网暴露。本机联调可显式设置 `NCS_ALLOW_INSECURE_HTTP=true` 启用 HTTP/WS，但服务端和客户端必须同时确认环境为 `development` 且目标/监听地址为数字回环地址 `127.0.0.1` 或 `::1`；任一条件不满足必须拒绝启动或连接，且不得用忽略证书错误代替该受限模式。 |
-| NFR-D-02 | 部署   | 严格验收时用户端、PC 管理端、Crow 服务端和 SQLite 在同一 Ubuntu VM 运行；VM 使用 NAT，跨机器模式属于远期扩展且不得共享 SQLite 文件 |
+| NFR-D-02 | 部署   | 严格验收时用户端、PC 管理端、Crow 服务端和 PostgreSQL 在同一 Ubuntu VM 运行；VM 使用 NAT，PostgreSQL 仅监听回环或受保护的服务网络 |
 
-容量与并发测试不得依赖真实用户。测试环境使用独立 SQLite 文件和仅在测试配置启用的模拟账号，由 Python `asyncio` HTTP/WebSocket 虚拟客户端连接 Crow 服务，并构造 50 个排队流程和最多 48 个充电会话。测试环境禁用外部通知；测试结束后删除并重建测试库，不把测试账号或固定密码用于正式演示。
+容量与并发测试不得依赖真实用户。测试环境使用独立 PostgreSQL 数据库和仅在测试配置启用的模拟账号，由 Python `asyncio` HTTP/WebSocket 虚拟客户端连接 Crow 服务，并构造 50 个排队流程和最多 48 个充电会话。测试环境禁用外部通知；测试结束后删除并重建测试数据库，不把测试账号或固定密码用于正式演示。
 
 ---
 
@@ -718,7 +718,7 @@ Crow 服务端每 30 秒聚合数据并原子替换 `apps/dashboard/public/data/
 
 | 需求编号         | 对应模块   | 主要文件                                     | 交付阶段     |
 | ------------ | ------ | ---------------------------------------- | -------- |
-| UC-D-01 ~ 03 | 数据库层   | `infrastructure/sqlite/`、`core/application/` | 阶段二      |
+| UC-D-01 ~ 03 | 数据库层   | `infrastructure/postgres/`、`infrastructure/database/`、`core/application/` | 阶段二      |
 | UC-U-01      | 用户登录   | `apps/user/`、`server/controller/`、`core/application/` | 阶段三 + 四 |
 | UC-U-02 ~ 03 | 电站查询   | `apps/user/`、`infrastructure/map/`、`core/application/` | 阶段三 + 四 |
 | UC-U-05      | 用户中心   | `apps/user/`、`infrastructure/files/`、`core/application/` | 阶段三 + 四 |

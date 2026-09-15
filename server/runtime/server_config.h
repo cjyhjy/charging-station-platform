@@ -3,6 +3,7 @@
 // 仅限开发环境且必须回环地址，解析与启动检查双重拒绝；配置错误抛 ConfigError 中止启动。
 #pragma once
 
+#include "infrastructure/database/repository_factory.h"
 #include "infrastructure/files/structured_logger.h"
 
 #include <cstdint>
@@ -48,7 +49,7 @@ struct ServerConfig
     std::size_t websocketQueueCapacity = 256;
     ncs::infrastructure::files::LogLevel logLevel = ncs::infrastructure::files::LogLevel::Info;
     std::string logDirectory;
-    std::string databasePath;
+    ncs::infrastructure::database::RepositoryConfig database;
     std::string tlsCertificatePath;
     std::string tlsPrivateKeyPath;
     // Explicit opt-in for same-host development only. Parsing and startup

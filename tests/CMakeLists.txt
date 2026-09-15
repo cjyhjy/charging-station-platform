@@ -4,6 +4,44 @@ target_link_libraries(ncs_order_review_tests PRIVATE ncs::server_controller ncs:
 add_test(NAME ncs_order_review COMMAND ncs_order_review_tests)
 set_tests_properties(ncs_order_review PROPERTIES LABELS "contract;integration" TIMEOUT 120)
 
+add_executable(ncs_postgres_repository_tests postgres_repository_test.cpp)
+set_target_properties(ncs_postgres_repository_tests PROPERTIES
+    AUTOMOC OFF
+    AUTOUIC OFF
+    AUTORCC OFF
+)
+target_link_libraries(ncs_postgres_repository_tests PRIVATE
+    ncs::infrastructure_postgres
+    Qt6::Core
+)
+add_test(NAME ncs_postgres_repository
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_postgres_repository_test.sh
+        $<TARGET_FILE:ncs_postgres_repository_tests> ${PROJECT_SOURCE_DIR}
+)
+set_tests_properties(ncs_postgres_repository PROPERTIES
+    LABELS "database;integration"
+    TIMEOUT 300
+    RUN_SERIAL TRUE
+    SKIP_RETURN_CODE 77
+)
+
+add_executable(ncs_create_sqlite_v9_fixture create_sqlite_v9_fixture.cpp)
+set_target_properties(ncs_create_sqlite_v9_fixture PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_link_libraries(ncs_create_sqlite_v9_fixture PRIVATE
+    ncs::infrastructure_sqlite SQLite3::SQLite3 Qt6::Core)
+ncs_set_project_warnings(ncs_create_sqlite_v9_fixture)
+add_test(NAME ncs_sqlite_to_postgres
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_sqlite_to_postgres_test.sh
+        $<TARGET_FILE:ncs_create_sqlite_v9_fixture>
+        $<TARGET_FILE:ncs_sqlite_to_postgres>
+        ${PROJECT_SOURCE_DIR}/infrastructure/postgres/migrations)
+set_tests_properties(ncs_sqlite_to_postgres PROPERTIES
+    LABELS "database;integration;migration"
+    TIMEOUT 300
+    RUN_SERIAL TRUE
+    SKIP_RETURN_CODE 77)
+
 add_executable(ncs_sqlite_avatar_repository_tests sqlite_avatar_repository_test.cpp)
 set_target_properties(ncs_sqlite_avatar_repository_tests PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_link_libraries(ncs_sqlite_avatar_repository_tests PRIVATE ncs::infrastructure_sqlite Qt6::Core)
@@ -62,6 +100,20 @@ target_link_libraries(ncs_server_config_tests PRIVATE
 )
 
 add_test(NAME ncs_server_config COMMAND ncs_server_config_tests)
+
+add_executable(ncs_database_security_tests database_security_test.cpp)
+set_target_properties(ncs_database_security_tests PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_link_libraries(ncs_database_security_tests PRIVATE ncs::server_runtime Qt6::Core)
+add_test(NAME ncs_database_security COMMAND ncs_database_security_tests)
+set_tests_properties(ncs_database_security PROPERTIES LABELS "unit;security;database")
+
+add_executable(ncs_database_config_tests database_config_test.cpp)
+set_target_properties(ncs_database_config_tests PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+target_link_libraries(ncs_database_config_tests PRIVATE ncs::server_runtime Qt6::Core)
+add_test(NAME ncs_database_config COMMAND ncs_database_config_tests)
+set_tests_properties(ncs_database_config PROPERTIES LABELS "unit;config;database")
 
 add_executable(ncs_api_routes_tests
     api_routes_test.cpp
@@ -460,13 +512,16 @@ add_test(
 find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
 add_test(
     NAME ncs_server_smoke
-    COMMAND ${Python3_EXECUTABLE}
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_server_smoke_test.sh
+        ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/server_smoke_test.py
         $<TARGET_FILE:ncs_server>
+        ${PROJECT_SOURCE_DIR}/infrastructure/postgres/migrations
 )
 set_tests_properties(ncs_server_smoke PROPERTIES
     RUN_SERIAL TRUE
     TIMEOUT 300
+    SKIP_RETURN_CODE 77
 )
 
 # 用户端已迁移为 apps/user 下的 Vue 3 + Vite Web 客户端（npm 独立构建），不再是 CMake 目标，

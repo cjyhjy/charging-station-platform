@@ -15,7 +15,7 @@
 | --- | --- |
 | `01-requirements-specification.md` | 定义系统必须实现的功能、规则、指标和验收结果 |
 | `development-guide.md` | 定义如何组织工程、安排研发和判断任务完成 |
-| `database-design.md` | 定义 SQLite 物理模型、约束、事务和迁移 |
+| `database-design.md` | 定义 PostgreSQL 物理模型、约束、事务和迁移 |
 | `database-api.md` | 定义 HTTPS REST / WebSocket 通信契约（含 §5A Agent 对话接口） |
 | `tencent-map-setup.md` | 定义腾讯地图本地配置与排错步骤 |
 | `enhancement-tasks-implementation-plan.md` | 定义 `UC-U-11`、`UC-X-01` 的模块边界、实施顺序、产物和验证门禁 |
@@ -27,7 +27,7 @@
 
 ```text
 Vue/HTML5 车主端（PC + 手机同一套页面）─┐
-Vue/HTML5 管理端（宽屏控制台）──────────┼── HTTPS REST / WebSocket ── Crow 服务端 ── SQLite
+Vue/HTML5 管理端（宽屏控制台）──────────┼── HTTPS REST / WebSocket ── Crow 服务端 ── PostgreSQL
 Vue 数据大屏 ──────────────────────────┘                                  │
                                                                           ├── Core 业务服务
                                                                           ├── Agent（LLM + Tool Calling）
@@ -38,10 +38,10 @@ Vue 数据大屏 ─────────────────────
 
 - 三个 Web 前端（车主端、管理端、大屏）负责交互和展示，不保存服务端业务真相；它们只通过已定义的 REST/WebSocket 契约取数，且共用同一套设计令牌与动效层。
 - Crow Controller 只处理协议、鉴权入口和 DTO 转换；业务规则位于应用服务层；Agent Controller 同样只做 HTTP、鉴权、DTO 转换与参数校验。
-- 领域层不依赖 UI 框架、Crow、SQLite 或外部地图；`core` 与 `infrastructure` 不得依赖 `agent`。
+- 领域层不依赖 UI 框架、Crow、PostgreSQL 或外部地图；`core` 与 `infrastructure` 不得依赖 `agent`。
 - Agent 是根目录一级模块，依赖方向固定为 `server → agent → core / infrastructure`：站点能力复用 `core/application` 的应用服务，地图与 LLM 通过 core 端口注入，具体厂商协议只出现在 `infrastructure/map` 与 `infrastructure/ai`。
 - 腾讯地图分工：前端 JavaScript API 只负责地图显示（只持有受来源限制的 JS Key），服务端 WebService 只负责地理编码、POI 与路线规划（Server Key 只在服务端进程）。
-- SQLite 仅由服务端数据访问层打开；Agent 与 ML 都不得直接访问数据库，ML 通过内部接口交换数据。
+- PostgreSQL 仅由服务端数据访问层连接；Agent 与 ML 都不得直接访问数据库，ML 通过内部接口交换数据。
 - 实时事件用于及时更新，REST 快照用于首次加载和断线恢复。
 
 ## 3. 目标工程结构
@@ -62,7 +62,9 @@ core/
 ├── application/           用例、服务接口和权限边界（含 LLM/POI 等外部能力端口）
 └── include/ncs/core/      公共 Result/Error 值类型
 infrastructure/
-├── sqlite/                schema、迁移、仓储、事务和备份
+├── database/              仓储组合端口与后端工厂
+├── postgres/              schema、迁移、仓储、事务和备份
+├── sqlite/                仅测试/历史数据转换期间保留，不进入正式服务链接
 ├── config/                环境配置加载与校验
 ├── logging/               应用日志、请求 ID 和脱敏
 ├── ai/                    OpenAI-compatible 大模型客户端与配置
@@ -110,7 +112,7 @@ docs/                      需求、设计和接入文档
 | 单元测试 | 值对象、公式、状态机和纯领域规则 |
 | 数据库测试 | schema、迁移、约束、事务、幂等和恢复 |
 | 契约测试 | HTTP 方法、路径、DTO、错误码、鉴权和 WebSocket 事件 |
-| 集成测试 | 服务端与 SQLite、地图降级、ML 子进程和文件服务 |
+| 集成测试 | 服务端与 PostgreSQL、地图降级、ML 子进程和文件服务 |
 | UI 测试 | 页面状态、尺寸、导航、输入校验和错误提示 |
 | 端到端测试 | 用户与管理端通过真实 API 完成关键业务流程 |
 | Agent 测试 | 工具调度与锚点注入、工具参数校验、大模型与地图失败降级、Agent Controller 契约 |
@@ -118,6 +120,11 @@ docs/                      需求、设计和接入文档
 | 非功能测试 | SRS 规定的性能、容量、安全、备份和恢复指标 |
 
 测试数据库、日志、模型和截图使用隔离目录，不得污染开发或演示数据。
+
+PostgreSQL 集成门禁由 Ubuntu CI 安装 PostgreSQL 18 与 QPSQL 驱动后执行；设置
+`NCS_REQUIRE_POSTGRES_TESTS=1`，缺少工具或版本不符时失败，不允许静默跳过。
+`ncs_postgres_repository` 包含隔离库实际恢复校验；Windows 作源码构建及其余契约验证，
+不以 Windows 跳过的 Unix 临时数据库测试作为 PostgreSQL 验收证据。
 
 Web 前端不作为 CMake 目标：改动后在对应的 `apps/user`、`apps/admin` 或 `apps/dashboard`
 执行 `npm install`、`npm run test` 与 `npm run build`，三者是前端改动的完成条件。

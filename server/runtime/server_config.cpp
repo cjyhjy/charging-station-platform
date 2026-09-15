@@ -1,6 +1,8 @@
 #include "server/runtime/server_config.h"
 
+#include "server/runtime/server_config_database.h"
 #include "server/runtime/server_config_environment.h"
+#include "server/runtime/server_config_values.h"
 
 #include <asio/ip/address.hpp>
 
@@ -10,8 +12,7 @@
 #include <QString>
 #include <QUrl>
 
-#include <array>
-#include <charconv>
+#include <algorithm>
 #include <cstdlib>
 #include <limits>
 #include <string_view>
@@ -23,6 +24,9 @@ namespace ncs::server::runtime
 namespace
 {
 
+using detail::normalizePath;
+using detail::parseUnsigned;
+
 struct EnvironmentSetting
 {
     std::string_view variable;
@@ -33,7 +37,7 @@ struct EnvironmentSetting
 // Env files use the same names as the process environment variables, except
 // the Tencent geocoding key, which the frontend/backend .env documents as
 // TENCENT_MAP_SERVER_KEY (docs/tencent-map-setup.md).
-constexpr std::array<EnvironmentSetting, 27> environmentSettings{{
+constexpr EnvironmentSetting environmentSettings[]{
     {"NCS_ENVIRONMENT", "NCS_ENVIRONMENT", "--environment"},
     {"NCS_LISTEN_ADDRESS", "NCS_LISTEN_ADDRESS", "--listen-address"},
     {"NCS_PORT", "NCS_PORT", "--port"},
@@ -47,7 +51,21 @@ constexpr std::array<EnvironmentSetting, 27> environmentSettings{{
     {"NCS_WEBSOCKET_QUEUE_CAPACITY", "NCS_WEBSOCKET_QUEUE_CAPACITY", "--websocket-queue-capacity"},
     {"NCS_LOG_LEVEL", "NCS_LOG_LEVEL", "--log-level"},
     {"NCS_LOG_DIRECTORY", "NCS_LOG_DIRECTORY", "--log-directory"},
-    {"NCS_DATABASE_PATH", "NCS_DATABASE_PATH", "--database-path"},
+    {"NCS_DATABASE_DRIVER", "NCS_DATABASE_DRIVER", "--database-driver"},
+    {"NCS_DATABASE_HOST", "NCS_DATABASE_HOST", "--database-host"},
+    {"NCS_DATABASE_PORT", "NCS_DATABASE_PORT", "--database-port"},
+    {"NCS_DATABASE_NAME", "NCS_DATABASE_NAME", "--database-name"},
+    {"NCS_DATABASE_USER", "NCS_DATABASE_USER", "--database-user"},
+    {"NCS_DATABASE_PASSWORD", "NCS_DATABASE_PASSWORD", "--database-password"},
+    {"NCS_DATABASE_SSLMODE", "NCS_DATABASE_SSLMODE", "--database-sslmode"},
+    {"NCS_DATABASE_SSL_ROOT_CERT", "NCS_DATABASE_SSL_ROOT_CERT", "--database-ssl-root-cert"},
+    {"NCS_DATABASE_CONNECT_TIMEOUT", "NCS_DATABASE_CONNECT_TIMEOUT", "--database-connect-timeout"},
+    {"NCS_DATABASE_POOL_SIZE", "NCS_DATABASE_POOL_SIZE", "--database-pool-size"},
+    {"NCS_DATABASE_MIGRATIONS", "NCS_DATABASE_MIGRATIONS", "--database-migrations"},
+    {"NCS_DATABASE_BACKUP_DIRECTORY", "NCS_DATABASE_BACKUP_DIRECTORY",
+     "--database-backup-directory"},
+    {"NCS_PG_DUMP", "NCS_PG_DUMP", "--pg-dump"},
+    {"NCS_PG_RESTORE", "NCS_PG_RESTORE", "--pg-restore"},
     {"NCS_TLS_CERTIFICATE", "NCS_TLS_CERTIFICATE", "--tls-certificate"},
     {"NCS_TLS_PRIVATE_KEY", "NCS_TLS_PRIVATE_KEY", "--tls-private-key"},
     {"NCS_ALLOW_INSECURE_HTTP", "NCS_ALLOW_INSECURE_HTTP", "--allow-insecure-http"},
@@ -62,7 +80,7 @@ constexpr std::array<EnvironmentSetting, 27> environmentSettings{{
     {"NCS_AI_BASE_URL", "AI_BASE_URL", "--ai-base-url"},
     {"NCS_AI_API_KEY", "AI_API_KEY", "--ai-api-key"},
     {"NCS_AI_TIMEOUT_MS", "AI_TIMEOUT_MS", "--ai-timeout-ms"},
-}};
+};
 
 ncs::infrastructure::files::LogLevel parseLogLevel(const std::string_view value,
                                                    const std::string_view source)
@@ -102,15 +120,6 @@ QString pathFromUtf8(const std::string_view value)
     return QString::fromUtf8(value.data(), static_cast<qsizetype>(value.size()));
 }
 
-std::string normalizePath(const std::string_view value, const std::string_view source)
-{
-    if (value.empty())
-    {
-        throw ConfigError("empty filesystem path for " + std::string(source));
-    }
-    return utf8Path(QFileInfo(pathFromUtf8(value)).absoluteFilePath());
-}
-
 // 解析 CORS 白名单：逗号分隔，每项必须是仅含 scheme+host 的 http/https 源（禁止 userinfo、
 // path、query、fragment），排序后检查重复，任何违规直接抛 ConfigError 中止启动。
 std::vector<std::string> parseCorsOrigins(const std::string_view value,
@@ -144,19 +153,6 @@ std::vector<std::string> parseCorsOrigins(const std::string_view value,
         throw ConfigError("duplicate CORS origin for " + std::string(source));
     }
     return origins;
-}
-
-unsigned long parseUnsigned(const std::string_view value, const unsigned long minimum,
-                            const unsigned long maximum, const std::string_view source)
-{
-    unsigned long parsed = 0;
-    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
-    if (value.empty() || result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
-        parsed < minimum || parsed > maximum)
-    {
-        throw ConfigError("invalid numeric value for " + std::string(source));
-    }
-    return parsed;
 }
 
 DeploymentEnvironment parseEnvironment(const std::string_view value, const std::string_view source)
@@ -209,6 +205,8 @@ std::string parseListenAddress(const std::string_view value, const std::string_v
 void applySetting(ServerConfig& config, const std::string_view option, const std::string_view value,
                   const std::string_view source)
 {
+    if (detail::applyDatabaseSetting(config, option, value, source))
+        return;
     if (option == "--environment")
     {
         config.environment = parseEnvironment(value, source);
@@ -262,10 +260,6 @@ void applySetting(ServerConfig& config, const std::string_view option, const std
     else if (option == "--log-directory")
     {
         config.logDirectory = normalizePath(value, source);
-    }
-    else if (option == "--database-path")
-    {
-        config.databasePath = normalizePath(value, source);
     }
     else if (option == "--tls-certificate")
     {
@@ -404,9 +398,11 @@ ServerConfig::ServerConfig()
     const QDir secretDirectory(baseDirectory.filePath(QStringLiteral("secrets")));
     logDirectory =
         utf8Path(QFileInfo(baseDirectory.filePath(QStringLiteral("logs"))).absoluteFilePath());
-    databasePath =
-        utf8Path(QFileInfo(baseDirectory.filePath(QStringLiteral("data/charge_platform.db")))
-                     .absoluteFilePath());
+    database.postgres.migrationsDirectory = utf8Path(
+        QFileInfo(baseDirectory.filePath(QStringLiteral("infrastructure/postgres/migrations")))
+            .absoluteFilePath());
+    database.postgres.backupDirectory = utf8Path(
+        QFileInfo(baseDirectory.filePath(QStringLiteral("backups/postgresql"))).absoluteFilePath());
     tlsCertificatePath = utf8Path(
         QFileInfo(secretDirectory.filePath(QStringLiteral("ncs-dev-cert.pem"))).absoluteFilePath());
     tlsPrivateKeyPath = utf8Path(
@@ -500,7 +496,7 @@ StartupOptions parseStartupOptions(const std::vector<std::string>& arguments,
         {
             // One-shot OWNER bootstrap is an action, not a configuration
             // setting; the rest of the configuration still applies (the
-            // database path in particular).
+            // database connection in particular).
             result.bootstrapOwnerUsername = std::string(value);
             result.action = StartupAction::BootstrapOwner;
             continue;
@@ -604,7 +600,20 @@ Options:
   --websocket-queue-capacity <16-4096>  Per-peer frame window (default 256)
   --log-level <debug|info|warning|error|critical>
   --log-directory <path>
-  --database-path <sqlite-path>
+  --database-driver <postgresql>
+  --database-host <host>
+  --database-port <1-65535>
+  --database-name <name>
+  --database-user <user>
+  --database-password <password>  Prefer NCS_DATABASE_PASSWORD to avoid shell history
+  --database-sslmode <disable|allow|prefer|require|verify-ca|verify-full>
+  --database-ssl-root-cert <pem-path>
+  --database-connect-timeout <1-60>
+  --database-pool-size <1-64>
+  --database-migrations <path>
+  --database-backup-directory <path>
+  --pg-dump <path-or-name>
+  --pg-restore <path-or-name>
   --dashboard-snapshot <path>  Atomic offline dashboard snapshot destination
   --python-executable <path-or-name>
   --ml-worker-script <path>
@@ -626,7 +635,11 @@ Environment variables:
   NCS_BLOCKING_QUEUE_CAPACITY, NCS_CHARGE_TIME_SCALE,
   NCS_WEBSOCKET_MAX_CONNECTIONS, NCS_WEBSOCKET_MAX_PAYLOAD,
   NCS_WEBSOCKET_QUEUE_CAPACITY,
-  NCS_LOG_LEVEL, NCS_LOG_DIRECTORY, NCS_DATABASE_PATH,
+  NCS_LOG_LEVEL, NCS_LOG_DIRECTORY, NCS_DATABASE_DRIVER, NCS_DATABASE_HOST,
+  NCS_DATABASE_PORT, NCS_DATABASE_NAME, NCS_DATABASE_USER, NCS_DATABASE_PASSWORD,
+  NCS_DATABASE_SSLMODE, NCS_DATABASE_SSL_ROOT_CERT, NCS_DATABASE_CONNECT_TIMEOUT,
+  NCS_DATABASE_POOL_SIZE, NCS_DATABASE_MIGRATIONS, NCS_DATABASE_BACKUP_DIRECTORY,
+  NCS_PG_DUMP, NCS_PG_RESTORE,
   NCS_TLS_CERTIFICATE, NCS_TLS_PRIVATE_KEY, NCS_ALLOW_INSECURE_HTTP,
   NCS_CORS_ALLOWED_ORIGINS, NCS_TENCENT_MAP_KEY,
   NCS_AI_PROVIDER, NCS_AI_MODEL, NCS_AI_BASE_URL, NCS_AI_API_KEY,
@@ -647,7 +660,7 @@ environment-file entries. Development defaults are
 127.0.0.1:8443, 2 event workers, 2 blocking workers, blocking queue capacity
 64, charge time scale 60, WebSocket capacity 100 / 64 KiB payload /
 256-frame window, no cross-origin access, INFO logs in logs/,
-SQLite data in data/charge_platform.db, and
+PostgreSQL on 127.0.0.1:5432 database ncs with a 16-connection upper bound, and
 certificate files secrets/ncs-dev-cert.pem and secrets/ncs-dev-key.pem.
 Insecure HTTP is disabled by default and is accepted only when explicitly
 enabled in development on numeric loopback; all other combinations fail.

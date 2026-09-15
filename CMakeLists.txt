@@ -71,7 +71,11 @@ FetchContent_Declare(Crow
 FetchContent_MakeAvailable(Crow)
 
 find_package(OpenSSL REQUIRED)
-find_package(SQLite3 REQUIRED)
+if(BUILD_TESTING)
+    # SQLite remains test-only while the historical contract suite is ported to PostgreSQL.
+    # Production builds and ncs_server have no SQLite link or runtime dependency.
+    find_package(SQLite3 REQUIRED)
+endif()
 
 add_library(ncs_crow INTERFACE)
 add_library(ncs::crow ALIAS ncs_crow)

@@ -1,6 +1,6 @@
 # NCS 电动汽车充电桩应用管理平台
 
-基于 C++17、Crow、SQLite 与 Vue 3 的充电桩管理教学项目。车主端与管理端均为 Vue 3 + HTML5 响应式 Web（车主端同一套页面适配 PC 与手机浏览器，管理端为宽屏控制台），并包含独立的 AI 出行助手模块提供附近充电站、周边餐饮/咖啡 POI 与路线推荐。功能范围与验收标准统一以 SRS 为准。
+基于 C++17、Crow、PostgreSQL 18 与 Vue 3 的充电桩管理教学项目。车主端与管理端均为 Vue 3 + HTML5 响应式 Web（车主端同一套页面适配 PC 与手机浏览器，管理端为宽屏控制台），并包含独立的 AI 出行助手模块提供附近充电站、周边餐饮/咖啡 POI 与路线推荐。功能范围与验收标准统一以 SRS 为准。
 
 ## 文档
 
@@ -35,12 +35,14 @@
 │   ├── middleware/     鉴权、错误、限流与请求日志
 │   ├── websocket/      WebSocket 接入、outbox 投递与进度推送
 │   └── runtime/        配置、启动检查、周期调度与 ML 子进程管理
-├── core/               不依赖 UI、Crow 或 SQLite 的核心层
+├── core/               不依赖 UI、Crow 或 PostgreSQL 的核心层
 │   ├── domain/         实体、值对象与错误码
 │   ├── application/    用例、服务接口与权限边界（含 LLM/POI 等外部能力端口）
 │   └── include/ncs/core/  公共 Result/Error 值类型
 ├── infrastructure/     外部能力实现
-│   ├── sqlite/         数据库迁移、仓储、事务与备份
+│   ├── database/       仓储工厂与组合端口
+│   ├── postgres/       PostgreSQL 迁移、仓储、事务与备份
+│   ├── sqlite/         仅测试/历史数据转换期间保留
 │   ├── ai/             OpenAI-compatible 大模型客户端与配置（API Key 只在服务端）
 │   ├── map/            腾讯 WebService 客户端、地理编码、POI、路线规划与 Haversine 降级
 │   ├── files/          结构化日志、原子快照与模型产物
@@ -56,7 +58,7 @@
 └── README.md           仓库入口
 ```
 
-模块依赖方向固定为 `server → agent → core / infrastructure`；`core` 与 `infrastructure` 不得依赖 `agent`，Agent 不得直接访问 SQLite。
+模块依赖方向固定为 `server → agent → core / infrastructure`；`core` 与 `infrastructure` 不得依赖 `agent`，Agent 不得直接访问 PostgreSQL。
 
 ### 地图与大模型的分工
 
@@ -126,7 +128,7 @@ ctest --test-dir build/dev --output-on-failure
 ## 协作入口
 
 - 开发前确认对应的 `UC-*`、`BR-*` 或 `NFR-*`，并选择相关设计文档；各模块当前状态以[完整需求矩阵](docs/01需求矩阵-NCS充电桩管理平台.xls)和[需求追踪](docs/requirements-traceability.md)为准。
-- UI、Controller、Service 和数据访问层职责分离；客户端不得直接打开 SQLite，数据库访问全部参数化，金额用整数分、电量用整数毫瓦时、时间用 UTC Unix 秒。
+- UI、Controller、Service 和数据访问层职责分离；客户端不得直连 PostgreSQL，数据库访问全部参数化，金额用整数分、电量用整数毫瓦时、时间用 UTC Unix 秒。
 - 三个 Web 前端共用同一套设计令牌与动效层；动效必须提供 `prefers-reduced-motion: reduce` 降级，且不得改变文案、数值与字段取值。
 - 用户端为单一响应式页面集合（不得建第二套移动端页面）；Agent 只读、不得绕过应用服务，模型与地图厂商协议只出现在 `infrastructure/`。
 - 源码使用 UTF-8 和 C++17；路径使用 Qt 跨平台 API；单个手写源文件不超过 700 行，存量例外清单见 `scripts/check.sh`。

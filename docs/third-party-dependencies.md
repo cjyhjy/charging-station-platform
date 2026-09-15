@@ -8,7 +8,8 @@
 | CMake | 3.24+ | 统一构建与安装 | BSD-3-Clause | CI 固定已验证版本，本地不得低于最低版本 |
 | Ninja | 1.10+ | 默认构建器 | Apache-2.0 | 跟随受支持系统包 |
 | Crow | 待阶段三锁定 | HTTPS REST / WebSocket 服务端 | BSD-3-Clause | 锁定提交/版本并审查传递依赖与安全公告 |
-| SQLite | 系统/Qt 驱动对应版本 | 服务端单文件数据库 | Public Domain | 启用约束/WAL，升级前执行迁移与恢复测试 |
+| PostgreSQL | 18.x | 服务端关系数据库、MVCC/WAL、备份恢复 | PostgreSQL License | 使用当前受支持 minor；升级前执行迁移、并发与恢复演练 |
+| Qt PostgreSQL / libpq | 与 Qt 6.2+ / PostgreSQL 18 匹配 | QPSQL 数据库驱动与连接协议 | LGPL/GPL / PostgreSQL License | 生产镜像必须包含 QPSQL 插件；启动与集成测试检查驱动可用性 |
 | OpenSSL | 受支持系统版本 | HTTPS 与开发证书 | Apache-2.0 | 由系统安全更新维护，禁止旧协议与私钥入库 |
 | Python | 3.10+ | ML、测试虚拟客户端和辅助脚本 | PSF | 使用隔离环境和锁定文件；阶段六补齐依赖哈希 |
 | Vue 3 / Vue Router / Pinia | 3.4+ / 4.x / 2.x | 三个 Web 前端（`apps/user`、`apps/admin`、`apps/dashboard`）的界面、路由与状态 | 均为 MIT | 锁文件入库，前端构建与测试纳入改动门槛 |

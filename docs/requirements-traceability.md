@@ -19,13 +19,23 @@
 | 运行说明 | NFR-D-* | 运维手册、地图接入、发布指南 | 大屏与管理端运行说明待补 | 部分完成 |
 | 本机精确基线构建 | NFR-C-01 | Qt 6.2.x + CMake 3.24+ | 本机工具链报告 | 部分完成：Qt 6.2.4 构建通过；本机 CMake 3.22.1 低于正式门槛，CI 使用 3.24+ |
 
-## 阶段二：数据与领域（完成）
+## 阶段二：数据与领域（PostgreSQL 迁移验收中）
 
 | 项目 | 依据 | 产物 | 验证 | 状态 |
 | --- | --- | --- | --- | --- |
-| 数据库实现 | UC-D-01、UC-D-03 | `infrastructure/sqlite`（28 表、v1-v8 迁移、WAL、`BEGIN IMMEDIATE`、在线备份） | `ncs_sqlite_repository`：初始化、v5→v8 顺序升级保数据、线程级并发唯一性、幂等重放、整体回滚、重启恢复、备份隔离验证、180/90/30/365 天保留清理与损坏库错误路径 | 完成 |
+| 数据库实现 | UC-D-01、UC-D-03 | `infrastructure/postgres`（外部 v1-v9 迁移、identity/RETURNING、行锁/advisory lock、QPSQL 连接上限、pg_dump/pg_restore、SQLite v9 存量迁移）+ `infrastructure/database` 工厂；`ncs_server` 不链接 SQLite | `ncs_postgres_repository_tests` 已在 PostgreSQL 18.6 实例验证初始化、重开幂等、业务流程、8 路钱包并发、小时聚合与逻辑备份；`ncs_sqlite_to_postgres` 验证 v9 全表搬运和行数校验；旧 SQLite 专属测试尚待全部替换为 PG 故障注入/契约测试 | 进行中 |
 | 领域服务 | BR-01~BR-12 | `core/application`（充电流程、钱包、身份、幂等、价格、管理员服务） | `ncs_charge_flow_service`、`ncs_security_services`、`ncs_idempotency_service` 等逐条断言 BR 约束 | 完成 |
-| 完整演示种子 | UC-D-02 | v8 迁移：5 固定站点、48 桩（6 故障）、5 行政区电价、300 用户、90 天约 9000 单/约 900 充值（固定随机种子 `20260901`） | `ncs_sqlite_seed`：五站/设备/电价/历史分布逐条断言、重开幂等、v1→v8 升级与遗留站清理 | 完成 |
+| 完整演示种子 | UC-D-02 | PostgreSQL v8 迁移：5 固定站点、48 桩（6 故障）、5 行政区电价、300 用户、90 天约 9000 单/约 900 充值（固定随机种子 `20260901`），完成后同步 identity sequence | PostgreSQL 18.6 实测 v1→v9 生成 5 站/48 桩/300 用户/8991 历史订单，在线新增用户 id > 300 且重开不重复；分布逐条断言尚待移植 | 进行中 |
+
+### PostgreSQL 审计修复验证（2026-09-15）
+
+上表 PostgreSQL 18.6 的成功记录来自修复前一轮，不作为本轮回归通过的证据。本轮修复了注销与创建流程竞争、用户/钱包锁序、OWNER 引导的生产数据库 TLS 检查、`.dump` 清理失败保留记录，以及 SQLite 导入的空目标保护、读快照和建表/数据整体回滚；同时拆分数据库配置解析，未增加行数豁免。
+
+- 构建通过：`ncs_server`、`ncs_postgres_repository_tests`、`ncs_sqlite_to_postgres`、`ncs_create_sqlite_v9_fixture`、配置/数据库安全与相关领域单元测试目标。环境为 macOS AppleClang/Homebrew Qt，并非正式 Ubuntu GCC 基线；仍有 SDK 路径与 OpenSSL deployment-target 警告。
+- 本轮 CTest 5/5 通过：`ncs_database_config`、`ncs_database_security`、`ncs_security_services`、`ncs_idempotency_service`、`ncs_charge_flow_service`。配置测试不打开 socket；安全单元测试仅验证 TLS 配置策略，实际 CA/对端证书验证仍需真实 PG 测试。
+- `git diff --check`、四个 PG 测试辅助脚本的 `bash -n`、41 个变更 C/C++ 文件的独立 clang-format 与 700 行检查通过（保留原有豁免）。`server_config.cpp` 为 681 行；`scripts/check.sh` 整体因本机 Bash 3 不支持关联数组未通过，不以独立检查代替其完整执行记录。
+- 已补测试但尚未通过本轮验收：真实 PG 并发/注销竞争、SQLite 导入失败回滚与非空目标保护、备份实际 `pg_restore`、HTTPS/REST/WebSocket/重启烟雾测试。沙箱拒绝共享内存/端口操作；提权审批因工作区额度不足被拒。完整 `ncs_server_config` 也仍受端口限制。
+- Ubuntu CI 已设 PG 18 必需工具与禁止静默跳过，但尚无本轮 CI 结果。完整 `.xls` 需求矩阵按电子表格技能只读检查后，更新写入受审批额度限制而未执行；保留原文件，矩阵同步待完成，相关条目不得标记验收完成。
 
 ## 阶段三：服务端通信（完成）
 
@@ -53,7 +63,7 @@
 | 项目 | 依据 | 产物 | 验证 | 状态 |
 | --- | --- | --- | --- | --- |
 | 管理服务端 | UC-A-01~UC-A-08 | `server/controller` 管理路由（站点/设备/价格/用户/流程/统计/备份/ML）、登录锁定与二次验证 | `ncs_admin_routes` | 完成 |
-| 管理服务端（管理员账号） | UC-A-09 | 管理员账号列表、创建（OPERATOR）、启用/停用、本人改密，及首个 OWNER 一次性引导（`--bootstrap-owner` + `NCS_ADMIN_BOOTSTRAP_KEY`） | `ncs_admin_account_routes`、`ncs_sqlite_admin_accounts`；界面已由 Web 管理控制台的「管理员账号」页接入 | 完成（后端 + Web 界面） |
+| 管理服务端（管理员账号） | UC-A-09 | 管理员账号列表、创建（OPERATOR）、启用/停用、本人改密，及首个 OWNER 一次性引导（`--bootstrap-owner` + `NCS_ADMIN_BOOTSTRAP_KEY`） | `ncs_admin_account_routes` 与 Web 管理控制台已接入；PostgreSQL 开发管理员已验证，一次性 OWNER 并发测试待补 | 进行中 |
 | 管理端界面（原 Qt 实现） | UC-A-01~UC-A-08 | 原 `apps/admin` Qt Widgets 管理端已由 Web 控制台取代，全部源码与 `ncs_admin_ui_contract`、`ncs_admin_smoke`、`ncs_admin_api_smoke` 三个用例一并移除 | 移除后 C++ 全量构建首次零错误通过，管理接口契约仍由 `ncs_admin_routes`、`ncs_admin_account_routes` 覆盖 | 已被 Web 管理端取代 |
 | Web 管理控制台 | UC-A-01~UC-A-09、NFR-U-02、NFR-U-04、NFR-U-05 | `apps/admin`（Vue 3 + Vite + ECharts）：登录与重新认证、总览（营收趋势、每日营收与订单、电桩状态与健康度）、站点与基础价格版本、充电桩与远程重启、用户与订单历史、活动流程强制释放、智能预测与 ML 任务、管理员账号、审计日志与备份运维 | `apps/admin` 的 `npm run test`（13 个文件 136 项：信封/错误码/会话、reauth 同键重试、DTO 格式化与畸形数据拒绝、列表 store、表格与 KPI 组件、路由守卫与抽屉、动效降级）与 `npm run build`；服务端侧由 `ncs_admin_routes`、`ncs_admin_account_routes` 覆盖 | 已完成真实浏览器联调：未登录被守卫重定向到 `/login`；`admin` 登录后总览渲染 10 张 KPI + 2 个 ECharts 画布，侧栏 `blur(18px)`、顶栏 `blur(16px)`、14 个内联 SVG 图标；站点/充电桩/用户/活动流程/管理员/运维各页真实取数（10/20/20/20/1 行、0 报错），预测与审计为空态；390×844 下侧栏变为离屏抽屉并可打开。截图见 `screenshots/preview/after/admin-*.png` |
 
@@ -63,7 +73,7 @@
 | --- | --- | --- | --- | --- |
 | 大屏服务端 | UC-W-02、UC-W-04 | Dashboard 路由、分析快照、30 秒原子导出 `dashboard.json` | `ncs_dashboard_ml_routes` | 完成 |
 | 大屏前端 | UC-W-01~UC-W-04 | `apps/dashboard` Vue 大屏（ECharts 按需图表、登录/会话、受权数据与恢复） | 四分辨率 UI、非空 DTO、XSS 与单位回归（见下方大屏前端接入状态） | 部分完成：设备占比口径与受权快照接口待后端接入 |
-| ML 管线 | UC-M-01~UC-M-04 | `ml/`（训练/预测/worker）+ 子进程任务管理 | `ncs_ml_process_manager`、`ncs_periodic_scheduler`、`ncs_dashboard_ml_routes` | 部分完成：任务互斥与超时已验证；30/90 天保留由 `ncs_sqlite_repository` 保留清理块验证；训练/评估质量未验证 |
+| ML 管线 | UC-M-01~UC-M-04 | `ml/`（训练/预测/worker）+ 子进程任务管理 | `ncs_ml_process_manager`、`ncs_periodic_scheduler`、`ncs_dashboard_ml_routes` | 部分完成：任务互斥与超时已验证；PostgreSQL 30/90 天保留契约和训练/评估质量尚待验证 |
 
 ### 大屏前端接入状态
 
@@ -87,15 +97,15 @@
 
 | NFR 组 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
-| NFR-C-03、NFR-C-04、NFR-M-02、NFR-M-03、NFR-S-02~S-05、NFR-R-01、NFR-R-03 | 完成 | 编译选项与并发基元、分层 grep 无 SQL、458 处参数绑定、手机号脱敏、会话终端数、WS 无敏感数据、启动恢复、备份与 7 天/4 周保留均有测试 |
+| NFR-C-03、NFR-C-04、NFR-M-02、NFR-M-03、NFR-S-02~S-05、NFR-R-01、NFR-R-03 | 待 PostgreSQL 复核 | 原 SQLite 测试仅作历史证据；本轮已修复 OWNER 引导 TLS 校验、并发锁序、注销竞争与 .dump 清理，并补隔离恢复测试，真实 PG 回归因沙箱共享内存/端口限制及额度不足导致的提权拒绝尚未运行通过 |
 | NFR-M-01 | 部分完成 | `scripts/check.sh` 行数门禁带存量例外清单，大文件待拆分 |
 | NFR-M-04 | 完成 | 结构化日志与脱敏已测；ops_log/device_command 180 天、outbox 7/30 天保留清理已实现并逐边界测试（含外键完整性门禁） |
 | NFR-S-01 | 部分完成 | PBKDF2-HMAC-SHA256（600k 次迭代、版本化摘要）代替规格首选 Argon2id，偏差已在安全基线记录 |
-| NFR-R-02 | 完成 | 打开失败、锁等待有处理与测试；损坏库三类错误路径（非 SQLite 文件、页 1 数据区破坏、截断）均断言明确报错（`ncs_sqlite_corruption`） |
+| NFR-R-02 | 进行中 | PostgreSQL 连接失败统一脱敏，锁超时已配置；认证、证书、死锁、主备切换和连接池耗尽故障注入尚待补齐，SQLite 文件破坏测试不再适用 |
 | NFR-U-01、NFR-U-02、NFR-U-03、NFR-C-01、NFR-C-02、NFR-D-01 | 部分完成 | Web 用户端断点、导航形态与失败提示由前端测试覆盖，缺真实浏览器验收截图；跨平台与路径重定位缺系统性验收；Windows CI 修复中 |
 | NFR-M-05、NFR-S-06、NFR-S-07 | 部分完成 | Agent 依赖方向、只读边界与 Key 不出服务端由 `ncs_agent_*` 与前端构建产物检查覆盖；真实凭据下的端到端验收待配置 |
 | NFR-P-06 | 未开始 | Agent 对话 60 秒预算与降级 3 秒预算尚无压测证据 |
-| NFR-P-02、NFR-P-04、NFR-P-05 | 完成 | 营收 30 天聚合微基准（`ncs_sqlite_revenue_bench`：中位 11.8ms、最差 14.3ms）；3000 账号/100 在线/50 排队/48 充电与 20rps 持续/50rps 峰值/100 WS 全量压测证据（`tests/performance/evidence/`，8/8 阈值通过） |
+| NFR-P-02、NFR-P-04、NFR-P-05 | 待 PostgreSQL 复测 | 原 SQLite 营收微基准与全量压测仅作历史参考；须在 PostgreSQL 18 上重跑 3000 账号/100 在线/50 排队/48 充电及 REST/WS 阈值后才能恢复完成状态 |
 | NFR-P-01、NFR-P-03、NFR-D-02 | 未开始 | 客户端页面刷新 CPU 与严格单机部署未验收 |
 
 ## 维护规则
