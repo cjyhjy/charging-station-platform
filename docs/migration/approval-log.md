@@ -25,7 +25,7 @@ BE-B-04、BE-B-05 的行仍需按最终审批结论逐项追溯补齐；旧行�
 | A-01 | 认证和用户账户 | APPROVED（历史 P0） | Go P0 认证、会话和权限已交付 |
 | A-02 | 站点和充电桩 | APPROVED（历史 P0） | Go P0 查询接口已交付 |
 | A-03 | 订单和充电流程 | APPROVED（历史 P0） | Go P0 订单与 START/STOP 闭环已交付 |
-| A-04 | 钱包、账务和支付 | NOT_STARTED | 下一项业务开发 |
+| A-04 | 钱包、账务和支付 | APPROVED | APPROVED | `c54c303`；四端点契约、退款语义与 WalletStore 已审查通过，B-07 持久化收口已合入集成线 |
 | A-05 | 评价、申诉和售后 | NOT_STARTED | 依赖 A-03、A-06 |
 | A-06 | 管理端扩展业务 | NOT_STARTED | 依赖 A-01 至 A-04 |
 | A-07 | 导航、统计、ML、WebSocket | NOT_STARTED | 扩展阶段 |
@@ -35,7 +35,7 @@ BE-B-04、BE-B-05 的行仍需按最终审批结论逐项追溯补齐；旧行�
 | B-04 | Outbox Publisher | APPROVED（历史 P0） | Publisher 和单活机制已交付 |
 | B-05 | Worker 和设备事件 | APPROVED（历史 P0） | Worker、设备回执和重试死信已交付 |
 | B-06 | 部署、联调和可观测性 | NOT_STARTED | PR #39 合入 develop 后开工 |
-| B-07 | 钱包/账务数据支撑 | NOT_STARTED | 为 A-04 新增，不重复开发 B-02 |
+| B-07 | 钱包/账务数据支撑 | APPROVED（条件合入） | APPROVED | `2ed84a2`；P0/P1 并发与窗口外幂等修复、真实 PG 矩阵和 schema 契约测试通过；需部署环境持续验证测试库互斥方案 |
 
 边界裁决：
 

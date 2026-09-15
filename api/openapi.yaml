@@ -15,6 +15,7 @@ tags:
   - name: stations
   - name: chargers
   - name: orders
+  - name: wallet
   - name: admin
   - name: internal
 paths:
@@ -704,7 +705,87 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /wallet:
+    get:
+      tags: [wallet]
+      operationId: getWallet
+      responses:
+        '200':
+          description: Current wallet balance
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
+  /wallet/top-up:
+    post:
+      tags: [wallet]
+      operationId: topUpWallet
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amountCent]
+              properties:
+                amountCent: { type: integer, format: int64, minimum: 1, maximum: 1000000 }
+      responses:
+        '200':
+          description: Wallet credited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /wallet/transactions:
+    get:
+      tags: [wallet]
+      operationId: listWalletTransactions
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [TOP_UP, CHARGE, REFUND, ADJUSTMENT]
+      responses:
+        '200':
+          description: Wallet ledger page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /admin/orders/{orderNo}/refund:
+    post:
+      tags: [admin]
+      operationId: refundOrder
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/OrderNo'
+      responses:
+        '200':
+          description: Refund applied or replayed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 components:
   securitySchemes:
     bearerAuth:
