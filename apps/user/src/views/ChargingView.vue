@@ -256,6 +256,10 @@ function goHome() {
         </template>
 
         <template v-else-if="status === 40">
+          <div class="charge-energy" aria-hidden="true">
+            <span>已充电量</span>
+            <strong>{{ formatEnergy(progress?.energyMwh ?? 0) }}</strong>
+          </div>
           <ul class="metric-list" data-testid="charging-progress">
             <li>
               <span>已充电量</span>
