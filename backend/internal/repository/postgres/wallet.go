@@ -100,12 +100,6 @@ func (s *WalletStore) replayAppliedCredit(tx *sql.Tx, ctx context.Context, scope
 	return view, nil
 }
 
-// errOrderNotFound is the B-line half of the refund contract's 404: the adapter can tell a missing order
-// apart from an order with nothing to refund, and this error carries that distinction. Mapping it to a
-// 404 response is one case in internal/wallet's error writer, which is an A-line file - see the module
-// review for the two-line patch and the open decision.
-var errOrderNotFound = errors.New("postgres: refund order does not exist")
-
 func (s *WalletStore) finalizeWalletIdempotency(tx *sql.Tx, ctx context.Context, scope, key string, body []byte) error {
 	_, err := tx.ExecContext(ctx, `UPDATE idempotency_records
 SET status = 'SUCCEEDED', response_code = 0, response_body = $3, updated_at = CURRENT_TIMESTAMP
@@ -378,9 +372,10 @@ func (s *WalletStore) RefundOrder(ctx context.Context, command wallet.RefundComm
 	err = tx.QueryRowContext(ctx, `SELECT id, user_id, paid_cents, status, payment_status FROM charging_orders
 WHERE order_no = $1 FOR UPDATE`, command.OrderNo).Scan(&orderID, &userID, &paidCents, &orderStatus, &paymentStatus)
 	if errors.Is(err, sql.ErrNoRows) {
-		// The order does not exist. This is deliberately distinct from "nothing to refund": the caller
-		// cannot fix it by looking at the order state, which is why the contract asks for 404 here.
-		return wallet.WalletView{}, errOrderNotFound
+		// The order does not exist. wallet.ErrOrderNotFound is deliberately distinct from
+		// wallet.ErrOrderNotRefundable: the caller cannot fix a missing order by looking at the order
+		// state, which is why the contract asks for 404 here.
+		return wallet.WalletView{}, wallet.ErrOrderNotFound
 	}
 	if err != nil {
 		return wallet.WalletView{}, err
