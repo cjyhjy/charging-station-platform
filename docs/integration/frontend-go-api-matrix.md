@@ -132,9 +132,52 @@ login ok as the seeded user, 1 station(s) visible
 
 `common_env` 没有 `NCS_CHARGER_GATEWAY_TOKEN`，而 `-migrate-only` 跑的就是 API 二进制、启动即校验配置 → 空库上迁移门禁直接失败（`NCS_CHARGER_GATEWAY_TOKEN is required`），脚本第 20 行文档承诺的默认值从未生效。已把令牌并入 `common_env`，由上面的实测结果确认。
 
-## 5. 下一步（B 线）
+## 5. 本轮实测（B-03 部署与 Nginx / B-04 WSL 本地栈）
 
-1. **D-1**：给 OpenAPI 的两个探针操作加 `servers` 覆盖，并加一条规格校验（见第 6 节门禁）。
+一次性库 `ncs_fe_nginx` 从空库起栈，命令：
+
+```bash
+NCS_POSTGRES_DSN=postgres://.../ncs_fe_nginx bash backend/scripts/local-stack.sh --seed --with-nginx
+```
+
+原始输出（节选）：
+
+```text
+=== migration gate ===        level=INFO msg="database migrations applied" count=9
+=== seed development data into ncs_fe_nginx ===
+=== start mock gateway, API, publisher and worker ===
+=== smoke ===                 login ok as the seeded user, 1 station(s) visible
+=== render and start nginx ===  nginx: configuration file ... syntax is ok
+                                configuration file ... test is successful
+                                nginx: static=200 /healthz via proxy=200
+=== local stack is up ===
+```
+
+随后逐条核对 B-03 的验收项（经 Nginx，自签证书）：
+
+| 验收项 | 实测 |
+| ------ | ---- |
+| H5 静态文件目录 | `GET / -> 200` |
+| HTTP → HTTPS 301 | `GET http://localhost:8124/ -> 301 Location=https://localhost/` |
+| `/healthz`、`/readyz` 经反代 | 均 `200` |
+| `/api/` 反向代理 | 经 Nginx 登录成功（token 43 字符），`/api/v1/stations`、`/api/v1/wallet`、`/api/v1/orders` 均 `200` |
+| TLS 自签本地验证 | 全程 `curl -k` 通过（证书由 `local-stack.sh` 现场生成） |
+| 请求 ID 透传 | 发 `X-Request-ID: fedcba9876543210`，响应回显 `X-Request-Id: fedcba9876543210` |
+| 设备回执来源限制 | 渲染出的 `location = /api/v1/internal/charger-events` 为 `allow 127.0.0.1; deny all;` |
+| metrics/readyz 内网限制 | `location = /metrics`、`location = /readyz` 同样 `allow 127.0.0.1; deny all;`（本机回环属允许段故为 200；拒绝路径由 `nginx-render.sh --drill` 证明） |
+| 不向前端暴露设备网关令牌 | `dev-gateway-token` 未出现在渲染配置、nginx 访问/错误日志、API/Worker 日志中（`grep` 计数 0） |
+
+清理（任务文档 B-04：测试库必须一次性并在结束后删除）：
+
+```text
+一次性库 ncs_fe_repro、ncs_fe_nginx → 已 DROP（pg_database 查询结果为 none）
+8080/8123/8124 端口 → 已释放        栈进程 → 无残留
+（/tmp/ncs-stack-*/ 保留日志作为证据）
+```
+
+## 6. 下一步（B 线）
+
+1. ~~**D-1**：给 OpenAPI 的两个探针操作加 `servers` 覆盖~~ **已完成**（见 D-1），并已核对解析结果；后续把这条解析检查纳入规格门禁脚本。
 2. **B-05 联调脚本**：把"创建/清理一次性库 + 迁移 + seed + 起栈 + 生成 token + 核心 smoke + 检查日志是否泄露密钥 + 停止清理"做成一条可重复执行的入口（现在 `local-stack.sh` 需要外部提供 DSN，且停留在前台）。
 3. **B-02 核心接口确认**：为 18 个核心接口逐项补齐 handler/错误/权限/真实 PG·Redis 测试与 OpenAPI 对照记录（多数已有测试，本项工作是**逐项登记与补齐缺口**，不是重写）。
 4. **B-03 部署与 Nginx**：H5 静态目录、`/api/` 反代、301、自签 TLS、`/healthz`、`/readyz`、`/metrics`、请求 ID 透传、回执来源限制、metrics/readyz 内网限制、令牌不外泄。
