@@ -57,7 +57,7 @@ func (h *Handlers) Register(server interface {
 	server.Register("/api/v1/admin/orders", h.auth.RequireRole(auth.RoleAdmin, h.listOrders))
 	server.Register("/api/v1/admin/users/{userId}", h.auth.RequireRole(auth.RoleAdmin, h.userDetail))
 	server.Register("/api/v1/admin/users/{userId}/transactions", h.auth.RequireRole(auth.RoleAdmin, h.userLedger))
-	server.Register("/api/v1/admin/chargers/{chargerId}/tariff", h.auth.RequireAdminWrite(h.tariffRoutes))
+	server.Register("/api/v1/admin/chargers/{chargerId}/tariff", h.tariffRoutes)
 	server.Register("/api/v1/admin/chargers/{chargerId}/release", h.auth.RequireAdminWrite(h.forceRelease))
 	server.Register("/api/v1/admin/audit", h.auth.RequireRole(auth.RoleAdmin, h.listAudit))
 }
@@ -65,12 +65,15 @@ func (h *Handlers) Register(server interface {
 // identityFrom is enforced by the middleware; every admin handler needs the
 // acting administrator for audit trails and idempotency scopes.
 // tariffRoutes dispatches GET and PUT on /admin/chargers/{chargerId}/tariff.
+// GET is readable by every admin role (SRS: 审计员可读); PUT requires the
+// write-capable roles — the two policies are applied per branch because one
+// route pattern serves both methods.
 func (h *Handlers) tariffRoutes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		h.getTariff(w, r)
+		h.auth.RequireRole(auth.RoleAdmin, h.getTariff)(w, r)
 	case http.MethodPut:
-		h.updateTariff(w, r)
+		h.auth.RequireAdminWrite(h.updateTariff)(w, r)
 	default:
 		w.Header().Set("Allow", "GET, PUT")
 		httpapi.WriteError(w, r, http.StatusMethodNotAllowed, httpapi.CodeMethodNotAllowed, "method not allowed", nil)
@@ -560,6 +563,8 @@ func writePage(w http.ResponseWriter, r *http.Request, status int, result any) {
 
 func writeAdminError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, ErrUserNotFound):
+		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeResourceNotFound, "user not found", nil)
 	case errors.Is(err, order.ErrIdempotencyConflict), errors.Is(err, order.ErrIdempotencyInProgress):
 		// The contract requires 409 for a reused idempotency key.
 		httpapi.WriteError(w, r, http.StatusConflict, codeIdempotencyConflict, "idempotency key conflict", nil)

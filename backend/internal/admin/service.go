@@ -53,6 +53,8 @@ var (
 	ErrInvalidTariff = errors.New("admin: invalid tariff or target status")
 	// ErrInvalidLedgerFilter reports a malformed ledger or audit query.
 	ErrInvalidLedgerFilter = errors.New("admin: invalid ledger or audit filter")
+	// ErrUserNotFound maps to 404 NOT_FOUND for a missing user.
+	ErrUserNotFound = errors.New("admin: user not found")
 	// ErrInvalidUserStatus reports a status query value outside 0/1.
 	ErrInvalidUserStatus = errors.New("admin: invalid user status")
 	// ErrChargerUnavailable maps to 409 CHARGER_UNAVAILABLE: the charger is
@@ -316,16 +318,28 @@ func (s *Service) UpdateTariff(ctx context.Context, update TariffUpdate) (Tariff
 	if update.ElectricityPriceCent < 0 || update.ServicePriceCent < 0 {
 		return TariffView{}, ErrInvalidTariff
 	}
+	// The off-peak triple (price, window start, window end) is either fully
+	// absent (flat tariff) or fully present and valid — partial windows are
+	// rejected so a tariff can never end up with a dangling boundary.
+	offPeakFields := 0
 	if update.OffPeakPriceCent != nil {
-		if *update.OffPeakPriceCent < 0 {
-			return TariffView{}, ErrInvalidTariff
-		}
-		if update.OffPeakStartHour == nil || update.OffPeakEndHour == nil ||
+		offPeakFields++
+	}
+	if update.OffPeakStartHour != nil {
+		offPeakFields++
+	}
+	if update.OffPeakEndHour != nil {
+		offPeakFields++
+	}
+	if offPeakFields == 3 {
+		if *update.OffPeakPriceCent < 0 ||
 			*update.OffPeakStartHour < 0 || *update.OffPeakStartHour > 23 ||
 			*update.OffPeakEndHour < 0 || *update.OffPeakEndHour > 23 ||
 			*update.OffPeakStartHour == *update.OffPeakEndHour {
 			return TariffView{}, ErrInvalidTariff
 		}
+	} else if offPeakFields != 0 {
+		return TariffView{}, ErrInvalidTariff
 	}
 	return s.store.UpdateTariff(ctx, update)
 }

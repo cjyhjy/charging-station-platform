@@ -1,7 +1,11 @@
 package postgres
 
 import (
+	"database/sql"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/heguangV/charging-station-platform/backend/internal/admin"
 	"github.com/heguangV/charging-station-platform/backend/internal/order"
@@ -157,5 +161,136 @@ func TestAdminUserAndOrderLists(t *testing.T) {
 	}
 	if orders.Items[0].PaymentStatus != "PENDING" {
 		t.Fatalf("payment status = %q", orders.Items[0].PaymentStatus)
+	}
+}
+
+func TestAdminForceReleaseIdempotencyAndBR11(t *testing.T) {
+	db, ctx := integrationDB(t)
+	store, err := NewAdminStore(db)
+	if err != nil {
+		t.Fatalf("NewAdminStore() error = %v", err)
+	}
+	suffix := uniqueSuffix(t)
+	userA, _, _, _, chargerA := orderFlowFixture(t, db, ctx, suffix)
+
+	// STARTING order: force release with the same key twice.
+	created, err := orderStore(t, db).CreateOrder(ctx, order.CreateOrderCommand{
+		UserID: userA, ChargerID: chargerA, IdempotencyKey: "fr-create-" + suffix, RequestHash: "h", TraceID: "t",
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder() error = %v", err)
+	}
+	if _, err := orderStore(t, db).StartCharging(ctx, order.TransitionCommand{
+		UserID: userA, OrderNo: created.OrderNo, IdempotencyKey: "fr-start-" + suffix, RequestHash: "h", TraceID: "t"}); err != nil {
+		t.Fatalf("StartCharging() error = %v", err)
+	}
+
+	command := admin.ForceReleaseCommand{
+		AdminID: 9, ChargerID: chargerA, Reason: "违规占位释放", TargetStatus: "IDLE",
+		IdempotencyKey: "fr-release-" + suffix, RequestHash: "h", TraceID: "trace-fr",
+	}
+	first, err := store.ForceRelease(ctx, command)
+	if err != nil {
+		t.Fatalf("ForceRelease() error = %v", err)
+	}
+	replay, err := store.ForceRelease(ctx, command)
+	if err != nil || replay.OrderNo != first.OrderNo {
+		t.Fatalf("replay = %#v, %v", replay, err)
+	}
+
+	// One order cancelled, one audit row (replay must not duplicate).
+	var orderCount, auditCount int64
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM charging_orders WHERE charger_id = $1 AND status = 'CANCELLED'`, chargerA).Scan(&orderCount); err != nil {
+		t.Fatalf("orders: %v", err)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM operation_logs WHERE action = 'charger.force-release' AND resource_id = $1`,
+		strconvFormatInt64(chargerA)).Scan(&auditCount); err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	if orderCount != 1 || auditCount != 1 {
+		t.Fatalf("orders = %d audits = %d, want 1/1", orderCount, auditCount)
+	}
+
+	// Charging orders are not releasable (BR-11): drive a second order into
+	// CHARGING and verify the 409 mapping error.
+	if _, err := orderStore(t, db).CreateOrder(ctx, order.CreateOrderCommand{
+		UserID: userA, ChargerID: chargerA, IdempotencyKey: "fr-create2-" + suffix, RequestHash: "h", TraceID: "t",
+	}); err != nil {
+		t.Fatalf("second create: %v", err)
+	}
+	if _, err := orderStore(t, db).StartCharging(ctx, order.TransitionCommand{
+		UserID: userA, OrderNo: "", IdempotencyKey: "fr-start2-" + suffix, RequestHash: "h", TraceID: "t",
+	}); err == nil {
+		t.Fatal("expected start for second order to fail without order number") // start requires order no; skip path
+	}
+	// Drive it properly: fetch the new order number.
+	var secondNo string
+	if err := db.QueryRowContext(ctx,
+		`SELECT order_no FROM charging_orders WHERE user_id = $1 AND status = 'CREATED' ORDER BY id DESC LIMIT 1`,
+		userA).Scan(&secondNo); err != nil {
+		t.Fatalf("second order: %v", err)
+	}
+	if _, err := orderStore(t, db).StartCharging(ctx, order.TransitionCommand{
+		UserID: userA, OrderNo: secondNo, IdempotencyKey: "fr-start3-" + suffix, RequestHash: "h", TraceID: "t"}); err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	if _, err := orderStore(t, db).ConfirmStart(ctx, order.ConfirmStartCommand{
+		OrderNo: secondNo, ChargerID: chargerA, OccurredAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("second ConfirmStart() error = %v", err)
+	}
+	_, err = store.ForceRelease(ctx, admin.ForceReleaseCommand{
+		AdminID: 9, ChargerID: chargerA, Reason: "充电中不放行", TargetStatus: "IDLE",
+		IdempotencyKey: "fr-release2-" + suffix, RequestHash: "h", TraceID: "t",
+	})
+	if !errors.Is(err, admin.ErrInvalidStateTransition) {
+		t.Fatalf("charging release error = %v, want ErrInvalidStateTransition", err)
+	}
+}
+
+func orderStore(t *testing.T, db *sql.DB) *OrderStore {
+	t.Helper()
+	store, err := NewOrderStore(db)
+	if err != nil {
+		t.Fatalf("order store: %v", err)
+	}
+	return store
+}
+
+func TestAdminTariffUpdateAuditContainsOffPeak(t *testing.T) {
+	db, ctx := integrationDB(t)
+	store, err := NewAdminStore(db)
+	if err != nil {
+		t.Fatalf("NewAdminStore() error = %v", err)
+	}
+	suffix := uniqueSuffix(t)
+	_, _, stationA, _, chargerA := orderFlowFixture(t, db, ctx, suffix)
+	_ = stationA
+
+	offPeak := int64(60)
+	startHour := int16(23)
+	endHour := int16(7)
+	updated, err := store.UpdateTariff(ctx, admin.TariffUpdate{
+		AdminID: 9, ChargerID: chargerA,
+		ElectricityPriceCent: 130, ServicePriceCent: 50,
+		OffPeakPriceCent: &offPeak, OffPeakStartHour: &startHour, OffPeakEndHour: &endHour,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTariff() error = %v", err)
+	}
+	if updated.OffPeakPriceCent == nil || *updated.OffPeakPriceCent != 60 {
+		t.Fatalf("updated off-peak = %#v", updated.OffPeakPriceCent)
+	}
+
+	var payload string
+	if err := db.QueryRowContext(ctx,
+		`SELECT payload FROM operation_logs WHERE action = 'tariff.update' AND resource_id = $1 ORDER BY id DESC LIMIT 1`,
+		strconvFormatInt64(chargerA)).Scan(&payload); err != nil {
+		t.Fatalf("audit payload: %v", err)
+	}
+	for _, field := range []string{"offPeakPrice", "offPeakStartHour", "offPeakEndHour"} {
+		if !strings.Contains(payload, field) {
+			t.Fatalf("audit payload missing %s: %s", field, payload)
+		}
 	}
 }
