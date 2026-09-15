@@ -570,6 +570,8 @@ void applyFullDemoSeed(QSqlDatabase* database, const int64_t anchorAt)
                     "charger_code,status,started_at,version,created_at) "
                     "VALUES(:p1,:p2,:p3,:p4,:p5,:p6,:p7,:p8,:p9,"
                     ":p10)");
+    // 申诉/审核四列由 v10 迁移加入，且种子在 v8 阶段执行——此处不能显式列出这些列，
+    // 否则会在 v10 之前引用尚未创建的列。它们全部走列默认值（'' 与 NULL）。
     Stmt insertOrder(
         database,
         "INSERT INTO charging_order(order_no,flow_no,user_id,station_id,station_name,"

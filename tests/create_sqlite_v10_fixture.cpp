@@ -34,7 +34,7 @@ int main(int argc, char** argv)
     QCoreApplication application(argc, argv);
     if (argc < 2 || argc > 3)
     {
-        std::cerr << "usage: ncs_create_sqlite_v9_fixture <path>\n";
+        std::cerr << "usage: ncs_create_sqlite_v10_fixture <path>\n";
         return 2;
     }
     try

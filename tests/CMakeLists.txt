@@ -32,15 +32,15 @@ set_tests_properties(ncs_postgres_repository PROPERTIES
     SKIP_RETURN_CODE 77
 )
 
-add_executable(ncs_create_sqlite_v9_fixture create_sqlite_v9_fixture.cpp)
-set_target_properties(ncs_create_sqlite_v9_fixture PROPERTIES
+add_executable(ncs_create_sqlite_v10_fixture create_sqlite_v10_fixture.cpp)
+set_target_properties(ncs_create_sqlite_v10_fixture PROPERTIES
     AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
-target_link_libraries(ncs_create_sqlite_v9_fixture PRIVATE
+target_link_libraries(ncs_create_sqlite_v10_fixture PRIVATE
     ncs::infrastructure_sqlite SQLite3::SQLite3 Qt6::Core)
-ncs_set_project_warnings(ncs_create_sqlite_v9_fixture)
+ncs_set_project_warnings(ncs_create_sqlite_v10_fixture)
 add_test(NAME ncs_sqlite_to_postgres
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_sqlite_to_postgres_test.sh
-        $<TARGET_FILE:ncs_create_sqlite_v9_fixture>
+        $<TARGET_FILE:ncs_create_sqlite_v10_fixture>
         $<TARGET_FILE:ncs_sqlite_to_postgres>
         ${PROJECT_SOURCE_DIR}/infrastructure/postgres/migrations)
 set_tests_properties(ncs_sqlite_to_postgres PROPERTIES

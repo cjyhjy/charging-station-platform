@@ -140,9 +140,10 @@ void PostgresRepository::addFlowEvent(const FlowEvent& value)
                              "INSERT INTO outbox_event(event_type,aggregate_type,aggregate_id,"
                              "from_status,to_status,reason_code,created_at,available_at) "
                              "VALUES(?,?,?,?,?,?,?,?)");
-            outbox.bind(1, value.toStatus == static_cast<int>(FlowStatus::Completed)
-                               ? std::string_view("order.settled")
-                               : std::string_view("flow.updated"));
+            // 事件类型必须走 core 的统一映射：结算目标从 60 改为 100 后，
+            // 只特判 Completed 会漏掉 order.ready / order.appealed，
+            // 投递器按事件类型筛选，漏映射会导致通知被静默丢弃。
+            outbox.bind(1, flowEventType(value.toStatus, value.reasonCode));
             outbox.bind(2, std::string_view("charging_flow"));
             outbox.bind(3, value.flowNo);
             outbox.bind(4, value.fromStatus);

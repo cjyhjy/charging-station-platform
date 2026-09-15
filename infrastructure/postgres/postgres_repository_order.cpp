@@ -16,7 +16,7 @@ void PostgresRepository::addOrder(const ChargingOrder& value)
                 {
                     const std::string sql =
                         std::string("INSERT INTO charging_order(") + orderColumns +
-                        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+                        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
                     Statement insert(database, sql.c_str());
                     bindOrder(insert, value);
                     insert.execute();
@@ -93,7 +93,8 @@ void PostgresRepository::saveOrder(const ChargingOrder& value)
                         "code=?,charger_type=?,electricity_price=?,service_price=?,power_watt=?"
                         ",time_scale=?,target_amount_cent=?,status=?,created_at=?,started_at=?,"
                         "ended_at=?,energy_mwh=?,amount_cent=?,paid_cent=?,debt_added_cent=?,"
-                        "balance_after_cent=?,debt_after_cent=?,settled_at=? WHERE order_no=?");
+                        "balance_after_cent=?,debt_after_cent=?,settled_at=?,appeal_reason=?,"
+                        "appeal_at=?,reviewed_by=?,reviewed_at=? WHERE order_no=?");
                     update.bind(1, value.flowNo);
                     update.bind(2, value.userId);
                     update.bind(3, value.stationId);
@@ -117,7 +118,11 @@ void PostgresRepository::saveOrder(const ChargingOrder& value)
                     update.bind(21, value.balanceAfterCent);
                     update.bind(22, value.debtAfterCent);
                     bindOptional(update, 23, value.settledAt);
-                    update.bind(24, value.orderNo);
+                    update.bind(24, value.appealReason);
+                    bindOptional(update, 25, value.appealAt);
+                    bindOptional(update, 26, value.reviewedBy);
+                    bindOptional(update, 27, value.reviewedAt);
+                    update.bind(28, value.orderNo);
                     update.execute();
                 });
 }

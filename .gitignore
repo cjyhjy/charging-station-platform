@@ -56,6 +56,7 @@ node_modules/
 /apps/user/dist/
 /apps/admin/node_modules/
 /apps/admin/dist/
+.vite/
 .pnpm-store/
 __pycache__/
 *.py[cod]

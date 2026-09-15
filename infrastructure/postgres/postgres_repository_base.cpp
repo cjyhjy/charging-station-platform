@@ -39,7 +39,7 @@ struct Migration
     const char* file;
 };
 
-constexpr std::array<Migration, 9> migrations{{
+constexpr std::array<Migration, 10> migrations{{
     {1, "initial-user-charging", "ncs-pg-v1-initial", "V001__initial_user_charging.sql"},
     {2, "admin-control-plane", "ncs-pg-v2-admin", "V002__admin_control_plane.sql"},
     {3, "charger-restarting-state", "ncs-pg-v3-restarting", "V003__charger_restarting_state.sql"},
@@ -50,6 +50,7 @@ constexpr std::array<Migration, 9> migrations{{
      "V007__order_analytics_indexes.sql"},
     {8, "full-demo-seed", "ncs-pg-v8-full-demo-seed", "V008__full_demo_seed.sql"},
     {9, "order-review", "ncs-pg-v9-order-review", "V009__order_review.sql"},
+    {10, "order-confirmation", "ncs-v10-order-confirmation", "V010__order_confirmation.sql"},
 }};
 
 std::string readMigration(const std::string& directory, const char* file)

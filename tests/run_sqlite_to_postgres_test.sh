@@ -43,7 +43,7 @@ NCS_DATABASE_MIGRATIONS="${migrations_directory}" \
        (SELECT COUNT(*) FROM station)=5 AND
        (SELECT COUNT(*) FROM charger)=48 AND
        (SELECT COUNT(*) FROM charging_order)>8000 AND
-       (SELECT checksum FROM schema_version WHERE version=9)='ncs-pg-v9-order-review'
+       (SELECT checksum FROM schema_version WHERE version=10)='ncs-v10-order-confirmation'
      THEN 'ok' ELSE 'bad' END" | grep -qx ok
 
 # A migrated target must never be overwritten, even when all users are demo users.

@@ -203,7 +203,7 @@ constexpr const char* orderColumns =
     "status,created_at,"
     "started_at,ended_at,energy_mwh,amount_cent,paid_cent,debt_added_cent,"
     "balance_after_cent,"
-    "debt_after_cent,settled_at";
+    "debt_after_cent,settled_at,appeal_reason,appeal_at,reviewed_by,reviewed_at";
 
 inline ChargingOrder readOrder(Statement& statement)
 {
@@ -232,6 +232,10 @@ inline ChargingOrder readOrder(Statement& statement)
     value.balanceAfterCent = statement.integer(21);
     value.debtAfterCent = statement.integer(22);
     value.settledAt = optionalInteger(statement, 23);
+    value.appealReason = statement.text(24);
+    value.appealAt = optionalInteger(statement, 25);
+    value.reviewedBy = optionalInteger(statement, 26);
+    value.reviewedAt = optionalInteger(statement, 27);
     return value;
 }
 
@@ -261,6 +265,10 @@ inline void bindOrder(Statement& statement, const ChargingOrder& order)
     statement.bind(22, order.balanceAfterCent);
     statement.bind(23, order.debtAfterCent);
     bindOptional(statement, 24, order.settledAt);
+    statement.bind(25, order.appealReason);
+    bindOptional(statement, 26, order.appealAt);
+    bindOptional(statement, 27, order.reviewedBy);
+    bindOptional(statement, 28, order.reviewedAt);
 }
 
 inline std::vector<Role> readAdminRoles(QSqlDatabase* database, const std::int64_t adminId)

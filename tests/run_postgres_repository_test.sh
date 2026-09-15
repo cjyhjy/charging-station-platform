@@ -39,7 +39,7 @@ archives=("${backup_dir}"/*.dump)
 "${pg_bin}/pg_restore" --exit-on-error --no-owner --no-privileges \
     -h 127.0.0.1 -p "${port}" -d ncs_restore_test "${archives[0]}"
 "${pg_bin}/psql" -h 127.0.0.1 -p "${port}" -d ncs_restore_test -v ON_ERROR_STOP=1 -Atqc \
-    "SELECT (SELECT COUNT(*) FROM schema_version)=9 AND
+    "SELECT (SELECT COUNT(*) FROM schema_version)=10 AND
             (SELECT COUNT(*) FROM charging_order)>8000 AND
             EXISTS(SELECT 1 FROM user_account u JOIN wallet_account w ON w.user_id=u.id
                    WHERE u.username='postgres_contract_user' AND w.balance_cent=u.balance_cent)

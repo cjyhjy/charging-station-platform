@@ -1,4 +1,4 @@
-// One-shot SQLite v9 to PostgreSQL v9 data migration utility. The target must be a
+// One-shot SQLite v10 to PostgreSQL v10 data migration utility. The target must be a
 // empty PostgreSQL database. Schema creation and import commit as one transaction.
 #include "infrastructure/postgres/postgres_config.h"
 #include "infrastructure/postgres/postgres_migrations.h"
@@ -183,7 +183,7 @@ Options parse(int argc, char** argv)
     }
     if (options.sqlitePath.empty() || !options.confirmed)
         throw std::invalid_argument(
-            "usage: ncs_sqlite_to_postgres --sqlite <v9.db> --confirm-fresh-target "
+            "usage: ncs_sqlite_to_postgres --sqlite <v10.db> --confirm-fresh-target "
             "[PostgreSQL options]; password is read only from NCS_DATABASE_PASSWORD");
     if (!std::filesystem::is_regular_file(options.sqlitePath))
         throw std::invalid_argument("SQLite source is not a regular file");
@@ -201,9 +201,9 @@ void openSource(QSqlDatabase& database, const Options& options)
     QSqlQuery version(database);
     if (!version.exec(QStringLiteral(
             "SELECT version,checksum FROM schema_version ORDER BY version DESC LIMIT 1")) ||
-        !version.next() || version.value(0).toInt() != 9 ||
-        version.value(1).toString() != QStringLiteral("ncs-v9-order-review"))
-        throw std::runtime_error("SQLite source must be a verified NCS v9 database");
+        !version.next() || version.value(0).toInt() != 10 ||
+        version.value(1).toString() != QStringLiteral("ncs-v10-order-confirmation"))
+        throw std::runtime_error("SQLite source must be a verified NCS v10 database");
     QSqlQuery foreignKeys(database);
     if (!foreignKeys.exec(QStringLiteral("PRAGMA foreign_key_check")))
         throw std::runtime_error(errorText(foreignKeys));
@@ -404,7 +404,7 @@ int main(int argc, char** argv)
         openSource(source.get(), options);
         openTarget(target.get(), options);
         migrate(source.get(), target.get(), options.postgres);
-        std::cout << "SQLite v9 data migrated to PostgreSQL v9 successfully\n";
+        std::cout << "SQLite v10 data migrated to PostgreSQL v10 successfully\n";
         return 0;
     }
     catch (const std::exception& error)

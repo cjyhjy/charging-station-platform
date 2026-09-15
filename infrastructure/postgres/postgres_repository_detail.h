@@ -35,8 +35,8 @@ namespace ncs::infrastructure::postgres::detail
 
 using namespace ncs::core::application;
 
-constexpr int kLatestSchemaVersion = 9;
-constexpr const char* kLatestSchemaChecksum = "ncs-pg-v9-order-review";
+constexpr int kLatestSchemaVersion = 10;
+constexpr const char* kLatestSchemaChecksum = "ncs-v10-order-confirmation";
 
 inline bool durableWalSettings(const std::string_view fsync, const std::string_view fullPageWrites,
                                const std::string_view synchronousCommit)
