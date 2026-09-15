@@ -25,9 +25,9 @@ BE-B-04、BE-B-05 的行仍需按最终审批结论逐项追溯补齐；旧行�
 | A-01 | 认证和用户账户 | APPROVED（历史 P0） | Go P0 认证、会话和权限已交付 |
 | A-02 | 站点和充电桩 | APPROVED（历史 P0） | Go P0 查询接口已交付 |
 | A-03 | 订单和充电流程 | APPROVED（历史 P0） | Go P0 订单与 START/STOP 闭环已交付 |
-| A-04 | 钱包、账务和支付 | APPROVED | APPROVED | c54c303；四端点契约、退款语义与 B-07 持久化收口已审查通过 |
+| A-04 | 钱包、账务和支付 | APPROVED | c54c303；四端点契约、退款语义与 B-07 持久化收口已审查通过 |
 | A-05 | 评价、申诉和售后 | NOT_STARTED | 依赖 A-03、A-06 |
-| A-06 | 管理端扩展业务 | APPROVED | APPROVED | 935801e；六项修复、真实 PG 集成测试及 10 个端点契约登记通过 |
+| A-06 | 管理端扩展业务 | APPROVED | 935801e；六项修复、真实 PG 集成测试及 10 个端点契约登记通过 |
 | A-07 | 导航、统计、ML、WebSocket | NOT_STARTED | 扩展阶段 |
 | B-01 | Go API 和公共配置 | APPROVED（历史 P0） | 基础能力已交付 |
 | B-02 | PostgreSQL 数据基础 | APPROVED（历史 P0） | 基础连接、迁移、仓储和事务已交付 |
