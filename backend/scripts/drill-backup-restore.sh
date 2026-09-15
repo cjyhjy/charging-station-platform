@@ -191,7 +191,10 @@ cat <<REPORT
 
 target                        approved        measured
 PostgreSQL backup retention   30 days         ${retention_days} days
-PostgreSQL RPO                <= 15 minutes   ${rpo_target_minutes} minutes (the dump interval; a row written after the dump is confirmed absent)
+PostgreSQL RPO                <= 15 minutes   target only - this drill measures the dump interval, not the WAL archive
+                                             (a row written after the dump is confirmed absent, so the loss window of the DUMP
+                                             is one backup interval; the 15-minute RPO is delivered by WAL archiving and is
+                                             measured by pitr-drill.sh, which recovers to a target inside the 5..15 minute band)
 PostgreSQL RTO                <= 60 minutes   ${rto_minutes} minutes (restore of ${restored_orders} orders, schema version ${restored_version})
 Redis                         recoverable     no unique business fact is stored only in Redis
 ledger and orders             from PostgreSQL  restored and asserted row by row

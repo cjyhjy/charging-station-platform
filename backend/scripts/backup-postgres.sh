@@ -114,5 +114,5 @@ if [[ "${weekly}" == "true" ]]; then
 else
     echo "retention: local dumps kept ${retention_days} days (the RPO is bounded by the WAL archive, not by this dump)"
 fi
-echo "verify:   backend/scripts/verify-backup.sh --dump ${target}"
+echo "verify:   backend/scripts/verify-backup.sh --dir ${backup_dir}   (checks the newest dumps in that directory)"
 echo "remote:   backend/scripts/push-backup-remote.sh --dump ${target}   (encrypts, then uploads; 30-day retention at the destination)"
