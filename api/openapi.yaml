@@ -1,0 +1,1238 @@
+openapi: 3.0.3
+info:
+  title: Charging Station Platform API
+  version: 0.1.0
+  description: |
+    P0 contract for the H5 client and Go backend migration.
+    PostgreSQL is the source of truth. Redis and Redis Streams are internal
+    infrastructure and are never exposed to the browser.
+servers:
+  - url: /api/v1
+    description: Nginx reverse-proxy entrypoint
+tags:
+  - name: system
+  - name: auth
+  - name: stations
+  - name: chargers
+  - name: orders
+  - name: admin
+  - name: internal
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+              example:
+                success: true
+                code: 0
+                message: ok
+                data:
+                  status: ok
+  /readyz:
+    get:
+      tags: [system]
+      operationId: readyz
+      security: []
+      responses:
+        '200':
+          description: Required dependencies are ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /auth/user/sms/code:
+    post:
+      tags: [auth]
+      operationId: requestUserSmsCode
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+                  pattern: '^1[3-9]\d{9}$'
+      responses:
+        '200':
+          description: Login code generated. Development environments with
+            simulated SMS (NCS_SMS_MOCK) carry the code in the response.
+            Formal deployments deliver it through an SMS provider; while no
+            provider is wired the endpoint fails with 503 instead of
+            pretending success. The code stays valid for 10 minutes and is
+            voided after 5 wrong submissions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, code, message, data]
+                properties:
+                  success: {type: boolean, enum: [true]}
+                  code: {type: integer, enum: [0]}
+                  message: {type: string}
+                  data:
+                    type: object
+                    required: [phone, expiresInSec]
+                    properties:
+                      phone: {type: string}
+                      expiresInSec: {type: integer, minimum: 1}
+                      code:
+                        type: string
+                        description: Present only with simulated SMS delivery.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          description: Simulated delivery is off and no SMS provider is
+            configured, or the provider call failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /auth/user/login/sms:
+    post:
+      tags: [auth]
+      operationId: userSmsLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, code]
+              properties:
+                phone:
+                  type: string
+                  pattern: '^1[3-9]\d{9}$'
+                code:
+                  type: string
+                  pattern: '^\d{6}$'
+      responses:
+        '200':
+          description: User session created. Unknown phones register
+            automatically together with a zero-balance wallet (UC-U-01).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: Code is wrong, expired, or its failure budget is
+            exhausted (CODE_INVALID).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          description: Redis or provider unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /auth/user/login:
+    post:
+      tags: [auth]
+      operationId: userLogin
+      security: []
+      description: |-
+        Secondary password login for users that have set a password
+        (SRS UC-U-01). SMS login (/auth/user/login/sms) remains the default,
+        mandatory entry and must not be replaced by this endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: User session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /auth/admin/login:
+    post:
+      tags: [auth]
+      operationId: adminLogin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Admin session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      responses:
+        '204':
+          description: Session revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /me:
+    get:
+      tags: [auth]
+      operationId: getCurrentIdentity
+      responses:
+        '200':
+          description: Current identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /stations:
+    get:
+      tags: [stations]
+      operationId: listStations
+      description: |-
+        Nearby station query (UC-U-02). When latitudeE6/longitudeE6 are
+        supplied, results are ordered by Haversine distance (nearest first)
+        and each item carries distanceMeter. Disabled stations are never
+        returned to C-end clients.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: keyword
+          in: query
+          schema:
+            type: string
+            maxLength: 100
+        - name: latitudeE6
+          in: query
+          description: Latitude multiplied by 1,000,000
+          schema:
+            type: integer
+            format: int64
+        - name: longitudeE6
+          in: query
+          description: Longitude multiplied by 1,000,000
+          schema:
+            type: integer
+            format: int64
+        - name: radiusMeters
+          in: query
+          description: Only return stations within this radius of the query
+            coordinates. Requires latitudeE6/longitudeE6.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: connectorType
+          in: query
+          description: Only stations operating at least one charger of this type.
+          schema:
+            type: string
+            enum: [AC, DC]
+        - name: maxPriceCentPerKwh
+          in: query
+          description: Only stations whose cheapest charger costs at most this.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: minIdleChargers
+          in: query
+          description: Only stations with at least this many idle chargers.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        '200':
+          description: Station page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StationPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /stations/{stationId}:
+    get:
+      tags: [stations]
+      operationId: getStation
+      parameters:
+        - $ref: '#/components/parameters/StationId'
+      responses:
+        '200':
+          description: Station detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StationResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chargers:
+    get:
+      tags: [chargers]
+      operationId: listChargers
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: stationId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ChargerStatus'
+      responses:
+        '200':
+          description: Charger page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargerPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /orders:
+    get:
+      tags: [orders]
+      operationId: listOrders
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/OrderStatus'
+        - name: stationId
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: paymentStatus
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, PAID, PARTIAL_PAID]
+        - name: createdFrom
+          in: query
+          description: Only orders created at or after this instant (RFC3339).
+          schema:
+            type: string
+            format: date-time
+        - name: createdTo
+          in: query
+          description: Only orders created before this instant (RFC3339).
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Order page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [orders]
+      operationId: createOrder
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Order created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /orders/{orderNo}:
+    get:
+      tags: [orders]
+      operationId: getOrder
+      parameters:
+        - $ref: '#/components/parameters/OrderNo'
+      responses:
+        '200':
+          description: Order detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /orders/{orderNo}/start:
+    post:
+      tags: [orders]
+      operationId: startCharging
+      parameters:
+        - $ref: '#/components/parameters/OrderNo'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Start command accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /orders/{orderNo}/stop:
+    post:
+      tags: [orders]
+      operationId: stopCharging
+      parameters:
+        - $ref: '#/components/parameters/OrderNo'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202':
+          description: Stop command accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /orders/{orderNo}/cancel:
+    post:
+      tags: [orders]
+      operationId: cancelOrder
+      description: |-
+        Cancels an order that has not started charging yet (CREATED or
+        STARTING) and releases the charger. Idempotent through
+        Idempotency-Key; charging orders cannot be cancelled (UC-U-07).
+      parameters:
+        - $ref: '#/components/parameters/OrderNo'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Order cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /internal/charger-events:
+    post:
+      tags: [internal]
+      operationId: applyChargerEvent
+      summary: Apply a charger start or stop receipt
+      description: |-
+        Internal charger-gateway callback. Together with the `/api/v1`
+        server prefix this is `POST /api/v1/internal/charger-events`.
+        Deploy it behind HTTPS and restrict its Nginx ingress to the charger
+        gateway network. The Bearer credential is the service token from
+        `NCS_CHARGER_GATEWAY_TOKEN`, not a user or administrator session.
+
+        `eventId` is the idempotency key. Repeating the same event and payload
+        returns the first result; reusing the id for a different payload is a
+        conflict. `occurredAt` is the UTC device fact time used for order
+        timestamps and time-of-use billing. A start receipt advances STARTING
+        to CHARGING; a stop receipt advances STOPPING to COMPLETED.
+      security:
+        - chargerGatewayBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargerEventRequest'
+      responses:
+        '200':
+          description: Receipt applied, or the first result replayed for an identical receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargerEventResponseEnvelope'
+        '400':
+          description: Invalid payload, non-UTC or excessively future-dated fact time, or inconsistent meter readings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Missing or invalid charger-gateway service token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Event id reused for different data, receipt out of order, or charger/order mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /admin/stations:
+    get:
+      tags: [admin]
+      operationId: adminListStations
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: keyword
+          in: query
+          schema:
+            type: string
+            maxLength: 100
+      responses:
+        '200':
+          description: Admin station page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StationPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [admin]
+      operationId: adminCreateStation
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateStationRequest'
+      responses:
+        '201':
+          description: Station created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StationResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /admin/chargers:
+    get:
+      tags: [admin]
+      operationId: adminListChargers
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: stationId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ChargerStatus'
+      responses:
+        '200':
+          description: Admin charger page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargerPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/users:
+    get:
+      tags: [admin]
+      operationId: adminListUsers
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: keyword
+          in: query
+          schema:
+            type: string
+            maxLength: 100
+        - name: status
+          in: query
+          schema:
+            type: integer
+            enum: [0, 1]
+      responses:
+        '200':
+          description: User page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/orders:
+    get:
+      tags: [admin]
+      operationId: adminListOrders
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: orderNo
+          in: query
+          schema:
+            type: string
+            maxLength: 64
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/OrderStatus'
+      responses:
+        '200':
+          description: Admin order page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderPageEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/chargers/{chargerId}/restart:
+    post:
+      tags: [admin]
+      operationId: adminRestartCharger
+      parameters:
+        - name: chargerId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OperationRequest'
+      responses:
+        '202':
+          description: Device command accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-session-token
+    chargerGatewayBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-service-token
+      description: Service credential configured by NCS_CHARGER_GATEWAY_TOKEN.
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+    StationId:
+      name: stationId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    OrderNo:
+      name: orderNo
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 64
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthorized:
+      description: Missing or expired session
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: Insufficient permission
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Conflict:
+      description: State or optimistic-lock conflict
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    TooManyRequests:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    ServiceUnavailable:
+      description: Dependency is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+          example: ok
+        data:
+          type: object
+          additionalProperties: true
+    ErrorEnvelope:
+      type: object
+      required: [success, code, message]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        code:
+          type: integer
+          minimum: 1
+        message:
+          type: string
+        traceId:
+          type: string
+    LoginRequest:
+      type: object
+      required: [account, password]
+      properties:
+        account:
+          type: string
+          minLength: 3
+          maxLength: 128
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 128
+    LoginResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/LoginResponse'
+    LoginResponse:
+      type: object
+      required: [accessToken, expiresAt, identity]
+      properties:
+        accessToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        identity:
+          $ref: '#/components/schemas/Identity'
+    IdentityResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/Identity'
+    Identity:
+      type: object
+      required: [id, role, displayName, status]
+      properties:
+        id:
+          type: integer
+          format: int64
+        role:
+          type: string
+          enum: [USER, ADMIN]
+        adminRole:
+          type: string
+          enum: [SUPER_ADMIN, OPERATOR, AUDITOR]
+          description: Present only for administrators. AUDITOR is read-only.
+        displayName:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+    Station:
+      type: object
+      required: [id, code, name, address, status, latitudeE6, longitudeE6, chargerCount, idleChargerCount, minPriceCentPerKwh]
+      properties:
+        id:
+          type: integer
+          format: int64
+        code:
+          type: string
+        name:
+          type: string
+        address:
+          type: string
+        status:
+          type: string
+          enum: [OPEN, CLOSED, DISABLED]
+        latitudeE6:
+          type: integer
+          format: int64
+        longitudeE6:
+          type: integer
+          format: int64
+        chargerCount:
+          type: integer
+          minimum: 0
+        idleChargerCount:
+          type: integer
+          description: Chargers currently in IDLE state.
+          minimum: 0
+        minPriceCentPerKwh:
+          type: integer
+          description: Cheapest charger price at the station, in cents per kWh.
+          minimum: 0
+        distanceMeter:
+          type: integer
+          format: int64
+          description: Haversine distance to the query coordinates. Present
+            only when the query carried coordinates.
+          minimum: 0
+    Charger:
+      type: object
+      required: [id, stationId, code, type, powerWatt, status]
+      properties:
+        id:
+          type: integer
+          format: int64
+        stationId:
+          type: integer
+          format: int64
+        code:
+          type: string
+        type:
+          type: string
+          enum: [AC, DC]
+        powerWatt:
+          type: integer
+          format: int64
+          minimum: 0
+        status:
+          $ref: '#/components/schemas/ChargerStatus'
+    ChargerStatus:
+      type: string
+      enum: [IDLE, OCCUPIED, FAULT, RESTARTING, DISABLED]
+    OrderStatus:
+      type: string
+      enum: [CREATED, STARTING, CHARGING, STOPPING, COMPLETED, CANCELLED, FAILED, EXPIRED]
+    Order:
+      type: object
+      required: [orderNo, userId, stationId, chargerId, status, amountCent, createdAt]
+      properties:
+        orderNo:
+          type: string
+        userId:
+          type: integer
+          format: int64
+        stationId:
+          type: integer
+          format: int64
+        chargerId:
+          type: integer
+          format: int64
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        amountCent:
+          type: integer
+          format: int64
+          minimum: 0
+        paidCent:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Amount actually settled so far (UC-U-09 pending payment).
+        paymentStatus:
+          type: string
+          enum: [PENDING, PAID, PARTIAL_PAID]
+          description: Pending-payment state of a completed order.
+        energyWh:
+          type: integer
+          format: int64
+          minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    UserSummary:
+      type: object
+      required: [id, displayName, status, balanceCent]
+      properties:
+        id:
+          type: integer
+          format: int64
+        displayName:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        balanceCent:
+          type: integer
+          format: int64
+    CreateOrderRequest:
+      type: object
+      required: [chargerId]
+      properties:
+        chargerId:
+          type: integer
+          format: int64
+          minimum: 1
+    ChargerEventRequest:
+      type: object
+      required: [eventId, eventType, orderNo, chargerId, occurredAt]
+      properties:
+        eventId:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: Unique receipt identifier and idempotency key.
+        eventType:
+          type: string
+          enum: [CHARGE_STARTED, CHARGE_STOPPED]
+        orderNo:
+          type: string
+          minLength: 8
+          maxLength: 64
+        chargerId:
+          description: Numeric charger identifier; a decimal string is also accepted for gateway compatibility.
+          oneOf:
+            - type: integer
+              format: int64
+              minimum: 1
+            - type: string
+              pattern: '^[1-9]\d*$'
+        occurredAt:
+          type: string
+          format: date-time
+          description: UTC device fact time. Values beyond the configured future-skew limit are rejected.
+          example: '2026-09-15T01:10:00Z'
+        energyWh:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Required when eventType is CHARGE_STOPPED.
+        meterStartWh:
+          type: integer
+          format: int64
+          minimum: 0
+        meterEndWh:
+          type: integer
+          format: int64
+          minimum: 0
+        traceId:
+          type: string
+          description: Optional gateway trace identifier.
+      description: |-
+        For CHARGE_STOPPED, `energyWh` is required. If both meter readings are
+        present, meterEndWh must be at least meterStartWh and their difference
+        must equal energyWh.
+    ChargerEventResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [eventId, eventType, orderNo, status, occurredAt, order]
+          properties:
+            eventId: {type: string}
+            eventType:
+              type: string
+              enum: [CHARGE_STARTED, CHARGE_STOPPED]
+            orderNo: {type: string}
+            status: {$ref: '#/components/schemas/OrderStatus'}
+            occurredAt:
+              type: string
+              format: date-time
+            order: {$ref: '#/components/schemas/Order'}
+    CreateStationRequest:
+      type: object
+      required: [code, name, address, latitudeE6, longitudeE6]
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{2,32}$'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        address:
+          type: string
+          minLength: 1
+          maxLength: 255
+        latitudeE6:
+          type: integer
+          format: int64
+        longitudeE6:
+          type: integer
+          format: int64
+    OperationRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 2
+          maxLength: 200
+    Command:
+      type: object
+      required: [commandNo, status]
+      properties:
+        commandNo:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, RUNNING, SUCCEEDED, FAILED]
+    PageMeta:
+      type: object
+      required: [page, pageSize, total]
+      properties:
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+          format: int64
+    StationPageEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [items, meta]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/Station'}
+            meta: {$ref: '#/components/schemas/PageMeta'}
+    StationResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/Station'}
+    ChargerPageEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [items, meta]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/Charger'}
+            meta: {$ref: '#/components/schemas/PageMeta'}
+    OrderPageEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [items, meta]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/Order'}
+            meta: {$ref: '#/components/schemas/PageMeta'}
+    OrderResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/Order'}
+    UserPageEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [items, meta]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/UserSummary'}
+            meta: {$ref: '#/components/schemas/PageMeta'}
+    CommandResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/Command'}
+
+security:
+  - bearerAuth: []
