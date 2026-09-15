@@ -16,6 +16,7 @@ import (
 	"github.com/heguangV/charging-station-platform/backend/internal/httpapi"
 	"github.com/heguangV/charging-station-platform/backend/internal/order"
 	"github.com/heguangV/charging-station-platform/backend/internal/station"
+	"github.com/heguangV/charging-station-platform/backend/internal/wallet"
 )
 
 // fakeStore records admin commands and returns canned results.
@@ -29,6 +30,8 @@ type fakeStore struct {
 	orders       OrderPage
 	chargers     ChargerPage
 	restarts     []RestartCommand
+	tariffErr    error
+	releaseErr   error
 }
 
 func (f *fakeStore) CreateStation(context.Context, CreateStationCommand) (StationRecord, error) {
@@ -54,6 +57,30 @@ func (f *fakeStore) ListOrders(context.Context, AdminOrderFilter) (OrderPage, er
 func (f *fakeStore) RestartCharger(_ context.Context, command RestartCommand) (Command, error) {
 	f.restarts = append(f.restarts, command)
 	return f.restartCmd, f.restartErr
+}
+
+func (f *fakeStore) GetTariff(context.Context, int64) (TariffView, error) {
+	return TariffView{ChargerID: 5, ElectricityPriceCent: 120, ServicePriceCent: 50}, nil
+}
+
+func (f *fakeStore) UpdateTariff(_ context.Context, update TariffUpdate) (TariffView, error) {
+	return TariffView{ChargerID: update.ChargerID, ElectricityPriceCent: update.ElectricityPriceCent, ServicePriceCent: update.ServicePriceCent}, f.tariffErr
+}
+
+func (f *fakeStore) ForceRelease(_ context.Context, command ForceReleaseCommand) (StationRecordCharger, error) {
+	return StationRecordCharger{ChargerID: command.ChargerID, Status: command.TargetStatus}, f.releaseErr
+}
+
+func (f *fakeStore) GetUserDetail(context.Context, int64) (UserDetail, error) {
+	return UserDetail{ID: 7, Phone: "13800000001", DisplayName: "用户0606", Status: "ACTIVE", BalanceCent: 10000}, nil
+}
+
+func (f *fakeStore) ListUserLedger(context.Context, UserLedgerFilter) (LedgerPage, error) {
+	return LedgerPage{Items: []LedgerEntry{{TransactionType: wallet.TypeTopUp, AmountCent: 10000}}, Meta: wallet.PageMeta{Total: 1}}, nil
+}
+
+func (f *fakeStore) ListAudit(context.Context, AuditFilter) (AuditPage, error) {
+	return AuditPage{Items: []AuditEntry{{ID: 1, ActorType: "ADMIN", ActorID: "2", Action: "tariff.update"}}, Meta: PageMeta{Total: 1}}, nil
 }
 
 // fakeAuthProvider mirrors auth.Handlers middleware with role enforcement.
@@ -264,4 +291,124 @@ func TestAdminServiceRejectsNilStore(t *testing.T) {
 	}
 	_ = errors.New
 	_ = context.Background
+}
+
+func TestTariffUpdateValidationAndAudit(t *testing.T) {
+	f := newFixture(t, adminIdentity(auth.AdminRoleOperator), true)
+
+	// Negative prices rejected in the service.
+	recorder, _ := do(t, f.server.Handler(), http.MethodPut, "/api/v1/admin/chargers/5/tariff",
+		`{"electricityPriceCentPerKwh":-1,"servicePriceCentPerKwh":50}`, map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("negative price status = %d", recorder.Code)
+	}
+
+	// Off-peak price without a window rejected.
+	recorder, _ = do(t, f.server.Handler(), http.MethodPut, "/api/v1/admin/chargers/5/tariff",
+		`{"electricityPriceCentPerKwh":120,"servicePriceCentPerKwh":50,"offPeakElectricityPriceCentPerKwh":60}`,
+		map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("off-peak without window status = %d", recorder.Code)
+	}
+
+	// Valid update flows through and returns the new tariff.
+	recorder, payload := do(t, f.server.Handler(), http.MethodPut, "/api/v1/admin/chargers/5/tariff",
+		`{"electricityPriceCentPerKwh":120,"servicePriceCentPerKwh":50,"offPeakElectricityPriceCentPerKwh":60,"offPeakStartHour":23,"offPeakEndHour":7}`,
+		map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("valid tariff status = %d", recorder.Code)
+	}
+	data := payload["data"].(map[string]any)
+	if data["electricityPriceCentPerKwh"].(float64) != 120 || data["servicePriceCentPerKwh"].(float64) != 50 {
+		t.Fatalf("tariff = %#v", data)
+	}
+
+	// GET returns the view.
+	recorder, payload = do(t, f.server.Handler(), http.MethodGet, "/api/v1/admin/chargers/5/tariff", "", nil)
+	if recorder.Code != http.StatusOK || payload["data"].(map[string]any)["chargerId"].(float64) != 5 {
+		t.Fatalf("get tariff = %#v", payload)
+	}
+}
+
+func TestForceReleaseRoleAndValidation(t *testing.T) {
+	f := newFixture(t, adminIdentity(auth.AdminRoleAuditor), true)
+	recorder, payload := do(t, f.server.Handler(), http.MethodPost, "/api/v1/admin/chargers/5/release",
+		`{"reason":"违规占位","targetStatus":"IDLE"}`, map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusForbidden || payload["code"].(float64) != httpapi.CodeForbidden {
+		t.Fatalf("auditor release: status = %d code = %v", recorder.Code, payload["code"])
+	}
+
+	operator := newFixture(t, adminIdentity(auth.AdminRoleOperator), true)
+	recorder, payload = do(t, operator.server.Handler(), http.MethodPost, "/api/v1/admin/chargers/5/release",
+		`{"reason":"违规占位","targetStatus":"IDLE"}`, map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("operator release status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	data := payload["data"].(map[string]any)
+	if data["chargerId"].(float64) != 5 || data["status"] != "IDLE" {
+		t.Fatalf("release = %#v", data)
+	}
+
+	// Charging orders are rejected by the service (BR-11).
+	operator.store.releaseErr = ErrInvalidStateTransition
+	recorder, payload = do(t, operator.server.Handler(), http.MethodPost, "/api/v1/admin/chargers/5/release",
+		`{"reason":"违规占位","targetStatus":"IDLE"}`, map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusConflict || payload["code"].(float64) != 15 {
+		t.Fatalf("charging release: status = %d code = %v", recorder.Code, payload["code"])
+	}
+
+	// Missing reason
+	operator.store.releaseErr = nil
+	recorder, _ = do(t, operator.server.Handler(), http.MethodPost, "/api/v1/admin/chargers/5/release",
+		`{"reason":"x","targetStatus":"IDLE"}`, map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("short reason status = %d", recorder.Code)
+	}
+
+	// Invalid target status
+	recorder, _ = do(t, operator.server.Handler(), http.MethodPost, "/api/v1/admin/chargers/5/release",
+		`{"reason":"合法原因","targetStatus":"FAULT"}`, map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("bad target status = %d", recorder.Code)
+	}
+}
+
+func TestUserDetailAndLedgerEndpoints(t *testing.T) {
+	f := newFixture(t, adminIdentity(auth.AdminRoleSuper), true)
+
+	recorder, payload := do(t, f.server.Handler(), http.MethodGet, "/api/v1/admin/users/7", "", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("user detail status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	data := payload["data"].(map[string]any)
+	if data["phone"] != "13800000001" || data["balanceCent"].(float64) != 10000 {
+		t.Fatalf("user detail = %#v", data)
+	}
+
+	recorder, payload = do(t, f.server.Handler(), http.MethodGet, "/api/v1/admin/users/7/transactions?type=TOP_UP", "", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("ledger status = %d", recorder.Code)
+	}
+	items := payload["data"].(map[string]any)["items"].([]any)
+	if items[0].(map[string]any)["transactionType"] != wallet.TypeTopUp {
+		t.Fatalf("ledger = %#v", items)
+	}
+}
+
+func TestAuditQueryEndpoint(t *testing.T) {
+	f := newFixture(t, adminIdentity(auth.AdminRoleSuper), true)
+
+	recorder, payload := do(t, f.server.Handler(), http.MethodGet,
+		"/api/v1/admin/audit?action=tariff.update&page=1&pageSize=20", "", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("audit status = %d", recorder.Code)
+	}
+	data := payload["data"].(map[string]any)
+	items := data["items"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["action"] != "tariff.update" {
+		t.Fatalf("audit = %#v", items)
+	}
+	if data["meta"].(map[string]any)["total"].(float64) != 1 {
+		t.Fatalf("audit meta = %#v", data["meta"])
+	}
 }
