@@ -355,3 +355,49 @@ B 线随后登记并实现：① 注册；② 用户订单列表（**已完成**
 
 **当前结论：前端不能立即进行完整联调，先完成全局前端适配；B 线只补上述 6 类接口，其余能力明确删除或延期 A-07。**
 
+## 9. 第二批实施记录（注册 / 命令状态查询 / 站点与充电桩状态变更）
+
+三项均按"先登记 OpenAPI，再实现，最后补测试"的顺序完成，并各自做了反向验证。OpenAPI 操作数由 45 增至 **49**。
+
+### 9.1 注册 `POST /api/v1/auth/user/register`
+
+- Go 此前只有短信登录隐式建号（`EnsureUserWithWallet` 用 `ON CONFLICT DO NOTHING` 覆盖语义），**没有注册**。
+- 新增：`internal/auth` 的 `Register(ctx, username, phone, password, code)` + `ErrAccountExists` 哨兵；`AccountWriter.RegisterUser`（新接口方法）→ `internal/repository/postgres/accounts.go` 的 `RegisterUser`（同一事务建号 + 建零余额钱包，唯一索引冲突映射为业务错误）。
+- **校验顺序是刻意的**：先校验手机号与密码格式（调用方自己的输入）→ 再校验短信验证码（手机归属的证明）→ 最后才建号。先建号会让每次输错都留下半注册账号；先验码会让任何人用格式错误的请求烧掉别人手机号的验证码。
+- 密码规则复用现有 `HashPassword`（8..128，`ErrPasswordLength` → 400）；验证码复用现有 `SMSCodeStore.Verify`（单次有效、失败计数上限）。
+- 重复账号 → **409 / code 5 `ALREADY_EXISTS`**（错误码注册表 `docs/database-api.md` 已有该码，未新增码、未新增迁移）。重复判定发生在验码之后，因此**没有有效验证码就无法探测某手机号是否已注册**——这一点写进了 OpenAPI 描述。
+- 注册成功返回 **201 + 会话**（`LoginResponseEnvelope`，含 accessToken），前端无需再登录一次。
+- 验证：`TestRegisterEndpoint`（错误验证码 → 422/20 且**未建号**；弱密码 → 400 且未建号；成功 → 201 + 会话 + 存储哈希可用明文校验通过；重复 → 409/5；缺手机号 → 400 且未触达写库）、`TestRegisterUserOnRealDatabase`（真实 PG：建号 + 空钱包、哈希可验、重复 → `ErrAccountExists` 且用户/钱包各 1 行、被拒请求未改名）。
+- 反向验证：去掉验码 → `wrong code: status = 201 code = 0`（**错误验证码也能注册成功**）；去掉唯一冲突映射 → `duplicate registration error = ERROR: duplicate key value violates unique constraint "user_accounts_phone_key" (SQLSTATE 23505), want ErrAccountExists`；去掉建钱包 → `registered user has no wallet`。
+
+### 9.2 命令状态查询 `GET /api/v1/admin/device-commands/{commandId}`
+
+- 路径参数使用 **`commandId`**，与数据库 `charger_command_outcomes.command_id` 同名同义；返回字段 `commandId/chargerId/orderNo/action/result/applied/recordedAt`。
+- **顺带消掉的命名不一致**：既有 `Command{commandNo,status}`（`POST /admin/chargers/{chargerId}/restart` 的 202 响应）用的也是同一个标识符，却叫 `commandNo`。已统一为 `commandId`（Go 结构、OpenAPI schema、审计载荷键、集成测试断言同步）。**前端需把重启响应与轮询里的 `commandNo` 改为 `commandId`**（`apps/admin/src/stores/chargers.js` 3 处、`apps/admin/src/api/charger.js` 1 处参数名）。
+- 权限：读取属管理员只读范围（`RequireRole(RoleAdmin)`，AUDITOR 可读、普通用户 401/403）；未找到 → **404 / code 4**。
+- 数据来源：真实回执路径写入的 `charger_command_outcomes`（不是队列状态），因此"命令已下发但设备未应答"就是 404，不伪造 PENDING。
+- 验证：`TestGetDeviceCommand`（200 且按 id 查、响应键为 `commandId` 而非 `commandNo`、404、普通用户被拒）、`TestAdminDeviceCommandLookupOnRealDatabase`（真实 PG：通过 `RecordChargerCommandResult` 写回执后查得 action/result/applied/recordedAt=RFC3339；未知 id → `ErrDeviceCommandNotFound`）。
+- 反向验证：去掉 404 映射 → `missing command: status = 503 code = 3`；仓储吞掉 `ErrNoRows` → `unknown command error = <nil>, want ErrDeviceCommandNotFound`（静默返回空记录）。
+
+### 9.3 站点 / 充电桩状态变更
+
+`PUT /api/v1/admin/stations/{stationId}/status` 与 `PUT /api/v1/admin/chargers/{chargerId}/status`，body `{"status": "..."}`。
+
+- **状态枚举严格校验**（站点 `OPEN/CLOSED/DISABLED`、充电桩 `IDLE/OCCUPIED/FAULT/RESTARTING/DISABLED`），未登记值 → 400 且**不触达存储**。
+- **转换合法性**由新文件 `internal/station/lifecycle.go` 统一定义并在事务内、行锁下校验：
+  - 站点：`OPEN⇄CLOSED`、`OPEN→DISABLED`、`CLOSED→DISABLED`、`DISABLED→OPEN`；**拒绝** `DISABLED→CLOSED`（必须先回到 OPEN，运维动作显式化）与"改成当前状态"（409，而非静默成功）。
+  - 充电桩：`IDLE⇄DISABLED`、`FAULT→IDLE/DISABLED`；**拒绝** `OCCUPIED→*`（必须先强制释放，否则活动订单会占着一个已不可用的桩）与 `RESTARTING→*`（重启命令在途，落点由回执决定）。
+- **审计**：同事务写 `operation_logs`，action `station.status` / `charger.status`，payload `{"from":..., "to":...}`；被拒的转换**不产生**审计行。
+- **权限**：两个端点都用 `RequireAdminWrite`，AUDITOR（只读管理员）与普通用户 → 403。
+- 充电桩更新同时 `version = version + 1`；站点无 version 列，只更新 `updated_at`。**未新增迁移**。
+- 验证：`TestChangeStationStatus` / `TestChangeChargerStatus`（200、命令到达存储、未登记状态 400 且未触达存储、非法转换 409、未知 id 404、AUDITOR 403、GET 405）、`TestAdminStatusChangesOnRealDatabase`（真实 PG：合法转换生效且审计各 1 行、`DISABLED→CLOSED` 与"同状态"被拒且行不变、`DISABLED→OPEN` 可回、充电桩 version +1、`OCCUPIED→DISABLED` 被拒、未知 id 报 `ErrStationNotFound`/`ErrChargerNotFound`、被拒转换不产生审计行）。
+- 反向验证：去掉转换校验 → `DISABLED -> CLOSED error = <nil>, want ErrInvalidStateTransition`；去掉审计写入 → `station audit rows = 0, want 1`；把 `RequireAdminWrite` 换回 `RequireRole` → `auditor write = 200, want 403`。
+
+### 9.4 实施中顺带发现的既有缺陷
+
+**D-5 `StationRecord` 没有 JSON tag**：`POST /admin/stations` 的响应一直返回 Go 风格键（`ID`/`Code`/`Status`），而该操作登记的是 `Station` schema（camelCase）。新状态接口的测试第一次就撞上了它。已补 tag（`id/code/name/address/latitudeE6/longitudeE6/status`），并加 `TestCreateStationResponseUsesContractKeys` 防回归。**遗留**：`Station` schema 还包含 `chargerCount/idleChargerCount/minPriceCentPerKwh`，而创建响应不含这三个聚合字段（读路径才有），属 A-06 契约待收口项。
+
+### 9.5 第二批质量门禁
+
+`gofmt` 干净、`go build ./...`、`go vet ./...`、`go test -count=1 -race ./...`（见提交信息中的包数），OpenAPI YAML 可解析且操作数 49。
+
