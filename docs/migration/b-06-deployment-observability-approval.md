@@ -267,19 +267,75 @@ Nginx drill 中 /metrics、/readyz、设备回执在允许网段外均 403。
 看起来像发生过却从未发生的流量。该规则由 TestRegisterProcessMetricsPreCreatesTheRequiredSeries 固定。
 ```
 
+## 第三轮：四项裁定的落地
+
+### ① 异地对象存储（配置已批准、尚未实测）
+
+```text
+rclone 远端 ncs-backup-prod、桶 ncs-prod-backup 已写死为脚本默认值；daily/ 30 天、weekly/ 12 周
+两个前缀分开（生命周期规则只能按前缀表达）；上传前 openssl AES-256-CBC/PBKDF2 加密，上传时再请求
+服务端加密；凭据只在 /etc/ncs/backup-remote.env 与 /etc/ncs/rclone/rclone.conf（或外部密钥系统），
+不进仓库；桶需开启对象版本保护与生命周期规则（脚本内的 rclone delete 只是兜底）。
+未实测：本机没有对象存储与 rclone。已能离线校验的只有参数拼装与 --dry-run 路径。
+```
+
+### ② 恢复演练策略（每周 dump、每月 PITR）——PITR 已在本机实测通过
+
+```text
+新增 ncs-pitr-drill.{service,timer}（每月第一个周日 07:00）与 scripts/pitr-drill.sh；每周 dump 演练
+保持 ncs-restore-drill.{service,timer}。PITR 在**隔离临时实例**上执行（pg_basebackup 建目录 →
+pg_ctl 独立端口/socket 启动 → 重放 WAL → 断言 → 停止并删除），恢复目标 5～15 分钟（参数校验），
+演练报告含恢复目标、耗时、归档覆盖与失败原因；结束清理包含**删除复制槽**。
+
+实测（PASS）：target 2026-09-15 09:30:27.431219+00；before_target=1、after_target=0（恢复恰好停在
+两个已知提交之间）；耗时 9 秒；归档 3 个已封段；演练后无残留进程、无残留槽、无残留目录。
+
+跑通这一遍发现并修复的四个真实缺陷：
+  1. `pg_receivewal --create-slot` 建槽后**立即退出** —— 原先 wal-archive.sh 服务模式带这个参数，
+     实际行为是"建槽—退出—重启"循环，**一字节 WAL 都不会归档**，而 RPO 正是依赖它；已拆成
+     "单独建槽 + 纯流式运行"，并用 pg_stat_replication 确认 streaming（这是本轮最重要的发现）；
+  2. `recovery_target_time` 不接受 ISO 的 T/Z 写法（配置解析器报 invalid value）→ 改为 `... +00`；
+  3. pg_basebackup 留下的数据目录权限非 0700 → 启动报 has invalid permissions → chmod 700；
+  4. 断言连错库（标记表在源库）且用 `|| echo missing` 把查询失败伪装成"标记不存在" → 改为连源库、
+     查询失败原样报告；
+  另：`wal-archive.sh --once` 原先会留下无人服务的复制槽（一直占住 WAL）→ 检查完即删除。
+```
+
+### ③ 监控与告警阈值
+
+```text
+批准表已落为可加载规则文件 backend/deploy/monitoring/ncs-alerts.yml（3 组 12 条），阈值、持续时长、
+级别与批准表一致；"最近成功时间"类规则一律与"确实有活干"取交集
+（ncs_pg_outbox_unpublished > 0 or sum(ncs_stream_pending) > 0），否则空闲时必然误报。
+为支持"Outbox 最老记录超过 N 分钟"，新增指标 ncs_pg_outbox_oldest_unpublished_seconds
+（最老未发布记录等待秒数；空 Outbox 为 0，COALESCE 保证序列不消失），API/Worker/Publisher 三处探针
+都已暴露并保留 HELP 说明。
+未实测：本机没有 Prometheus/Alertmanager，规则**尚未在真实触发条件下验证**；上线前需人为触发一次
+（例如停掉 Publisher，确认两条 Outbox 规则按 Warning→Critical 升级）。
+```
+
+### ④ 演练实例（NCS_TEST_PG_DSN）
+
+```text
+drill-backup-restore.sh 现在：未配置即拒绝执行（不回退默认库）；库名白名单（ncs_drill_*/*test*/*scratch*
+等）且含 prod/production 一律拒绝；开跑前真的建一个 ncs_drill_capability_check 库并删除以验证
+CREATEDB 权限；结束断言不留 ncs_drill_* 残余库；失败也打印"演练失败"报告并说明原因。
+本机 ncs_a03 的账号实测具备 CREATEDB 与 REPLICATION（两者都被演练用到），可继续作为候选实例；
+生产演练必须使用专门的、可删除的实例。
+```
+
 ## 待审批事项
 
-1. 异地对象存储的目的地、rclone 远端与生命周期规则（30 天）由部署环境确定；本机无法验证该路径；
-2. PITR 重放演练的频率与载体（是否需要第二个 PostgreSQL 实例承担每周演练）；
-3. 监控侧抓取配置与告警阈值落地（`ncs_dependency_up`、`ncs_pg_outbox_unpublished`、
-   `ncs_worker_last_success_timestamp_seconds` 的陈旧阈值）；
-4. `ncs-restore-drill.service` 的 `NCS_TEST_PG_DSN` 指向哪个一次性实例（演练会创建并删除临时库）。
+1. 异地对象存储的账号、桶策略与生命周期规则落地后，需要一次真实上传核验（内容、版本、30 天/12 周规则）；
+2. 告警规则需要在接入监控系统后做一次真实触发验证，并按现场噪声调 `for` 时长；
+3. 每月 PITR 演练的实例由谁提供（独立容器或临时 WSL 实例），以及演练报告留存位置；
+4. 演练用 `NCS_TEST_PG_DSN` 的正式实例地址（不得使用开发共用库）。
 
 ## 审批结论
 
 ```text
-状态：PENDING
+状态：PENDING（第三轮裁定：通过条件审批，可合入并进入部署准备；不得宣称"生产灾备已验证"）
 审批人：Codex
 审批时间：
-修改要求：
+修改要求：上线前仍须补齐并实测：真实 rclone 异地上传、第二个 PostgreSQL 实例上的 PITR 重放（本机已用隔离临时实例跑通一次，生产实例上仍需一次）、告警规则实际触发、临时数据库创建/恢复/删除全流程。
 ```
