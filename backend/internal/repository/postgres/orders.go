@@ -902,7 +902,7 @@ func (s *OrderStore) ReissueStopCommands(ctx context.Context, policy order.StopR
 			continue
 		}
 
-		commandNo, err := admin.NewCommandNo(now)
+		commandNo, err := admin.NewCommandID(now)
 		if err != nil {
 			return result, err
 		}
@@ -992,7 +992,7 @@ func chargerCommandStatus(result string) string {
 // order_no is what lets the gateway - and the receipt it sends back - name the order a command
 // belongs to; the station-level RESTART compensation below carries none.
 func (s *OrderStore) appendOrderChargerCommand(tx *sql.Tx, ctx context.Context, o order.Order, action, traceID string) error {
-	commandNo, err := admin.NewCommandNo(s.clock())
+	commandNo, err := admin.NewCommandID(s.clock())
 	if err != nil {
 		return err
 	}
