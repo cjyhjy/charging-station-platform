@@ -56,6 +56,17 @@ type fakeStore struct {
 	globalResult    GlobalTariffResult
 	globalErr       error
 	globalUpdates   []GlobalTariffUpdate
+
+	// The statistics reads. Their canned results are separate from the page
+	// fixtures because an aggregate is not a page: a test that configured one
+	// would otherwise silently configure the other.
+	revenueTotals  RevenueTotals
+	revenueBuckets []RevenueBucket
+	chargerCounts  ChargerCounts
+	fleetCounts    FleetCounts
+	statsErr       error
+	revenueQueries []RevenueQuery
+	stationFilters []int64
 }
 
 func (f *fakeStore) CreateStation(context.Context, CreateStationCommand) (StationRecord, error) {
@@ -110,6 +121,25 @@ func (f *fakeStore) FindDeviceCommand(_ context.Context, commandID string) (Devi
 func (f *fakeStore) RestartCharger(_ context.Context, command RestartCommand) (Command, error) {
 	f.restarts = append(f.restarts, command)
 	return f.restartCmd, f.restartErr
+}
+
+func (f *fakeStore) RevenueTotals(_ context.Context, query RevenueQuery) (RevenueTotals, error) {
+	f.revenueQueries = append(f.revenueQueries, query)
+	return f.revenueTotals, f.statsErr
+}
+
+func (f *fakeStore) RevenueBuckets(_ context.Context, query RevenueQuery) ([]RevenueBucket, error) {
+	f.revenueQueries = append(f.revenueQueries, query)
+	return f.revenueBuckets, f.statsErr
+}
+
+func (f *fakeStore) ChargerCounts(_ context.Context, stationID int64) (ChargerCounts, error) {
+	f.stationFilters = append(f.stationFilters, stationID)
+	return f.chargerCounts, f.statsErr
+}
+
+func (f *fakeStore) FleetCounts(context.Context) (FleetCounts, error) {
+	return f.fleetCounts, f.statsErr
 }
 
 func (f *fakeStore) UpdateStation(_ context.Context, command UpdateStationCommand) (StationRecord, error) {

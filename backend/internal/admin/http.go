@@ -65,6 +65,7 @@ func (h *Handlers) Register(server interface {
 	server.Register("/api/v1/admin/orders", h.auth.RequireRole(auth.RoleAdmin, h.listOrders))
 	server.Register("/api/v1/admin/users/{userId}", h.auth.RequireRole(auth.RoleAdmin, h.userDetail))
 	server.Register("/api/v1/admin/users/{userId}/transactions", h.auth.RequireRole(auth.RoleAdmin, h.userLedger))
+	h.registerStats(server)
 	h.registerProfile(server)
 	server.Register("/api/v1/admin/chargers/{chargerId}/tariff", h.tariffRoutes)
 	server.Register("/api/v1/admin/chargers/{chargerId}/release", h.auth.RequireAdminWrite(h.forceRelease))

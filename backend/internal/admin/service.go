@@ -324,6 +324,15 @@ type Store interface {
 	UpdateStation(ctx context.Context, command UpdateStationCommand) (StationRecord, error)
 	GlobalTariff(ctx context.Context) ([]GlobalTariff, error)
 	UpdateGlobalTariff(ctx context.Context, update GlobalTariffUpdate) (GlobalTariffResult, error)
+
+	// The statistics reads. They are aggregates rather than pages, so they are
+	// separate methods instead of filters on the list queries: a list query
+	// returns rows to render, and these return counts and sums that never exist
+	// as a row.
+	RevenueTotals(ctx context.Context, query RevenueQuery) (RevenueTotals, error)
+	RevenueBuckets(ctx context.Context, query RevenueQuery) ([]RevenueBucket, error)
+	ChargerCounts(ctx context.Context, stationID int64) (ChargerCounts, error)
+	FleetCounts(ctx context.Context) (FleetCounts, error)
 	UpdateTariff(ctx context.Context, update TariffUpdate) (TariffView, error)
 	ForceRelease(ctx context.Context, command ForceReleaseCommand) (StationRecordCharger, error)
 	ListAudit(ctx context.Context, filter AuditFilter) (AuditPage, error)

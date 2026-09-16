@@ -15,6 +15,7 @@ tags:
   - name: stations
   - name: chargers
   - name: orders
+  - name: agent
   - name: wallet
   - name: admin
   - name: internal
@@ -1467,6 +1468,135 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
+  /admin/stats/revenue:
+    get:
+      tags: [admin]
+      operationId: adminRevenueStats
+      summary: Revenue and energy per bucket over a time range
+      description: |-
+        The series behind the console's revenue trend and its daily and hourly
+        detail tables. It is a read with an administrator session; an auditor may
+        look at the figures, and nothing here changes a row.
+
+        `fromAt` and `toAt` are required UTC Unix seconds and the range is
+        half-open. The platform does not default them: it cannot know which
+        timezone the caller's "last seven days" is in, and guessing one would
+        answer a question nobody asked. The range is capped at 90 days, which is
+        the widest window the console offers.
+
+        Revenue is the bill of a COMPLETED order, attributed to the moment the
+        charge stopped - the instant the stop receipt froze the amount. A
+        cancelled or failed order is not revenue however much it was quoted.
+
+        Buckets are aligned to `fromAt`, not to the epoch, so each bucket is one
+        of the caller's own days when the caller asked for its own days. The
+        series is dense: a bucket with no orders is present and zero, because a
+        chart that skipped a quiet day would draw a trend that never happened.
+      parameters:
+        - name: fromAt
+          in: query
+          required: true
+          schema: {type: integer, format: int64, minimum: 0}
+          description: Inclusive start, UTC Unix seconds.
+        - name: toAt
+          in: query
+          required: true
+          schema: {type: integer, format: int64, minimum: 0}
+          description: Exclusive end, UTC Unix seconds.
+        - name: stationId
+          in: query
+          required: false
+          schema: {type: integer, format: int64, minimum: 1}
+          description: Restrict to one station. Absent means every station.
+        - name: bucket
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [hour, day]
+            default: day
+      responses:
+        '200':
+          description: The revenue series and its range totals
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevenueStatsEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /admin/stats/chargers:
+    get:
+      tags: [admin]
+      operationId: adminChargerStats
+      summary: The charger fleet census and its health
+      description: |-
+        Every charger is counted, including a disabled one: an operator asking
+        how many devices exist is not asking how many are usable, and the health
+        figure is only meaningful against the whole fleet.
+
+        A charger is operational when it is idle or occupied. A faulty or
+        disabled device cannot serve, and a restarting one is not available at
+        the moment it is counted. `healthPercent` is the operational share, kept
+        to two decimals so losing one device in a large fleet is visible.
+      parameters:
+        - name: stationId
+          in: query
+          required: false
+          schema: {type: integer, format: int64, minimum: 1}
+          description: Restrict to one station. Absent means every station.
+      responses:
+        '200':
+          description: The fleet census
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargerStatusStatsEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /admin/stats/overview:
+    get:
+      tags: [admin]
+      operationId: adminStatsOverview
+      summary: The lifetime operations snapshot
+      description: |-
+        What the platform has, not what happened in a window: lifetime revenue,
+        the number of completed charges and their charger mix, the registered
+        accounts, the stations, the orders still in flight, and the fleet census.
+
+        The old service precomputed this into a dashboard snapshot and rebuilt it
+        on a timer, which made it fast and occasionally hours out of date. It is
+        computed on demand here, because PostgreSQL answers the aggregate faster
+        than a reader can look away and a figure is never stale.
+
+        Windowed figures are not part of this payload: only the client knows
+        which timezone its "today" is in, so those belong to
+        /admin/stats/revenue where the caller states the range.
+      responses:
+        '200':
+          description: The operations snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsOverviewEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /admin/stations/{stationId}:
     put:
       tags: [admin]
@@ -2615,6 +2745,128 @@ components:
               type: array
               items: {$ref: '#/components/schemas/AuditEntry'}
             meta: {$ref: '#/components/schemas/PageMeta'}
+
+    RevenueBucket:
+      type: object
+      description: One point of the revenue series.
+      required: [bucketStart, amountCent, energyMwh, orderCount]
+      properties:
+        bucketStart:
+          type: integer
+          format: int64
+          description: The UTC Unix second the bucket begins at. Buckets are
+            aligned to the requested `fromAt`, so the first one always starts
+            exactly there.
+        amountCent:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Frozen bill amounts in cents.
+        energyMwh:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Metered energy in milliwatt-hours, the same unit the order
+            endpoints use.
+        orderCount: {type: integer, format: int64, minimum: 0}
+    RevenueStats:
+      type: object
+      required: [items, totalAmountCent, totalEnergyMwh, totalOrderCount]
+      properties:
+        items:
+          type: array
+          description: Every bucket in the range, in order. A quiet bucket is
+            present and zero, never omitted.
+          items: {$ref: '#/components/schemas/RevenueBucket'}
+        totalAmountCent: {type: integer, format: int64, minimum: 0}
+        totalEnergyMwh: {type: integer, format: int64, minimum: 0}
+        totalOrderCount: {type: integer, format: int64, minimum: 0}
+    ChargerStatusStats:
+      type: object
+      description: The charger fleet census and its health.
+      required: [idleCount, occupiedCount, faultyCount, restartingCount, disabledCount, operationalCount, totalCount, healthPercent]
+      properties:
+        idleCount: {type: integer, format: int64, minimum: 0}
+        occupiedCount: {type: integer, format: int64, minimum: 0}
+        faultyCount: {type: integer, format: int64, minimum: 0}
+        restartingCount: {type: integer, format: int64, minimum: 0}
+        disabledCount: {type: integer, format: int64, minimum: 0}
+        operationalCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Idle plus occupied. A faulty or disabled device cannot
+            serve, and a restarting one is not available when it is counted.
+        totalCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Every charger, including a disabled one.
+        healthPercent:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 100
+          description: The operational share, to two decimals. Zero for an empty
+            fleet.
+    StatsOverview:
+      type: object
+      description: The lifetime operations snapshot. Windowed figures are not
+        part of it; they belong to /admin/stats/revenue.
+      required: [generatedAt, totalRevenueCent, totalChargeCount, fastChargeCount, slowChargeCount, registeredUserCount, stationCount, activeOrderCount, chargers]
+      properties:
+        generatedAt:
+          type: integer
+          format: int64
+          description: When the snapshot was computed, UTC Unix seconds.
+        totalRevenueCent:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Lifetime revenue over every completed order.
+        totalChargeCount: {type: integer, format: int64, minimum: 0}
+        fastChargeCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Completed orders on a DC charger.
+        slowChargeCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Completed orders on an AC charger.
+        registeredUserCount: {type: integer, format: int64, minimum: 0}
+        stationCount: {type: integer, format: int64, minimum: 0}
+        activeOrderCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Orders that have not reached a terminal state.
+        chargers: {$ref: '#/components/schemas/ChargerStatusStats'}
+    RevenueStatsEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/RevenueStats'}
+    ChargerStatusStatsEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/ChargerStatusStats'}
+    StatsOverviewEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/StatsOverview'}
 
     StationProfileUpdate:
       type: object
