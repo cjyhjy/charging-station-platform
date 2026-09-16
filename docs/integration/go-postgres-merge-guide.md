@@ -1,5 +1,8 @@
 # Go / PostgreSQL 后续修复合并说明
 
+> 更新：前端改用干净替代 PR #48。不要继续合入 #44/#47；#48 已包含其 Web 内容与修复。
+> 负责人可执行的步骤及 C++ 剔除复现见 [干净前端合并指南](https://github.com/cjyhjy/charging-station-platform/blob/codex/frontend-go-clean/docs/integration/frontend-clean-merge-guide.md)。
+
 ## 关联信息
 
 目标：将已经验证的 Go API / Agent、PostgreSQL、Redis 与 Web 适配修复纳入现有交付分支。
@@ -9,7 +12,7 @@
 | 增量 PR 来源（cjyhjy fork） | 上游目标分支 | 后续主 PR |
 | --- | --- | --- |
 | `codex/backend-go-followup` | `codex/backend/b-08-admin-archive-batch` | heguangV/charging-station-platform#45 → develop |
-| `codex/frontend-go-followup` | `codex/frontend/go-api-adapter` | heguangV/charging-station-platform#44 → develop |
+| `codex/frontend-go-clean` | `develop` | heguangV/charging-station-platform#48；替代 #44/#47 |
 
 后端功能修复提交：`1e24942`、`ff672e0`；前端修复提交：`8a648a0`。
 验证报告与后续文档提交一起合入。不直接推送 main/develop，不在本次操作中自动合并 PR。
@@ -30,9 +33,9 @@
 
 ## 合并与验证
 
-1. 分别审查并合并两个增量 PR 到表中的功能分支；不要把它们误当作独立 develop 功能 PR，也不要重复 cherry-pick 同一修复。
-2. 在更新后的 #45、#44 上检查差异、冲突和必需 CI；取得其他成员审批。先将 #45 合入 develop，再合 #44。
-3. #44 仍携带旧 C++ 历史变更。审核其与 develop/#45 的差异，确认没有恢复旧运行入口或覆盖 Go 契约；本次没有自动删除旧代码或改写既有 PR 历史。
+1. 审查并合并 #46 到 #45 的后端功能分支，确认 CI/审批后将 #45 合入 develop。
+2. 更新干净前端 #48 的 develop 基线（如需要），确认 CI/审批与 Go API 联调后将 #48 合入 develop。
+3. #48 从 develop 提取 Web 白名单文件，不含 #44 的 C++/CMake/旧后端变更；已含 #47 修复。#48 合并成功后关闭 #44/#47，不再合入或重复 cherry-pick。#42 的其他历史内容单独审查；不删除或改写共享分支。
 4. 合并基线使用一次性 PostgreSQL 库及独立 Redis 执行回归；上线前备份数据库，使用生产迁移器执行 0001..0012，不将开发种子导入业务库。
 5. 在后端目录执行：
 
