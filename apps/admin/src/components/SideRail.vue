@@ -10,7 +10,6 @@ export const NAV_ITEMS = [
   { key: 'users', to: '/users', label: '用户', icon: 'user' },
   { key: 'flows', to: '/flows', label: '活动流程', icon: 'flow' },
   { key: 'appeals', to: '/appeals', label: '申诉管理', icon: 'flow' },
-  { key: 'predictions', to: '/predictions', label: '智能预测', icon: 'prediction' },
   { key: 'accounts', to: '/accounts', label: '管理员', icon: 'account' },
   { key: 'ops', to: '/ops', label: '运维', icon: 'ops' }
 ]

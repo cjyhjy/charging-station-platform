@@ -54,7 +54,7 @@ export const ORDER_STATUS_TO_LEGACY = {
 }
 
 export const ORDER_STATUS_LABELS = {
-  CREATED: '待启动',
+  CREATED: '已预约',
   STARTING: '启动中',
   CHARGING: '充电中',
   STOPPING: '停止中',
@@ -102,10 +102,17 @@ export function mapOrder(raw) {
     active: isActiveOrder(status),
     stationName: raw.stationName || `站点 ${raw.stationId ?? '—'}`,
     chargerCode: raw.chargerCode || (raw.chargerId != null ? `#${raw.chargerId}` : ''),
-    startedAt: createdAt,
+    reservedUntil: raw.reservedUntil ? isoToUnixSecond(raw.reservedUntil) : null,
+    // 契约在详情里给出真实开始时间（设备 CHARGE_STARTED 的事实时间）；列表没有该字段，
+    // 旧行为是拿 createdAt 顶上——只在缺少真实值时兜底，否则充电时长会从下单时刻算起。
+    startedAt: raw.startedAt ? isoToUnixSecond(raw.startedAt) : createdAt,
     settledAt: status === 'COMPLETED' ? updatedAt : 0,
     durationSec: updatedAt > createdAt ? updatedAt - createdAt : 0,
-    energyMwh: Number.isFinite(raw.energyWh) ? raw.energyWh * 1000 : null
+    energyMwh: Number.isFinite(raw.energyWh) ? raw.energyWh * 1000 : null,
+    // 充电中的实时计量（设备 CHARGE_PROGRESS）：与结算值分开，页面上优先显示它。
+    meteredEnergyMwh: Number.isFinite(raw.meteredEnergyWh) ? raw.meteredEnergyWh * 1000 : null,
+    meteredAmountCent: Number.isFinite(raw.meteredAmountCent) ? raw.meteredAmountCent : null,
+    meteredAt: raw.meteredAt ? isoToUnixSecond(raw.meteredAt) : null
   }
 }
 

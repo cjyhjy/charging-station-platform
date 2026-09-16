@@ -4,14 +4,14 @@ import { flattenPage, mapOrder, isActiveOrder } from './contract'
 /**
  * 订单生命周期与钱包接口（Go 契约）。
  *
- * Go 的充电模型是"订单"而非旧契约的"充电流程"：
- * 创建订单即绑定具体设备并取价格快照（无排队/报价确认/预约阶段），
+ * Go 的充电模型用 CREATED 订单承载预约：
+ * 创建订单即绑定具体设备并保留 15 分钟，用户在充电页明确确认后才发送 START，
  * START/STOP 是 202 异步设备命令，结算由设备回执驱动，
  * 结束充电 = POST stop 后轮询订单至 COMPLETED 再取小票。
  * 所有业务写入都必须携带 Idempotency-Key（超时重试复用同一键）。
  */
 
-/** 创建订单：Go 契约按具体 chargerId 下单（选桩由调用方完成）。 */
+/** 预约设备：按具体 chargerId 创建 CREATED 订单并返回 reservedUntil。 */
 export function createOrder({ chargerId }, idempotencyKey) {
   return api.post('/orders', { chargerId }, { idempotent: true, idempotencyKey }).then(mapOrder)
 }

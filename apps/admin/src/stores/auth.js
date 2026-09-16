@@ -76,6 +76,7 @@ export const useAuthStore = defineStore('adminAuth', {
       const roles = Array.isArray(state.admin?.roles) ? state.admin.roles : []
       return roles.includes('SUPER_ADMIN') || roles.includes('OPERATOR')
     },
+    isSuperAdmin: state => (Array.isArray(state.admin?.roles) ? state.admin.roles.includes('SUPER_ADMIN') : false),
     isOwner: state => (Array.isArray(state.admin?.roles) ? state.admin.roles.includes('OWNER') : false),
     mustChangePassword: state => state.admin?.mustChangePassword === true,
     isLocked: state => state.lockedSeconds > 0

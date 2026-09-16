@@ -54,12 +54,6 @@ export const routes = [
         meta: { title: '申诉管理', crumb: '运营 / 申诉管理' }
       },
       {
-        path: 'predictions',
-        name: 'predictions',
-        component: () => import('@/views/PredictionsView.vue'),
-        meta: { title: '智能预测', crumb: '运营 / 智能预测' }
-      },
-      {
         path: 'accounts',
         name: 'accounts',
         component: () => import('@/views/AccountsView.vue'),

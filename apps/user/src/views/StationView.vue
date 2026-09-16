@@ -12,8 +12,9 @@ import { useAuthStore } from '@/stores/auth'
 import { useStationStore } from '@/stores/station'
 
 /**
- * 站点详情：设备列表、参考单价、评论墙与进入充电。
- * Go 契约按具体设备下单：开始充电 = 从当前桩型中选一台空闲设备创建订单；
+ * 站点详情：设备列表、参考单价、评论墙与预约入口。
+ * 预约会从当前桩型中选一台空闲设备并保留 15 分钟；开始充电是预约页上的
+ * 独立确认动作，避免用户在查看预约详情前就向设备发送启动命令。
  * 路线规划依赖 A-07 导航服务，当前显式提示未开放。
  */
 const route = useRoute()
@@ -57,7 +58,7 @@ async function switchChargerType(chargerType) {
   await station.loadChargers(stationId.value, { chargerType })
 }
 
-async function startCharging() {
+async function reserveCharging() {
   if (!auth.isLoggedIn) {
     void router.push({ name: 'profile', query: { redirect: `/stations/${stationId.value}` } })
     return
@@ -70,11 +71,10 @@ async function startCharging() {
   }
   busy.value = true
   try {
-    // 创建订单即锁定设备与价格快照；旧契约的排队/报价确认阶段在 Go 模型中不存在。
     await createOrder({ chargerId: charger.id }, randomId())
     void router.push({ name: 'charging' })
   } catch (error) {
-    actionError.value = error?.userMessage || '发起充电失败，请稍后重试'
+    actionError.value = error?.userMessage || '预约失败，请稍后重试'
   } finally {
     busy.value = false
   }
@@ -102,10 +102,11 @@ async function startCharging() {
         <div class="panel__row panel__row--wrap">
           <button type="button" class="chip" :class="{ 'is-active': station.chargerTypeTab === 1 }" data-testid="station-tab-fast" @click="switchChargerType(1)">快充</button>
           <button type="button" class="chip" :class="{ 'is-active': station.chargerTypeTab === 0 }" data-testid="station-tab-slow" @click="switchChargerType(0)">慢充</button>
-          <button type="button" class="btn btn--primary" data-testid="station-start-charging" :disabled="busy" @click="startCharging">
-            {{ busy ? '提交中…' : '开始充电' }}
+          <button type="button" class="btn btn--primary" data-testid="station-reserve-charging" :disabled="busy" @click="reserveCharging">
+            {{ busy ? '预约中…' : '预约充电' }}
           </button>
         </div>
+        <p class="muted">预约成功后设备将保留 15 分钟，请在到站后从预约页开始充电。</p>
         <p v-if="actionError" class="alert alert--error" data-testid="station-action-error">{{ actionError }}</p>
 
         <table class="data-table" data-testid="station-chargers">

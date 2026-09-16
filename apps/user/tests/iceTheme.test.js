@@ -30,9 +30,10 @@ describe('两端共享冰蓝主题', () => {
   it('电量装饰复用真实格式化值，不伪造进度且不重复朗读', () => {
     const source = read('../src/views/ChargingView.vue')
     expect(source).toContain('class="charge-energy" aria-hidden="true"')
-    // 装饰盘与明细行用同一个表达式：有读数就给真实值，没有读数（停止回执之前）给占位符，
-    // 不伪造进度，也不显示看起来像"计量坏了"的 0.00。
-    expect(source).toContain("{{ hasMetering ? formatEnergy(energyMwh) : '—' }}")
+    // 既不是伪造的进度条，也不是看起来像"计量坏了"的 0.00：有真实读数就显示读数，
+    // 没有读数（停止回执之前）显示带"预估"字样的估算，连估算依据都没有才显示占位符。
+    expect(source).toContain('{{ energyText }}')
+    expect(source).toContain('{{ amountText }}')
     expect(source).toContain('data-testid="progress-energy"')
   })
 })

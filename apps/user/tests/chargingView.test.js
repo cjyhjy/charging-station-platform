@@ -35,8 +35,27 @@ const ACTIVE_ORDER = {
   updatedAt: '2026-09-16T00:00:06Z'
 }
 
-/** 若后端将来在充电中提供计量，页面必须照常显示真实读数（而不是占位符）。 */
-const ACTIVE_ORDER_WITH_METERING = { ...ACTIVE_ORDER, energyWh: 1200, amountCent: 180 }
+const RESERVED_ORDER = {
+  orderNo: ORDER_NO,
+  status: 'CREATED',
+  stationId: 3,
+  chargerId: 28,
+  amountCent: 0,
+  reservedUntil: '2026-09-16T00:15:00Z',
+  createdAt: '2026-09-16T00:00:00Z',
+  updatedAt: '2026-09-16T00:00:00Z'
+}
+
+/**
+ * 设备已经上报过计量时，订单详情会带上的字段（列表没有）：meteredEnergyWh /
+ * meteredAmountCent / meteredAt。它们与结算用的 energyWh/amountCent 分开，
+ * 页面必须直接显示这些真实值，而不是预估或占位符。
+ */
+const METERED_DETAIL = {
+  meteredEnergyWh: 1200,
+  meteredAmountCent: 180,
+  meteredAt: '2026-09-16T00:19:30Z'
+}
 
 /** 同一张订单的终态：结算完成、等待用户确认扣款。停止回执带来了真实计量与账单。 */
 const COMPLETED_ORDER = {
@@ -68,7 +87,7 @@ function json(data) {
  * 服务端替身：第一次订单列表返回充电中的订单，之后的列表为空（订单已离开活动集合），
  * 订单详情返回终态小票。
  */
-function stubServer(activeOrder = ACTIVE_ORDER, { keepActive = false } = {}) {
+function stubServer(activeOrder = ACTIVE_ORDER, { keepActive = false, detail = null } = {}) {
   const listCalls = { count: 0 }
   const state = { confirmed: false }
   const fetchMock = vi.fn(async (url, init) => {
@@ -80,7 +99,8 @@ function stubServer(activeOrder = ACTIVE_ORDER, { keepActive = false } = {}) {
       state.confirmed = true
       return json(CONFIRMED_ORDER)
     }
-    if (url === `/api/v1/orders/${ORDER_NO}`) return json(COMPLETED_ORDER)
+    // 充电中的订单详情：带实时计量与估算依据（列表接口没有这些字段）
+    if (url === `/api/v1/orders/${ORDER_NO}`) return json(detail ? { ...activeOrder, ...detail } : COMPLETED_ORDER)
     if (url.startsWith('/api/v1/orders')) {
       const first = listCalls.count === 0
       listCalls.count += 1
@@ -129,6 +149,25 @@ afterEach(() => {
 })
 
 describe('ChargingView', () => {
+  it('预约阶段显示倒计时，并只在用户确认后发送 START', async () => {
+    vi.setSystemTime(new Date('2026-09-16T00:05:00Z'))
+    const fetchMock = stubServer(RESERVED_ORDER, { keepActive: true, detail: RESERVED_ORDER })
+    const { wrapper } = await mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="charging-status"]').text()).toBe('已预约')
+    expect(wrapper.get('[data-testid="reservation-countdown"]').text()).toContain('10:00')
+    expect(wrapper.get('[data-testid="charging-cancel"]').text()).toBe('取消预约')
+
+    await wrapper.get('[data-testid="charging-start"]').trigger('click')
+    await flushPromises()
+    const startCalls = fetchMock.mock.calls.filter(call => call[0] === `/api/v1/orders/${ORDER_NO}/start`)
+    expect(startCalls).toHaveLength(1)
+    expect(startCalls[0][1].method).toBe('POST')
+    expect(startCalls[0][1].headers['Idempotency-Key']).toBeTruthy()
+    wrapper.unmount()
+  })
+
   it('充电中的订单渲染进度与余额，不触发小票请求', async () => {
     const fetchMock = stubServer()
     const { wrapper } = await mountView()
@@ -142,9 +181,10 @@ describe('ChargingView', () => {
     expect(wrapper.get('[data-testid="charging-balance"]').text()).toBe('50.00')
     expect(wrapper.find('[data-testid="charging-receipt"]').exists()).toBe(false)
 
-    // 仍在充电：只轮询活动订单，不请求订单详情。
+    // 仍在充电：会为"估算依据"取一次订单详情，但绝不渲染结算小票。
     const urls = fetchMock.mock.calls.map(call => call[0])
-    expect(urls).not.toContain(`/api/v1/orders/${ORDER_NO}`)
+    expect(urls).toContain(`/api/v1/orders/${ORDER_NO}`)
+    expect(wrapper.find('[data-testid="charging-receipt"]').exists()).toBe(false)
 
     wrapper.unmount()
   })
@@ -204,13 +244,17 @@ describe('ChargingView', () => {
 })
 
 describe('ChargingView 计量与时长', () => {
-  it('后端一旦在充电中给出读数，就显示真实电量与金额', async () => {
-    stubServer(ACTIVE_ORDER_WITH_METERING, { keepActive: true })
+  it('设备上报计量后显示真实电量与金额（不是预估）', async () => {
+    stubServer(ACTIVE_ORDER, { keepActive: true, detail: METERED_DETAIL })
     const { wrapper } = await mountView()
     await flushPromises()
 
     expect(wrapper.get('[data-testid="progress-energy"]').text()).toBe('1.20 kWh')
     expect(wrapper.get('[data-testid="progress-amount"]').text()).toBe('1.80 元')
+    // 实时值旁标注读数时间，并且不再出现"预估"字样
+    expect(wrapper.get('[data-testid="progress-metering-live"]').text()).toContain('实时计量')
+    // 读数时间按本机时区显示，因此只断言形态
+    expect(wrapper.get('[data-testid="progress-metering-live"]').text()).toMatch(/设备 \d{2}:\d{2}:\d{2} 读数/)
     expect(wrapper.find('[data-testid="progress-metering-hint"]').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -231,5 +275,68 @@ describe('ChargingView 计量与时长', () => {
     // 卸载后时钟必须停掉，否则会有游离的 setInterval
     wrapper.unmount()
     vi.advanceTimersByTime(5000)
+  })
+})
+
+describe('ChargingView 充电中预估', () => {
+  it('拿到估算依据时按额定功率×时长显示预估，并标明依据', async () => {
+    // 开始时间固定，系统时间也钉在同一刻，预估才是确定的：
+    // 120kW × 600 秒 = 20 kWh；单价 150 分/kWh → 3000 分 = 30.00 元
+    vi.setSystemTime(new Date('2026-09-16T00:10:00Z'))
+    stubServer(ACTIVE_ORDER, {
+      keepActive: true,
+      detail: {
+        startedAt: '2026-09-16T00:00:00Z',
+        chargerPowerWatt: 120000,
+        unitPriceCentPerKwh: 150
+      }
+    })
+    const { wrapper } = await mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="progress-energy"]').text()).toBe('预估 20.00 kWh')
+    expect(wrapper.get('[data-testid="progress-amount"]').text()).toBe('预估 30.00 元')
+    expect(wrapper.get('[data-testid="progress-metering-hint"]').text()).toContain('暂按额定功率 120 kW × 已充时长预估')
+    expect(wrapper.get('[data-testid="progress-metering-hint"]').text()).toContain('读数到达后会自动换成实时值')
+    wrapper.unmount()
+  })
+
+  it('缺少估算依据时退回占位符，不编造数字', async () => {
+    stubServer(ACTIVE_ORDER, { keepActive: true })
+    const { wrapper } = await mountView()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="progress-energy"]').text()).toBe('—')
+    expect(wrapper.get('[data-testid="progress-amount"]').text()).toBe('—')
+    expect(wrapper.get('[data-testid="progress-metering-hint"]').text()).toContain('等待设备上报计量读数')
+    wrapper.unmount()
+  })
+})
+
+describe('ChargingView 预估的持久性', () => {
+  it('列表轮询整体覆盖订单行之后，预估仍然在，并随时长增长', async () => {
+    vi.setSystemTime(new Date('2026-09-16T00:10:00Z'))
+    stubServer(ACTIVE_ORDER, {
+      keepActive: true,
+      detail: { startedAt: '2026-09-16T00:00:00Z', chargerPowerWatt: 120000, unitPriceCentPerKwh: 150 }
+    })
+    const { wrapper } = await mountView()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="progress-energy"]').text()).toBe('预估 20.00 kWh')
+
+    // 关键：活动订单每 3 秒被列表行整体替换，而列表没有估算依据字段。
+    // 依据若并进 order（而不是单独存放），这里就会退回占位符——实测就是这样丢了 12 秒。
+    // advanceTimersByTime 同时推进系统时钟：+6 秒 → 606 秒 → 120kW × 606/3600 = 20.2 kWh
+    vi.advanceTimersByTime(6000)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="progress-energy"]').text()).toBe('预估 20.20 kWh')
+    expect(wrapper.get('[data-testid="progress-amount"]').text()).toBe('预估 30.30 元')
+
+    // 再走一分钟：666 秒 → 22.2 kWh；22.2 × 150 分 = 3330 分 = 33.30 元
+    vi.advanceTimersByTime(60000)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="progress-energy"]').text()).toBe('预估 22.20 kWh')
+    expect(wrapper.get('[data-testid="progress-amount"]').text()).toBe('预估 33.30 元')
+    wrapper.unmount()
   })
 })

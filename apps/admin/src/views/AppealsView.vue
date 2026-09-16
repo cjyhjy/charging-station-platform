@@ -18,6 +18,7 @@ const appeals = useAppealsStore()
 
 const statusFilter = ref(null)
 const approveTarget = ref(null)
+const rejectTarget = ref(null)
 
 onMounted(() => {
   appeals.load()
@@ -26,7 +27,8 @@ onMounted(() => {
 const statusOptions = [
   { label: '全部', value: null },
   { label: '待处理', value: 'PENDING' },
-  { label: '已通过', value: 'APPROVED' }
+  { label: '已通过', value: 'APPROVED' },
+  { label: '已驳回', value: 'REJECTED' }
 ]
 
 const columns = [
@@ -38,18 +40,23 @@ const columns = [
   { key: 'orderAmountCent', label: '应付（元）', align: 'right', format: value => formatAmount(value) },
   { key: 'orderPaidCent', label: '实付（元）', align: 'right', format: value => formatAmount(value) },
   { key: 'createdAt', label: '提交时间', format: value => formatDateTime(value) },
-  { key: 'statusText', label: '状态' }
+  { key: 'statusText', label: '状态' },
+  { key: 'decisionReason', label: '处理意见' },
+  // 操作有自己的列：以前按钮借「提交时间」列渲染，时间就永远不显示了。
+  { key: 'actions', label: '操作', align: 'right' }
 ]
 
 function statusTone(status) {
   if (status === 'PENDING') return 'warn'
   if (status === 'APPROVED') return 'ok'
+  if (status === 'REJECTED') return 'muted'
   return 'muted'
 }
 
 function statusText(status) {
   if (status === 'PENDING') return '待处理'
   if (status === 'APPROVED') return '已通过'
+  if (status === 'REJECTED') return '已驳回'
   return status || '—'
 }
 
@@ -67,6 +74,13 @@ async function confirmApprove() {
   const ok = await appeals.approve(approveTarget.value)
   if (ok) approveTarget.value = null
 }
+
+/** 驳回必须写处理意见：这句话会给用户看，也是审计里唯一说明"为什么不退"的记录。 */
+async function confirmReject({ reason }) {
+  if (!rejectTarget.value) return
+  const ok = await appeals.reject(rejectTarget.value, reason)
+  if (ok) rejectTarget.value = null
+}
 </script>
 
 <template>
@@ -79,8 +93,8 @@ async function confirmApprove() {
         <div>
           <h2>申诉队列</h2>
           <p class="panel__hint">
-            待处理 {{ appeals.pendingCount }} 条 · 审核通过后订单取消、实付金额原路退回钱包；
-            重复审核是幂等无操作，不会重复退款
+            待处理 {{ appeals.pendingCount }} 条 · 通过＝订单取消并原路退款；驳回＝仅记录结论，订单与钱包不动。
+            重复决策是幂等无操作
           </p>
         </div>
       </div>
@@ -112,7 +126,7 @@ async function confirmApprove() {
         <template #cell-statusText="{ row }">
           <StatusPill :text="statusText(row.status)" :tone="statusTone(row.status)" :test-id="`appeal-state-${row.id}`" />
         </template>
-        <template #cell-createdAt="{ row }">
+        <template #cell-actions="{ row }">
           <span class="row-actions">
             <button
               v-if="row.status === 'PENDING'"
@@ -123,6 +137,16 @@ async function confirmApprove() {
               @click.stop="approveTarget = row"
             >
               审核通过
+            </button>
+            <button
+              v-if="row.status === 'PENDING'"
+              type="button"
+              class="btn btn--sm"
+              :disabled="appeals.saving"
+              :data-testid="`appeal-reject-${row.id}`"
+              @click.stop="rejectTarget = row"
+            >
+              驳回
             </button>
           </span>
         </template>
@@ -155,6 +179,17 @@ async function confirmApprove() {
       :error="appeals.error"
       @confirm="confirmApprove"
       @cancel="approveTarget = null"
+    />
+
+    <ConfirmDialog
+      v-if="rejectTarget"
+      :title="`驳回申诉 #${rejectTarget.id}`"
+      hint="驳回后：申诉转已驳回并记录处理意见；订单保持已完成、钱包不动（退款是审核通过才做的事）。重复决策不会改变结论。"
+      confirm-label="确认驳回"
+      :loading="appeals.saving"
+      :error="appeals.error"
+      @confirm="confirmReject"
+      @cancel="rejectTarget = null"
     />
   </div>
 </template>

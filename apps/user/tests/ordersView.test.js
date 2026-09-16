@@ -39,10 +39,28 @@ function envelope(data, { status = 200, code = 0, message = 'ok' } = {}) {
   }
 }
 
-/** 服务端替身：订单列表与详情正常，申诉提交按传入状态码作答。 */
-function stubServer(appealResponse) {
-  return vi.fn(async (url, init) => {
-    if (String(url).includes('/appeal')) return appealResponse
+/**
+ * 服务端替身：订单列表与详情正常；GET 申诉按 existingAppeal 作答（null = 404 无申诉），
+ * POST 申诉按传入响应作答。
+ */
+function stubServer(appealResponse, { existingAppeal = null, review = null, appealGetMissesFirst = false } = {}) {
+  let appealGets = 0
+  return vi.fn(async (url, init = {}) => {
+    if (String(url).includes('/appeal')) {
+      const method = (init.method || 'GET').toUpperCase()
+      if (method === 'GET') {
+        appealGets += 1
+        // 打开订单时还没有申诉（竞态：提交那一刻才被别处抢先提交）
+        if (appealGetMissesFirst && appealGets === 1) {
+          return envelope(null, { status: 404, code: 4, message: 'not found' })
+        }
+        return existingAppeal ? envelope(existingAppeal) : envelope(null, { status: 404, code: 4, message: 'not found' })
+      }
+      return appealResponse
+    }
+    if (String(url).includes('/review')) {
+      return review ? envelope(review) : envelope(null, { status: 404, code: 4, message: 'not found' })
+    }
     if (/\/api\/v1\/orders\/[^/]+$/.test(String(url))) return envelope(COMPLETED_ORDER)
     if (String(url).startsWith('/api/v1/orders')) {
       return envelope({ items: [COMPLETED_ORDER], meta: { page: 1, pageSize: 20, total: 1 } })
@@ -100,15 +118,21 @@ describe('订单申诉入口', () => {
     await wrapper.get('[data-testid="appeal-submit"]').trigger('submit')
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="order-appeal-done"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="order-appeal-exists"]').exists()).toBe(false)
+    // 提交成功后直接进入"状态"视图：比一句"已提交"更能说明后续怎么走
+    expect(wrapper.get('[data-testid="order-appeal-status"]').text()).toBe('审核中')
+    expect(wrapper.find('[data-testid="appeal-reason"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="order-appeal-conflict"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
   it('409（该订单已有申诉）不能显示成"已提交"', async () => {
     vi.stubGlobal(
       'fetch',
-      stubServer(envelope(null, { status: 409, code: 5, message: 'already exists with different content or state' }))
+      stubServer(envelope(null, { status: 409, code: 5, message: 'already exists with different content or state' }), {
+        // 竞态：打开订单时还没有申诉，提交那一刻别处已抢先提交了一条不同内容的
+        appealGetMissesFirst: true,
+        existingAppeal: { id: 9, orderNo: ORDER_NO, reason: '早先那条申诉', status: 'PENDING', orderAmountCent: 180, orderPaidCent: 180 }
+      })
     )
     const { wrapper } = await mountView()
 
@@ -116,10 +140,9 @@ describe('订单申诉入口', () => {
     await wrapper.get('[data-testid="appeal-submit"]').trigger('submit')
     await flushPromises()
 
-    expect(wrapper.find('[data-testid="order-appeal-done"]').exists()).toBe(false)
-    const exists = wrapper.get('[data-testid="order-appeal-exists"]')
-    expect(exists.text()).toContain('已有申诉记录')
-    expect(exists.text()).toContain('没有提交')
+    // 409 后重新查询拿到真实状态（服务端返回既有申诉），并明确告知本次内容没被保存
+    expect(wrapper.get('[data-testid="order-appeal-conflict"]').text()).toContain('本次填写的内容没有提交')
+    expect(wrapper.find('[data-testid="appeal-reason"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })
@@ -134,6 +157,87 @@ describe('订单详情的渲染守卫', () => {
     expect(renderErrors).toEqual([])
     expect(wrapper.get('[data-testid="order-appeal"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="order-review"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+describe('本人申诉状态', () => {
+  it('审核中：显示状态与申诉内容，不再摆出申诉表单，也不能评价', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubServer(envelope({ id: 9, status: 'PENDING' }, { status: 201 }), {
+        existingAppeal: { id: 9, orderNo: ORDER_NO, reason: '计量争议', status: 'PENDING', orderAmountCent: 180, orderPaidCent: 180 }
+      })
+    )
+    const { wrapper } = await mountView()
+
+    expect(wrapper.find('[data-testid="appeal-reason"]').exists()).toBe(false)
+    const state = wrapper.get('[data-testid="order-appeal-state"]')
+    expect(state.text()).toContain('审核中')
+    expect(state.text()).toContain('计量争议')
+    // 契约：有申诉的订单不能再评价
+    expect(wrapper.get('[data-testid="order-review-blocked"]').text()).toContain('生效中的申诉')
+    expect(wrapper.find('[data-testid="review-submit"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('已驳回：显示处理意见，并恢复评价入口', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubServer(envelope({ id: 9, status: 'PENDING' }, { status: 201 }), {
+        existingAppeal: {
+          id: 9,
+          orderNo: ORDER_NO,
+          reason: '计量争议',
+          status: 'REJECTED',
+          decisionReason: '计量与设备记录一致，申诉不成立',
+          orderAmountCent: 180,
+          orderPaidCent: 180
+        }
+      })
+    )
+    const { wrapper } = await mountView()
+
+    expect(wrapper.get('[data-testid="order-appeal-status"]').text()).toBe('已驳回')
+    expect(wrapper.get('[data-testid="order-appeal-decision-reason"]').text()).toContain('计量与设备记录一致')
+    // 驳回的申诉不再阻止评价
+    expect(wrapper.find('[data-testid="order-review-blocked"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="review-submit"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('已通过：明确告知退款已退回', async () => {
+    vi.stubGlobal(
+      'fetch',
+      stubServer(envelope({ id: 9, status: 'PENDING' }, { status: 201 }), {
+        existingAppeal: { id: 9, orderNo: ORDER_NO, reason: '计量争议', status: 'APPROVED', orderAmountCent: 180, orderPaidCent: 180 }
+      })
+    )
+    const { wrapper } = await mountView()
+
+    expect(wrapper.get('[data-testid="order-appeal-status"]').text()).toContain('已通过')
+    expect(wrapper.get('[data-testid="order-appeal-status"]').text()).toContain('退回钱包')
+    wrapper.unmount()
+  })
+})
+
+describe('已通过后的申诉可见性', () => {
+  it('审核通过把订单变已取消后，用户仍能看到"已通过、已退款"', async () => {
+    // 通过申诉会让订单从 COMPLETED 变 CANCELLED：申诉盒不能因此消失，
+    // 否则用户只看到一个莫名其妙的"已取消"。
+    const cancelled = { ...COMPLETED_ORDER, status: 'CANCELLED' }
+    const fetchMock = stubServer(
+      envelope({ id: 9, status: 'PENDING' }, { status: 201 }),
+      { existingAppeal: { id: 9, orderNo: ORDER_NO, reason: '计量争议', status: 'APPROVED', orderAmountCent: 180, orderPaidCent: 180 } }
+    )
+    vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
+      if (/\/api\/v1\/orders\/[^/]+$/.test(String(url))) return envelope(cancelled)
+      return fetchMock(url, init)
+    }))
+
+    const { wrapper } = await mountView()
+    expect(wrapper.get('[data-testid="order-appeal-status"]').text()).toContain('已通过')
+    expect(wrapper.get('[data-testid="order-appeal-status"]').text()).toContain('退回钱包')
     wrapper.unmount()
   })
 })

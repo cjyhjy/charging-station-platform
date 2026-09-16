@@ -16,6 +16,14 @@ export function approveAppeal(appealId) {
   return api.post(`/admin/appeals/${encodeURIComponent(appealId)}/approve`).then(mapAppeal)
 }
 
+/**
+ * 审核驳回：申诉转 REJECTED 并记录处理意见，**订单与钱包都不动**——退款与取消订单是"通过"才做的事。
+ * 契约保证重复决策是无操作且不改变已有结论，因此同样不带幂等键。
+ */
+export function rejectAppeal(appealId, reason) {
+  return api.post(`/admin/appeals/${encodeURIComponent(appealId)}/reject`, { reason }).then(mapAppeal)
+}
+
 function mapAppealPage(data) {
   return { ...data, items: (Array.isArray(data.items) ? data.items : []).map(mapAppeal) }
 }

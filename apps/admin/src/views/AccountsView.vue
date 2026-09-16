@@ -2,8 +2,8 @@
 /**
  * 管理员账号（接口文档 §6.8–§6.11）。
  *
- * Go 契约暂无该域（api/account.js 抛 unsupported），页面按可写角色门控并显示真实原因；
- * 创建账号与停启用属于敏感操作（重新验证 + 幂等键），创建出来的账号角色固定为 OPERATOR
+ * 账号管理只向超级管理员开放；创建账号与停启用属于敏感操作（幂等键 + 版本校验），
+ * 创建出来的账号角色固定为 OPERATOR
  * 且 mustChangePassword=true。
  * 页面同时提供“修改本人密码”，用于完成首次登录改密与定期换密。
  */
@@ -12,7 +12,7 @@ import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FormDialog from '@/components/FormDialog.vue'
 import StatusPill from '@/components/StatusPill.vue'
-import { ADMIN_ROLES, ADMIN_STATUS } from '@/utils/domain'
+import { ADMIN_STATUS } from '@/utils/domain'
 import { useAccountsStore } from '@/stores/accounts'
 import { useAuthStore } from '@/stores/auth'
 
@@ -30,7 +30,7 @@ const passwordLoading = ref(false)
 const passwordNotice = ref('')
 
 onMounted(() => {
-  if (auth.canWrite) accounts.load()
+  if (auth.isSuperAdmin) accounts.load()
 })
 
 const columns = [
@@ -47,8 +47,6 @@ const createFields = computed(() => [
   { key: 'password', label: '初始密码', type: 'password', required: true, minLength: 10, maxLength: 128, help: '10~128 位，仅用于首次登录' },
   { key: 'reason', label: '创建原因', required: true, minLength: 2, maxLength: 200, help: '写入审计日志' }
 ])
-
-const roleSummary = computed(() => ADMIN_ROLES.map(item => item.label).join('、'))
 
 const statusHint = computed(() => {
   if (!statusTarget.value) return ''
@@ -108,14 +106,14 @@ async function submitPassword() {
     <p v-if="auth.mustChangePassword" class="alert" data-testid="accounts-must-change-hint">
       当前账号处于首次登录状态（mustChangePassword=true），请先在下方修改密码。
     </p>
-    <p v-if="!auth.canWrite" class="alert" data-testid="accounts-permission-hint">
-      管理员账号列表与写入需要可写管理员角色（{{ roleSummary }}）；服务端会拒绝越权请求。
+    <p v-if="!auth.isSuperAdmin" class="alert" data-testid="accounts-permission-hint">
+      管理员账号管理仅向超级管理员开放。
     </p>
     <p v-if="accounts.notice" class="alert alert--ok" data-testid="accounts-notice">{{ accounts.notice }}</p>
     <p v-if="accounts.error" class="alert alert--error" data-testid="accounts-error-banner">{{ accounts.error }}</p>
     <p v-if="accounts.conflict" class="alert" data-testid="accounts-conflict">{{ accounts.conflict }}</p>
 
-    <section v-if="auth.canWrite" class="panel" v-reveal>
+    <section v-if="auth.isSuperAdmin" class="panel" v-reveal>
       <div class="panel__title">
         <div>
           <h2>管理员账号</h2>

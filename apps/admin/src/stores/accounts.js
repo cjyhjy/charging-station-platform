@@ -6,8 +6,7 @@ import { useAuthStore } from './auth'
 
 /**
  * 管理员账号状态（接口文档 §6.8–§6.10）。
- * Go 契约暂无管理员账号域（api/account.js 直接抛 unsupported），页面据此门控；
- * 契约补齐后写入还需要重新验证（服务端返回 REAUTH_REQUIRED 时由 auth store 弹窗后原幂等键重试）。
+ * 列表、创建与启停均由 Go 管理接口提供；写操作携带幂等键并使用版本号防止覆盖并发修改。
  */
 export const useAccountsStore = defineStore('adminAccounts', {
   state: () => ({
@@ -42,8 +41,6 @@ export const useAccountsStore = defineStore('adminAccounts', {
       } catch (error) {
         this.items = []
         this.total = 0
-        // api/account.js 的 unsupported 会带 userMessage（“暂未提供”）；这句只是兜底，
-        // 不能说成权限问题——Go 角色是 SUPER_ADMIN/OPERATOR/AUDITOR，没有 OWNER。
         this.error = error?.userMessage || '管理员账号加载失败，请稍后重试'
         return false
       } finally {

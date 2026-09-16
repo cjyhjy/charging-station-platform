@@ -32,9 +32,16 @@ const reviewBusy = ref(false)
 const appealReason = ref('')
 const appealError = ref('')
 const appealBusy = ref(false)
-const appealDone = ref(false)
-/** 该订单已存在申诉（契约：一单一申诉，内容不同返回 409）。 */
+/** 该订单已存在但状态未知的申诉（409 后重新查询也失败时的兜底）。 */
 const appealExists = ref(false)
+/** 409：该订单已有申诉，本次填写的内容没有被保存。 */
+const appealConflict = ref(false)
+/**
+ * 该订单已存在的申诉（PENDING/APPROVED/REJECTED）。
+ * 契约给了本人查询端点，所以刷新页面后也能显示"审核中/已通过/已驳回"，
+ * 而不是又把申诉表单摆出来——以前用户投过一次却看不到任何结果，只能反复重投。
+ */
+const existingAppeal = ref(null)
 const stationNames = ref({})
 
 const confirmingOrderNo = ref('')
@@ -121,8 +128,9 @@ async function openOrder(orderNo) {
   review.value = null
   reviewError.value = ''
   appealError.value = ''
-  appealDone.value = false
   appealExists.value = false
+  appealConflict.value = false
+  existingAppeal.value = null
   pendingReviewKey = null
   pendingAppealKey = null
   content.value = ''
@@ -131,6 +139,14 @@ async function openOrder(orderNo) {
     receipt.value = withStationName(await orderApi.fetchOrderReceipt(orderNo))
   } catch (caught) {
     reviewError.value = caught?.userMessage || '订单小票加载失败'
+  }
+  try {
+    existingAppeal.value = await orderApi.fetchOrderAppeal(orderNo)
+    if (existingAppeal.value) appealExists.value = true
+  } catch (caught) {
+    // 申诉状态拿不到不影响小票与评价；表单仍可用，提交时服务端会给出准确结论。
+    existingAppeal.value = null
+    void caught
   }
   try {
     review.value = await orderApi.fetchOrderReview(orderNo)
@@ -176,16 +192,22 @@ async function submitAppeal() {
   appealError.value = ''
   pendingAppealKey = pendingAppealKey || randomId()
   try {
-    await orderApi.createAppeal(selectedOrderNo.value, { reason }, pendingAppealKey)
+    const created = await orderApi.createAppeal(selectedOrderNo.value, { reason }, pendingAppealKey)
     pendingAppealKey = null
-    appealDone.value = true
+    existingAppeal.value = created ? { ...created, status: created.status || 'PENDING' } : { status: 'PENDING' }
   } catch (caught) {
     if (caught?.status === 409) {
       // 契约：同一订单只能有一条申诉，内容不同返回 409。
-      // 以前这里直接置 appealDone=true，用户会以为"这次填的内容也被受理了"。
-      appealExists.value = true
-      appealError.value = ''
+      // 以前这里直接当成"提交成功"，用户会以为这次填的内容也被受理了。
       pendingAppealKey = null
+      appealConflict.value = true
+      appealError.value = ''
+      try {
+        existingAppeal.value = await orderApi.fetchOrderAppeal(selectedOrderNo.value)
+      } catch {
+        existingAppeal.value = null
+      }
+      if (!existingAppeal.value) appealExists.value = true
     } else {
       appealError.value = caught?.userMessage || '申诉提交失败，请稍后重试'
     }
@@ -193,6 +215,17 @@ async function submitAppeal() {
     appealBusy.value = false
   }
 }
+
+/** 本人申诉状态文案；PENDING/APPROVED 属于"仍在生效"（会阻止评价）。 */
+const appealStatusText = status => {
+  if (status === 'PENDING') return '审核中'
+  if (status === 'APPROVED') return '已通过（实付金额已退回钱包）'
+  if (status === 'REJECTED') return '已驳回'
+  return status || '—'
+}
+
+/** 生效中的申诉会阻止评价（契约：有申诉的订单不能再评价）。 */
+const liveAppeal = computed(() => existingAppeal.value !== null && existingAppeal.value.status !== 'REJECTED')
 
 function changeStatus(value) {
   statusFilter.value = value
@@ -290,7 +323,12 @@ function changeStatus(value) {
         <div v-if="receipt && receipt.status === 'COMPLETED'" class="review-box" data-testid="order-review">
           <h3>订单评价</h3>
 
-          <div v-if="review" data-testid="order-review-existing">
+          <!-- 契约：有申诉的订单不能再评价。与其让用户填完再吃一个错误，不如说清楚。 -->
+          <div v-if="liveAppeal && !review" data-testid="order-review-blocked">
+            <p>该订单有生效中的申诉（{{ appealStatusText(existingAppeal.status) }}），申诉处理完之前不能评价。</p>
+          </div>
+
+          <div v-else-if="review" data-testid="order-review-existing">
             <p>{{ '★'.repeat(review.rating) }} {{ review.content }}</p>
             <p class="muted">{{ formatDateTime(review.createdAt) }}</p>
           </div>
@@ -311,11 +349,29 @@ function changeStatus(value) {
           <p v-if="reviewError" class="alert alert--error" data-testid="review-error">{{ reviewError }}</p>
         </div>
 
-        <div v-if="receipt && receipt.status === 'COMPLETED'" class="review-box" data-testid="order-appeal">
+        <!--
+          申诉盒对所有订单开放（只要有申诉或订单已完成）：审核通过会把订单变 CANCELLED，
+          若只在 COMPLETED 时渲染，用户就再也看不到"已通过、已退款"，只看到一个莫名其妙的"已取消"。
+        -->
+        <div
+          v-if="existingAppeal || (receipt && receipt.status === 'COMPLETED')"
+          class="review-box"
+          data-testid="order-appeal"
+        >
           <h3>订单申诉</h3>
 
-          <div v-if="appealDone" data-testid="order-appeal-done">
-            <p>申诉已提交，客服审核通过后会把实付金额退回钱包。</p>
+          <!-- 已有申诉：显示真实状态与处理意见，而不是再摆一遍表单 -->
+          <div v-if="existingAppeal" data-testid="order-appeal-state">
+            <p>
+              申诉状态：<strong data-testid="order-appeal-status">{{ appealStatusText(existingAppeal.status) }}</strong>
+            </p>
+            <p v-if="existingAppeal.reason" class="muted">申诉内容：{{ existingAppeal.reason }}</p>
+            <p v-if="existingAppeal.decisionReason" class="muted" data-testid="order-appeal-decision-reason">
+              客服处理意见：{{ existingAppeal.decisionReason }}
+            </p>
+            <p v-if="appealConflict" data-testid="order-appeal-conflict">
+              同一订单只能申诉一次，本次填写的内容没有提交。
+            </p>
           </div>
 
           <div v-else-if="appealExists" data-testid="order-appeal-exists">

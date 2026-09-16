@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { approveAppeal, fetchAppeals } from '../api/appeals'
+import { approveAppeal, fetchAppeals, rejectAppeal } from '../api/appeals'
 import { toInteger } from '../utils/format'
 
 /**
@@ -71,6 +71,36 @@ export const useAppealsStore = defineStore('adminAppeals', {
       if (target === null || target < 1) return Promise.resolve(false)
       this.page = Math.min(target, this.pageCount)
       return this.load()
+    },
+
+    /**
+     * 审核驳回：申诉转 REJECTED 并记录处理意见。订单保持完成、钱包不动 ——
+     * 以前队列里只有"通过"，一条站不住脚的申诉只能靠退款才能关掉。
+     */
+    async reject(appeal, reason) {
+      this.saving = true
+      this.error = ''
+      this.notice = ''
+      try {
+        const data = await rejectAppeal(appeal.id, reason)
+        this.items = this.items.map(item =>
+          item.id === appeal.id
+            ? {
+                ...item,
+                status: data.status || 'REJECTED',
+                decidedAt: data.decidedAt ?? item.decidedAt,
+                decisionReason: data.decisionReason ?? reason
+              }
+            : item
+        )
+        this.notice = `申诉 #${appeal.id} 已驳回，订单与钱包保持不变`
+        return true
+      } catch (error) {
+        this.error = error?.userMessage || '驳回失败，请稍后重试'
+        return false
+      } finally {
+        this.saving = false
+      }
     },
 
     /** 审核通过：申诉转 APPROVED、订单取消、实付金额退回钱包并写审计（服务端同事务）。 */
