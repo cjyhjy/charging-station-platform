@@ -428,3 +428,44 @@ func TestListAcceptsTheRegisteredQuerySurface(t *testing.T) {
 		}
 	}
 }
+
+func TestConfirmOrderEndpoint(t *testing.T) {
+	f := newFixture(t, auth.Identity{ID: 7, Role: auth.RoleUser, Status: auth.StatusActive}, true)
+	f.store.stopResult = Order{OrderNo: "ORD20260916000000aaaa", Status: StatusCompleted, PaymentStatus: "PAID", PaidCent: 180}
+
+	// The settlement commits synchronously: 200 with the settled order.
+	recorder, payload := do(t, f.server.Handler(), http.MethodPost, "/api/v1/orders/ORD20260916000000aaaa/confirm", "",
+		map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	data := payload["data"].(map[string]any)
+	if data["status"] != StatusCompleted || data["paymentStatus"] != "PAID" {
+		t.Fatalf("confirm data = %#v", data)
+	}
+
+	// Missing key, wrong method, wrong state.
+	recorder, _ = do(t, f.server.Handler(), http.MethodPost, "/api/v1/orders/ORD20260916000000aaaa/confirm", "", nil)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("confirm without key status = %d", recorder.Code)
+	}
+	recorder, _ = do(t, f.server.Handler(), http.MethodGet, "/api/v1/orders/ORD20260916000000aaaa/confirm", "", nil)
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET confirm status = %d", recorder.Code)
+	}
+	f.store.stopErr = ErrInvalidStateTransition
+	recorder, payload = do(t, f.server.Handler(), http.MethodPost, "/api/v1/orders/ORD20260916000000aaaa/confirm", "",
+		map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusConflict || payload["code"].(float64) != codeInvalidStateTransition {
+		t.Fatalf("invalid confirm: status = %d code = %v", recorder.Code, payload["code"])
+	}
+
+	// A completed-but-unsettled order is exactly what confirm resolves; the
+	// anonymous and admin-role guards behave like every other user route.
+	anonymous := newFixture(t, auth.Identity{}, false)
+	recorder, _ = do(t, anonymous.server.Handler(), http.MethodPost, "/api/v1/orders/ORD20260916000000aaaa/confirm", "",
+		map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous confirm status = %d", recorder.Code)
+	}
+}

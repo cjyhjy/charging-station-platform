@@ -57,6 +57,7 @@ func (h *Handlers) Register(server interface {
 	server.Register("/api/v1/orders/{orderNo}/start", h.auth.RequireRole(auth.RoleUser, h.startCharging))
 	server.Register("/api/v1/orders/{orderNo}/stop", h.auth.RequireRole(auth.RoleUser, h.stopCharging))
 	server.Register("/api/v1/orders/{orderNo}/cancel", h.auth.RequireRole(auth.RoleUser, h.cancelOrder))
+	server.Register("/api/v1/orders/{orderNo}/confirm", h.auth.RequireRole(auth.RoleUser, h.confirmOrder))
 }
 
 type createOrderRequest struct {
@@ -201,6 +202,17 @@ func (h *Handlers) stopCharging(w http.ResponseWriter, r *http.Request) {
 // contract declares a synchronous 200, unlike the 202 start/stop commands.
 func (h *Handlers) cancelOrder(w http.ResponseWriter, r *http.Request) {
 	h.respondWithStatus(w, r, http.StatusOK, h.service.Cancel)
+}
+
+// confirmOrder handles POST /api/v1/orders/{orderNo}/confirm (UC-U-09): the
+// user settles a completed order's pending bill from the wallet. It is a
+// synchronous 200 like cancel - the settlement commits in this response and
+// no device round-trip is involved. Until this runs, the one-unsettled-order
+// rule keeps the user from opening a new flow.
+func (h *Handlers) confirmOrder(w http.ResponseWriter, r *http.Request) {
+	h.respondWithStatus(w, r, http.StatusOK, func(ctx context.Context, command TransitionCommand) (Order, error) {
+		return h.service.Settle(ctx, SettleCommand{TransitionCommand: command})
+	})
 }
 
 func (h *Handlers) transition(w http.ResponseWriter, r *http.Request, action func(ctx context.Context, command TransitionCommand) (Order, error)) {

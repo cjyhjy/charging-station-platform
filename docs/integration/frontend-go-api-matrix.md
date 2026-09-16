@@ -59,6 +59,7 @@
 | POST | `/orders/{orderNo}/start` | `RequireRole(RoleUser, startCharging)` | ✅ | ✅ | MATCH |
 | POST | `/orders/{orderNo}/stop` | `RequireRole(RoleUser, stopCharging)` | ✅ | ✅ | MATCH |
 | POST | `/orders/{orderNo}/cancel` | `RequireRole(RoleUser, cancelOrder)` | ✅ | ✅ | MATCH |
+| POST | `/orders/{orderNo}/confirm` | `RequireRole(RoleUser, confirmOrder)` | ✅ | ✅ | MATCH（UC-U-09 结算：COMPLETED+PENDING → PAID/PARTIAL_PAID；未结算订单阻止新流程，前端小票与订单列表均已提供确认入口） |
 | GET | `/orders/{orderNo}/review` | `RequireIdentity(reviewRoutes)` | ✅ | – | MATCH |
 | POST | `/orders/{orderNo}/review` | 同上 | ✅ | – | MATCH |
 | POST | `/orders/{orderNo}/appeal` | `RequireIdentity(createAppeal)` | ✅ | – | MATCH |

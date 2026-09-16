@@ -626,6 +626,39 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /orders/{orderNo}/confirm:
+    post:
+      tags: [orders]
+      operationId: confirmOrder
+      description: |-
+        UC-U-09 user confirmation of a completed order: the pending bill is
+        deducted from the wallet (an insufficient balance is drawn to zero
+        and the remainder stays recorded as debt) and the payment state
+        becomes PAID or PARTIAL_PAID. Idempotent through Idempotency-Key.
+
+        A completed-but-unsettled order blocks new flows, so this is the step
+        that closes the charging loop, not an optional extra.
+      parameters:
+        - $ref: '#/components/parameters/OrderNo'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Payment recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Order not completed, already settled, or in a state
+            that cannot be confirmed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
 
   /orders/{orderNo}/review:
     post:
