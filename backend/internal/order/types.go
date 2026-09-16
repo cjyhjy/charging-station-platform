@@ -49,6 +49,10 @@ var (
 	// an unsettled (PENDING) completed order; at most one unsettled order
 	// may exist per user.
 	ErrDebtOutstanding = errors.New("order: user has an unsettled order")
+	// ErrReservationExpired maps to 409 RESERVATION_EXPIRED. A reservation
+	// that reached its deadline is atomically expired and its charger is
+	// released before this error is returned.
+	ErrReservationExpired = errors.New("order: reservation has expired")
 
 	// Device receipt errors (BE-I-02). A receipt is a business fact the charger
 	// gateway reports, so these are all client errors: none of them is fixed by
@@ -81,17 +85,40 @@ const (
 // PaymentStatus tracks the pending-payment lifecycle (UC-U-09): PENDING
 // from completion until confirmation, then PAID or PARTIAL_PAID.
 type Order struct {
-	OrderNo       string    `json:"orderNo"`
-	UserID        int64     `json:"userId"`
-	StationID     int64     `json:"stationId"`
-	ChargerID     int64     `json:"chargerId"`
-	Status        string    `json:"status"`
-	AmountCent    int64     `json:"amountCent"`
-	PaidCent      int64     `json:"paidCent,omitempty"`
-	PaymentStatus string    `json:"paymentStatus,omitempty"`
-	EnergyWh      int64     `json:"energyWh,omitempty"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt,omitempty"`
+	OrderNo   string `json:"orderNo"`
+	UserID    int64  `json:"userId"`
+	StationID int64  `json:"stationId"`
+	ChargerID int64  `json:"chargerId"`
+	Status    string `json:"status"`
+	// ReservedUntil is present while the order is in CREATED, which is the
+	// concrete-device reservation stage. The user must start or cancel before
+	// this UTC deadline.
+	ReservedUntil *time.Time `json:"reservedUntil,omitempty"`
+	AmountCent    int64      `json:"amountCent"`
+	PaidCent      int64      `json:"paidCent,omitempty"`
+	PaymentStatus string     `json:"paymentStatus,omitempty"`
+	EnergyWh      int64      `json:"energyWh,omitempty"`
+	// StartedAt is the device's fact time for the start (CHARGE_STARTED receipt).
+	// Absent until the device confirms the start.
+	StartedAt *time.Time `json:"startedAt,omitempty"`
+	// ChargerPowerWatt is the rated power of the bound charger, and
+	// UnitPriceCentPerKwh the price per kWh that applies right now (the frozen
+	// snapshot resolved against the off-peak window in the billing timezone).
+	// They are the estimate basis a client may use before the first meter reading
+	// arrives; the reading itself is MeteredEnergyWh/MeteredAmountCent.
+	ChargerPowerWatt    *int64 `json:"chargerPowerWatt,omitempty"`
+	UnitPriceCentPerKwh *int64 `json:"unitPriceCentPerKwh,omitempty"`
+	// MeteredEnergyWh and MeteredAmountCent are the running meter while the
+	// charger is charging (the latest CHARGE_PROGRESS reading) and what that
+	// energy costs at the frozen snapshot. They stay separate from
+	// EnergyWh/AmountCent, which are the settled figures the bill is built from:
+	// a live reading must never leak into settled money. MeteredAt is the
+	// reading's own device fact time.
+	MeteredEnergyWh   *int64     `json:"meteredEnergyWh,omitempty"`
+	MeteredAmountCent *int64     `json:"meteredAmountCent,omitempty"`
+	MeteredAt         *time.Time `json:"meteredAt,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt,omitempty"`
 }
 
 // PageMeta is the contract pagination metadata.
@@ -167,6 +194,22 @@ type ConfirmStopCommand struct {
 	TraceID      string
 }
 
+// ConfirmProgressCommand carries one running-meter reading from the charger.
+//
+// Readings are absolute (energy delivered so far) and monotonic: the store keeps
+// the latest one and ignores a lower reading, which is what makes the receipt
+// safe to retry without an idempotency key. Progress never settles an order -
+// the stop receipt still decides the bill.
+type ConfirmProgressCommand struct {
+	OrderNo     string
+	ChargerID   int64
+	EnergyWh    int64
+	OccurredAt  time.Time
+	EventID     string
+	RequestHash string
+	TraceID     string
+}
+
 // StopRecoveryPolicy bounds the STOP recovery sweep: how many STOP_CHARGING
 // commands one order may accumulate, and how long the sweep waits between two
 // of them.
@@ -230,6 +273,7 @@ type Store interface {
 	CancelOrder(ctx context.Context, command TransitionCommand) (Order, error)
 	ConfirmStart(ctx context.Context, command ConfirmStartCommand) (Order, error)
 	ConfirmStop(ctx context.Context, command ConfirmStopCommand) (Order, error)
+	ConfirmProgress(ctx context.Context, command ConfirmProgressCommand) (Order, error)
 	// SettleOrder executes the UC-U-09 user confirmation of a completed
 	// order: deduct the pending bill from the wallet and record the payment.
 	SettleOrder(ctx context.Context, command SettleCommand) (Order, error)
@@ -295,7 +339,8 @@ func (s *Service) SetFactTimeSkew(skew time.Duration) error {
 	return nil
 }
 
-// Create validates and creates an order in status CREATED.
+// Create validates and creates a 15-minute device reservation in status
+// CREATED. Starting the charge is a separate, explicit user action.
 func (s *Service) Create(ctx context.Context, command CreateOrderCommand) (Order, error) {
 	if command.UserID < 1 || command.ChargerID < 1 {
 		return Order{}, ErrInvalidChargerID
@@ -303,7 +348,8 @@ func (s *Service) Create(ctx context.Context, command CreateOrderCommand) (Order
 	return s.store.CreateOrder(ctx, command)
 }
 
-// Start moves a CREATED order to STARTING after a user start request.
+// Start moves an unexpired CREATED reservation to STARTING after a user start
+// request.
 func (s *Service) Start(ctx context.Context, command TransitionCommand) (Order, error) {
 	if err := validateTransitionCommand(command); err != nil {
 		return Order{}, err
@@ -380,6 +426,24 @@ func (s *Service) ConfirmStart(ctx context.Context, command ConfirmStartCommand)
 		return Order{}, err
 	}
 	return s.store.ConfirmStart(ctx, command)
+}
+
+// ConfirmProgress applies one running-meter reading from the charger.
+//
+// It only applies to an order that is CHARGING. The charger id and the fact time
+// are validated exactly like the other receipts, because the reading decides what
+// the app shows as the amount accrued so far.
+func (s *Service) ConfirmProgress(ctx context.Context, command ConfirmProgressCommand) (Order, error) {
+	if err := validateOrderNo(command.OrderNo); err != nil {
+		return Order{}, err
+	}
+	if err := s.validateReceipt(command.ChargerID, command.OccurredAt, command.EventID); err != nil {
+		return Order{}, err
+	}
+	if command.EnergyWh < 0 {
+		return Order{}, errors.New("order: metered energy must not be negative")
+	}
+	return s.store.ConfirmProgress(ctx, command)
 }
 
 // ConfirmStop moves a STOPPING order to COMPLETED, computing the billed

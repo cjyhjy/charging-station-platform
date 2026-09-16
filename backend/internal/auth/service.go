@@ -66,6 +66,12 @@ type AccountReader interface {
 	FindAdminByUsername(ctx context.Context, username string) (*AdminAccount, error)
 }
 
+// AdminStatusReader is an optional stronger read used to revalidate live administrator sessions.
+// PostgreSQL implements it; lightweight test readers may omit it and keep snapshot-only behavior.
+type AdminStatusReader interface {
+	FindAdminByID(ctx context.Context, adminID int64) (*AdminAccount, error)
+}
+
 // AccountWriter ensures an account exists. UC-U-01 requires the first SMS
 // login to register the user and the wallet; the method executes the same
 // statement sequence whether or not the account already exists, so response
@@ -452,6 +458,22 @@ func (s *Service) Identify(ctx context.Context, token string) (Identity, error) 
 			return Identity{}, ErrUnauthorized
 		}
 		return Identity{}, fmt.Errorf("auth: load session: %w", err)
+	}
+	if session.Role == RoleAdmin {
+		if reader, ok := s.accounts.(AdminStatusReader); ok {
+			account, err := reader.FindAdminByID(ctx, session.IdentityID)
+			if err != nil {
+				return Identity{}, fmt.Errorf("auth: revalidate administrator: %w", err)
+			}
+			if account == nil || account.Status != StatusActive {
+				_ = s.sessions.Delete(ctx, token)
+				return Identity{}, ErrUnauthorized
+			}
+			// Role and display name come from PostgreSQL, so a changed account never
+			// keeps stale authorization merely because its session predates the change.
+			session.AdminRole = account.Role
+			session.DisplayName = account.Username
+		}
 	}
 
 	return Identity{

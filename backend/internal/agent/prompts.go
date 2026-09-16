@@ -37,7 +37,7 @@ const dataInstructionTail = "如果数据为空，请如实说明并给出下一
 
 const (
 	// llmUnavailableNotice opens a reply written without a model.
-	llmUnavailableNotice = "智能助手暂时不可用，已为你按规则整理了下面的结果。"
+	llmUnavailableNotice = "已根据实时站点数据为你整理了下面的结果。"
 	// noStationNotice is used when a station search legitimately found nothing.
 	noStationNotice = "附近暂时没有符合条件的充电站。"
 	// stationQueryFailedNotice is used when the station search itself failed,

@@ -25,6 +25,8 @@ type fakeStore struct {
 	startErr       error
 	stopResult     Order
 	stopErr        error
+	progress       []ConfirmProgressCommand
+	progressErr    error
 	getResult      Order
 	getErr         error
 	listResult     OrderPage
@@ -82,6 +84,14 @@ func (f *fakeStore) ReissueStopCommands(context.Context, StopRecoveryPolicy) (St
 
 func (f *fakeStore) ConfirmStart(context.Context, ConfirmStartCommand) (Order, error) {
 	return Order{}, nil
+}
+
+func (f *fakeStore) ConfirmProgress(_ context.Context, command ConfirmProgressCommand) (Order, error) {
+	f.progress = append(f.progress, command)
+	if f.progressErr != nil {
+		return Order{}, f.progressErr
+	}
+	return Order{OrderNo: command.OrderNo, Status: StatusCharging}, nil
 }
 
 func (f *fakeStore) ConfirmStop(context.Context, ConfirmStopCommand) (Order, error) {
@@ -268,6 +278,13 @@ func TestTransitionEndpointsAndReplayShape(t *testing.T) {
 		map[string]string{"Idempotency-Key": idemKey})
 	if recorder.Code != http.StatusConflict || payload["code"].(float64) != codeInvalidStateTransition {
 		t.Fatalf("invalid transition: status = %d code = %v", recorder.Code, payload["code"])
+	}
+
+	f.store.startErr = ErrReservationExpired
+	recorder, payload = do(t, f.server.Handler(), http.MethodPost, "/api/v1/orders/ORD20260914120000aaaa/start", "",
+		map[string]string{"Idempotency-Key": idemKey})
+	if recorder.Code != http.StatusConflict || payload["code"].(float64) != codeReservationExpired {
+		t.Fatalf("expired reservation: status = %d code = %v", recorder.Code, payload["code"])
 	}
 }
 

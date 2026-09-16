@@ -39,6 +39,14 @@ const (
 	// defaultEnergyWh is what a simulated stop reports when nothing else is configured: 1 kWh, the
 	// figure the closed-loop verification bills, so a manual run and the gate agree.
 	defaultEnergyWh = 1000
+	// defaultMeterInterval is how often a charging device reports its running meter once receipt
+	// reporting is enabled. Receipt reporting itself stays opt-in, so verification gates that drive
+	// device facts explicitly are unchanged; a developer who asks for the automatic device loop,
+	// however, gets a complete loop instead of a charge with no live readings.
+	defaultMeterInterval = 3 * time.Second
+	// defaultChargeSeconds is how long the simulated session takes to reach the configured
+	// energy: the running meter ramps linearly over it and then holds.
+	defaultChargeSeconds = 60.0
 
 	// receiptTimeout bounds one report. The receipt endpoint writes the order, the bill and the
 	// outbox event in one transaction, so it is fast; a report slower than this is not going to
@@ -48,6 +56,8 @@ const (
 	// The two receipt types of the frozen contract.
 	eventTypeChargeStarted = "CHARGE_STARTED"
 	eventTypeChargeStopped = "CHARGE_STOPPED"
+	// eventTypeChargeProgress is the running meter a charger reports while it is charging.
+	eventTypeChargeProgress = "CHARGE_PROGRESS"
 
 	// The platform's own limits on a receipt id (order.minReceiptIDLength /
 	// maxReceiptIDLength). They are enforced here so a misconfigured command id fails in the mock
@@ -219,9 +229,16 @@ func (g *mockGateway) buildFact(record *commandRecord, reporter *receiptReporter
 		TraceID:    strings.TrimSpace(record.traceID),
 	}
 	if eventType == eventTypeChargeStopped {
+		// With running-meter reporting on, the stop settles what the simulated meter actually
+		// counted: a device that showed 0.25 kWh while charging cannot claim 1 kWh in its stop
+		// fact. Without it the mock has no meter to speak for, so it reports the configured
+		// session energy exactly as it always has.
+		energy := reporter.energyWh
+		if counted, ok := g.meterEnergyLocked(record.orderNo); ok {
+			energy = counted
+		}
 		// The meter readings are consistent with the metered energy on purpose: the platform refuses
 		// a stop whose readings do not add up to the energy it is asked to bill.
-		energy := reporter.energyWh
 		start := int64(0)
 		fact.EnergyWh = &energy
 		fact.MeterStartWh = &start

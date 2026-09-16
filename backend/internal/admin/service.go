@@ -351,8 +351,9 @@ type StationRecordCharger struct {
 
 // Service validates commands and delegates persistence to a Store.
 type Service struct {
-	store Store
-	clock func() time.Time
+	store    Store
+	accounts accountManagementStore
+	clock    func() time.Time
 }
 
 // NewService wires the service to its store.
@@ -360,7 +361,9 @@ func NewService(store Store) (*Service, error) {
 	if store == nil {
 		return nil, errors.New("admin: store is required")
 	}
-	return &Service{store: store, clock: time.Now}, nil
+	service := &Service{store: store, clock: time.Now}
+	service.accounts, _ = store.(accountManagementStore)
+	return service, nil
 }
 
 // Create validates and creates a station in status OPEN.

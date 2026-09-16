@@ -186,7 +186,7 @@ LIMIT $4 OFFSET $5`
 
 	page := order.OrderPage{Meta: order.PageMeta{Page: filter.Page, PageSize: filter.PageSize}}
 	for rows.Next() {
-		result, err := scanAdminOrderRow(rows)
+		result, err := s.scanAdminOrderRow(rows)
 		if err != nil {
 			return order.OrderPage{}, err
 		}
@@ -295,20 +295,25 @@ VALUES ('ADMIN', $1, $2, $3, $4, $5, $6::jsonb)`,
 // claimIdempotency and finalizeIdempotency are shared with the order store;
 // they are defined once in orders.go and reused here.
 
-func scanAdminOrderRow(rows *sql.Rows) (order.Order, error) {
+func (s *AdminStore) scanAdminOrderRow(rows *sql.Rows) (order.Order, error) {
 	var result order.Order
 	var id int64
 	var pricePerKwh, servicePrice, offPeakPrice sql.NullInt64
 	var offPeakStartHour, offPeakEndHour sql.NullInt16
-	var startedAt sql.NullTime
+	var startedAt, meteredAt sql.NullTime
+	var meteredEnergyWh int64
+	var requestedAt time.Time
+	// The admin list shares orderSelectColumns with the user-side reads, so it has to consume every
+	// column that list selects - including the running meter added for CHARGE_PROGRESS.
 	if err := rows.Scan(&id, &result.OrderNo, &result.UserID, &result.StationID, &result.ChargerID,
 		&result.Status, &result.AmountCent, &result.PaidCent, &result.PaymentStatus, &result.EnergyWh,
-		&pricePerKwh, &servicePrice, &offPeakPrice, &offPeakStartHour, &offPeakEndHour, &startedAt,
-		&result.CreatedAt, &result.UpdatedAt); err != nil {
+		&pricePerKwh, &servicePrice, &offPeakPrice, &offPeakStartHour, &offPeakEndHour, &requestedAt, &startedAt,
+		&result.CreatedAt, &result.UpdatedAt, &meteredEnergyWh, &meteredAt); err != nil {
 		return order.Order{}, err
 	}
 	result.CreatedAt = result.CreatedAt.UTC()
 	result.UpdatedAt = result.UpdatedAt.UTC()
+	s.setReservationWindow(&result, requestedAt)
 	return result, nil
 }
 

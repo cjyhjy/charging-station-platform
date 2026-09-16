@@ -524,6 +524,10 @@ paths:
     post:
       tags: [orders]
       operationId: createOrder
+      description: |-
+        Creates a 15-minute charger reservation in CREATED state (UC-U-07).
+        The charger is held immediately, but no device start command is sent;
+        the user must explicitly call the start endpoint before reservedUntil.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -534,7 +538,7 @@ paths:
               $ref: '#/components/schemas/CreateOrderRequest'
       responses:
         '201':
-          description: Order created
+          description: Charger reserved for 15 minutes
           content:
             application/json:
               schema:
@@ -566,6 +570,11 @@ paths:
     post:
       tags: [orders]
       operationId: startCharging
+      description: |-
+        Starts a CREATED reservation after revalidating its owner, deadline,
+        wallet balance and charger state. An expired reservation is marked
+        EXPIRED, releases the charger, and returns code 17
+        (RESERVATION_EXPIRED).
       parameters:
         - $ref: '#/components/parameters/OrderNo'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -582,6 +591,12 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '422':
+          description: Reservation deadline passed (code 17 RESERVATION_EXPIRED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
   /orders/{orderNo}/stop:
     post:
       tags: [orders]
@@ -722,6 +737,27 @@ paths:
           $ref: '#/components/responses/NotFound'
 
   /orders/{orderNo}/appeal:
+    get:
+      tags: [orders]
+      operationId: getOrderAppeal
+      description: |-
+        The caller's own appeal for the order, so the app can show 审核中/已通过/已驳回
+        instead of offering the form again. No appeal yet is a 404, the same shape
+        the order review resource uses. Cross-user access is indistinguishable from
+        a missing appeal.
+      parameters:
+        - $ref: '#/components/parameters/OrderNo'
+      responses:
+        '200':
+          description: The appeal the caller filed for this order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppealResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
     post:
       tags: [orders]
       operationId: createOrderAppeal
@@ -729,7 +765,9 @@ paths:
         Appeals the caller's own COMPLETED order (UC-U-09 pt 4): a 1..500
         code point reason after trimming. One appeal per order — a
         same-content retry returns the first result, different content
-        conflicts (409).
+        conflicts (409). The order may still have paymentStatus=PENDING:
+        payment confirmation and appeal are alternatives, and a pending
+        appeal blocks settlement until an administrator decides it.
       parameters:
         - $ref: '#/components/parameters/OrderNo'
       requestBody:
@@ -768,6 +806,13 @@ paths:
       description: |-
         Internal charger-gateway callback. Together with the `/api/v1`
         server prefix this is `POST /api/v1/internal/charger-events`.
+        Besides the start and stop facts a charger reports its running meter as
+        CHARGE_PROGRESS while it is charging (`energyWh` = energy delivered so
+        far). Progress readings are absolute and never go backwards: a reading
+        lower than the stored one is a stale delivery and is ignored, so the
+        endpoint is safe to retry without an idempotency key. A progress receipt
+        prices what has been delivered with the order's frozen snapshot and
+        settles nothing - the stop receipt still decides the bill.
         Deploy it behind HTTPS and restrict its Nginx ingress to the charger
         gateway network. The Bearer credential is the service token from
         `NCS_CHARGER_GATEWAY_TOKEN`, not a user or administrator session.
@@ -1476,7 +1521,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [PENDING, APPROVED]
+            enum: [PENDING, APPROVED, REJECTED]
       responses:
         '200':
           description: Appeal page
@@ -1515,6 +1560,126 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AppealResponseEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /admin/accounts:
+    get:
+      tags: [admin]
+      operationId: adminListAccounts
+      description: Lists administrator accounts. SUPER_ADMIN only.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Administrator account page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAccountPageEnvelope'
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      tags: [admin]
+      operationId: adminCreateAccount
+      description: Creates an active OPERATOR account that must change its initial password. SUPER_ADMIN only.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAdminAccountRequest'
+      responses:
+        '201':
+          description: Administrator account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAccountResponseEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /admin/accounts/{accountId}/status:
+    put:
+      tags: [admin]
+      operationId: adminSetAccountStatus
+      description: |-
+        Enables or disables an administrator with optimistic concurrency. SUPER_ADMIN only.
+        The caller cannot disable itself or the last active SUPER_ADMIN. A disabled
+        administrator's existing session is rejected on its next request.
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: {type: integer, format: int64, minimum: 1}
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetAdminAccountStatusRequest'
+      responses:
+        '200':
+          description: Administrator status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAccountResponseEnvelope'
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+
+  /admin/appeals/{appealId}/reject:
+    post:
+      tags: [admin]
+      operationId: adminRejectAppeal
+      description: |-
+        Dismisses an appeal: it becomes REJECTED with the operator's reason, and the
+        order and the wallet stay exactly as they are - rejection refunds nothing and
+        cancels nothing, which is what approval is for. A decision is final: a second
+        decision on the same appeal is a no-op that returns the current state, so a
+        repeated request can never flip an approved, refunded order.
+      parameters:
+        - name: appealId
+          in: path
+          required: true
+          schema: {type: integer, format: int64, minimum: 1}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+                  description: Why the appeal is dismissed. Audited and shown to the customer.
+      responses:
+        '200':
+          description: Rejection applied, or a repeated decision returning the current appeal state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppealResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2310,6 +2475,7 @@ components:
     OrderStatus:
       type: string
       enum: [CREATED, STARTING, CHARGING, STOPPING, COMPLETED, CANCELLED, FAILED, EXPIRED]
+      description: CREATED is a charger reservation awaiting explicit start.
     Order:
       type: object
       required: [orderNo, userId, stationId, chargerId, status, amountCent, createdAt]
@@ -2344,6 +2510,55 @@ components:
           type: integer
           format: int64
           minimum: 0
+        reservedUntil:
+          type: string
+          format: date-time
+          description: |-
+            Reservation deadline. Present while status is CREATED; starting
+            after this instant expires the order and releases the charger.
+        startedAt:
+          type: string
+          format: date-time
+          description: |-
+            Device fact time the charge actually started (the CHARGE_STARTED
+            receipt). Absent until the device confirms the start.
+        chargerPowerWatt:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Rated power of the charger this order is bound to, in watts.
+        meteredEnergyWh:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |-
+            Energy the charger has metered so far, from the latest
+            CHARGE_PROGRESS receipt. Present while the order is charging once a
+            reading has arrived; after the stop the settled figure is `energyWh`.
+        meteredAmountCent:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |-
+            What the metered energy costs at the order's frozen snapshot, priced
+            with the same time-of-use engine as the final bill. Present together
+            with `meteredEnergyWh`. It is not a settled charge: settlement still
+            happens on the stop receipt.
+        meteredAt:
+          type: string
+          format: date-time
+          description: Device fact time of the latest meter reading.
+        unitPriceCentPerKwh:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |-
+            Electricity plus service price per kWh that applies to this order
+            at the moment of the request, in cents: the frozen snapshot
+            resolved against the off-peak window in the deployment's billing
+            timezone. Present while the order is active. It exists so a client
+            can show an estimate during a charge; the bill is settled from the
+            meter reading in the stop receipt.
         createdAt:
           type: string
           format: date-time
@@ -2439,7 +2654,7 @@ components:
           description: Unique receipt identifier and idempotency key.
         eventType:
           type: string
-          enum: [CHARGE_STARTED, CHARGE_STOPPED]
+          enum: [CHARGE_STARTED, CHARGE_STOPPED, CHARGE_PROGRESS]
         orderNo:
           type: string
           minLength: 8
@@ -2491,7 +2706,7 @@ components:
             eventId: {type: string}
             eventType:
               type: string
-              enum: [CHARGE_STARTED, CHARGE_STOPPED]
+              enum: [CHARGE_STARTED, CHARGE_STOPPED, CHARGE_PROGRESS]
             orderNo: {type: string}
             status: {$ref: '#/components/schemas/OrderStatus'}
             occurredAt:
@@ -2578,6 +2793,56 @@ components:
         total:
           type: integer
           format: int64
+    AdminAccount:
+      type: object
+      required: [id, username, roles, status, mustChangePassword, version]
+      properties:
+        id: {type: integer, format: int64}
+        username: {type: string, pattern: '^[A-Za-z0-9_]{3,32}$'}
+        roles:
+          type: array
+          minItems: 1
+          items: {type: string, enum: [SUPER_ADMIN, OPERATOR, AUDITOR]}
+        status: {type: integer, enum: [0, 1]}
+        mustChangePassword: {type: boolean}
+        version: {type: integer, format: int64, minimum: 1}
+    CreateAdminAccountRequest:
+      type: object
+      required: [username, password, reason]
+      properties:
+        username: {type: string, pattern: '^[A-Za-z0-9_]{3,32}$'}
+        password: {type: string, format: password, minLength: 10, maxLength: 128}
+        reason: {type: string, minLength: 2, maxLength: 200}
+    SetAdminAccountStatusRequest:
+      type: object
+      required: [status, version, reason]
+      properties:
+        status: {type: integer, enum: [0, 1]}
+        version: {type: integer, format: int64, minimum: 1}
+        reason: {type: string, minLength: 2, maxLength: 200}
+    AdminAccountResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/AdminAccount'}
+    AdminAccountPageEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data:
+          type: object
+          required: [items, meta]
+          properties:
+            items:
+              type: array
+              items: {$ref: '#/components/schemas/AdminAccount'}
+            meta: {$ref: '#/components/schemas/PageMeta'}
     StationPageEnvelope:
       type: object
       required: [success, code, message, data]
@@ -2812,9 +3077,18 @@ components:
         id: {type: integer, format: int64}
         orderNo: {type: string}
         reason: {type: string}
-        status: {type: string, enum: [PENDING, APPROVED]}
+        status:
+          type: string
+          enum: [PENDING, APPROVED, REJECTED]
+          description: |-
+            PENDING until an admin decides. APPROVED cancels the order and refunds
+            the settled amount; REJECTED dismisses the appeal and leaves the order
+            and the wallet untouched.
         orderAmountCent: {type: integer, format: int64, minimum: 0}
         orderPaidCent: {type: integer, format: int64, minimum: 0}
+        decisionReason:
+          type: string
+          description: The operator's reason, present when the appeal was rejected.
         createdAt: {type: string, format: date-time}
         decidedAt: {type: string, format: date-time}
     AppealResponseEnvelope:
@@ -2918,6 +3192,9 @@ components:
           type: integer
           minimum: 0
           maximum: 23
+          description: |-
+            Wall-clock hour in the deployment's billing timezone
+            (NCS_BILLING_TZ, default Asia/Shanghai) - not UTC.
         offPeakEndHour:
           type: integer
           minimum: 0
@@ -2945,6 +3222,9 @@ components:
           type: integer
           minimum: 0
           maximum: 23
+          description: |-
+            Wall-clock hour in the deployment's billing timezone
+            (NCS_BILLING_TZ, default Asia/Shanghai) - not UTC.
         offPeakEndHour:
           type: integer
           minimum: 0
@@ -3236,7 +3516,13 @@ components:
           format: int64
           minimum: 0
           description: Present only for a charger with a time-of-use window.
-        offPeakStartHour: {type: integer, minimum: 0, maximum: 23}
+        offPeakStartHour:
+          type: integer
+          minimum: 0
+          maximum: 23
+          description: |-
+            Wall-clock hour in the deployment's billing timezone
+            (NCS_BILLING_TZ, default Asia/Shanghai) - not UTC.
         offPeakEndHour: {type: integer, minimum: 0, maximum: 23}
         chargerCount: {type: integer, format: int64, minimum: 0}
     GlobalTariffView:
@@ -3278,7 +3564,13 @@ components:
         electricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
         servicePriceCentPerKwh: {type: integer, format: int64, minimum: 0}
         offPeakElectricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
-        offPeakStartHour: {type: integer, minimum: 0, maximum: 23}
+        offPeakStartHour:
+          type: integer
+          minimum: 0
+          maximum: 23
+          description: |-
+            Wall-clock hour in the deployment's billing timezone
+            (NCS_BILLING_TZ, default Asia/Shanghai) - not UTC.
         offPeakEndHour: {type: integer, minimum: 0, maximum: 23}
         reason:
           type: string
@@ -3303,7 +3595,13 @@ components:
         electricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
         servicePriceCentPerKwh: {type: integer, format: int64, minimum: 0}
         offPeakElectricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
-        offPeakStartHour: {type: integer, minimum: 0, maximum: 23}
+        offPeakStartHour:
+          type: integer
+          minimum: 0
+          maximum: 23
+          description: |-
+            Wall-clock hour in the deployment's billing timezone
+            (NCS_BILLING_TZ, default Asia/Shanghai) - not UTC.
         offPeakEndHour: {type: integer, minimum: 0, maximum: 23}
     GlobalTariffViewEnvelope:
       type: object

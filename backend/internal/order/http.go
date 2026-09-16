@@ -339,6 +339,8 @@ func writeOrderError(w http.ResponseWriter, r *http.Request, err error) {
 		httpapi.WriteError(w, r, http.StatusForbidden, httpapi.CodeUserFrozen, "account is disabled", nil)
 	case errors.Is(err, ErrDebtOutstanding):
 		httpapi.WriteError(w, r, http.StatusConflict, codeDebtOutstanding, "user has an unsettled order", nil)
+	case errors.Is(err, ErrReservationExpired):
+		httpapi.WriteError(w, r, http.StatusConflict, codeReservationExpired, "reservation has expired", nil)
 	case errors.Is(err, ErrInvalidStateTransition):
 		httpapi.WriteError(w, r, http.StatusConflict, codeInvalidStateTransition, "invalid state transition", nil)
 	case errors.Is(err, ErrChargerUnavailable):
@@ -371,6 +373,7 @@ const (
 	codeActiveFlowExists       = 9  // ACTIVE_FLOW_EXISTS
 	codeIdempotencyConflict    = 14 // IDEMPOTENCY_CONFLICT
 	codeInvalidStateTransition = 15 // INVALID_STATE_TRANSITION
+	codeReservationExpired     = 17 // RESERVATION_EXPIRED
 	codeDebtOutstanding        = 18 // DEBT_OUTSTANDING
 )
 

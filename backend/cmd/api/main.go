@@ -123,7 +123,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	orderStore, err := postgres.NewOrderStore(db)
+	// The billing timezone decides which wall-clock hours the off-peak tariff window means.
+	orderStore, err := postgres.NewOrderStore(db,
+		postgres.WithBillingLocation(cfg.BillingLocation),
+		postgres.WithReservationDuration(cfg.OrderExpireAfter),
+	)
 	if err != nil {
 		return err
 	}

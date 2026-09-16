@@ -63,9 +63,16 @@ go run ./cmd/api
 | `NCS_LOGIN_RATE_WINDOW` | 1m | 登录限流窗口 |
 | `NCS_SMS_MOCK` | development 为 true | 模拟短信：验证码直接返回给客户端；正式环境必须关闭 |
 | `NCS_CHARGER_GATEWAY_TOKEN` | 必填、无默认值 | 内部设备回执端点的 Bearer 服务令牌，缺失时 API 拒绝启动 |
+| `NCS_BILLING_TZ` | Asia/Shanghai | 分时电价（谷时）窗口按哪个时区的墙上时间判定；计费时刻本身仍是 UTC。**不要设成 UTC**：运营配置的 23:00-07:00 指本地夜间，按 UTC 判定会把折扣挪到本地白天 |
 | `NCS_CHARGER_EVENT_MAX_FUTURE_SKEW` | 5m | 设备事实时间可超前服务器时钟的上限 |
 | `NCS_STOP_RECOVERY_MAX_ATTEMPTS` | 3 | STOP 命令总尝试次数上限 |
 | `NCS_STOP_RECOVERY_BACKOFF` | 5m | 故障 STOP 重发间隔下限 |
+| `NCS_ENV_FILE` | `backend/.env.local` | `local-stack.sh` 启动前加载的本地配置文件；用于 Agent 地图和模型凭据，不提交到仓库 |
+| `TENCENT_MAP_SERVER_KEY` | 空 | Agent 服务端地图 Key；为空时地图工具降级 |
+| `AI_PROVIDER` / `AI_MODEL` / `AI_BASE_URL` / `AI_API_KEY` | 空 | Agent 模型配置；为空时仍使用实时站点数据确定性作答，并返回 `degraded=true` |
+
+本地栈会自动加载 `backend/.env.local`，可从 `.env.example` 开始配置。这样从不同终端
+重启服务时不会再丢失 Agent 的地图和模型环境变量；真实凭据不得提交到仓库。
 
 正式部署还须通过 HTTPS 提供回执入口，并由 Nginx 限制
 `/api/v1/internal/charger-events` 仅网关来源网络可达；令牌不能交给 H5 客户端。
@@ -101,9 +108,32 @@ go run ./cmd/mock-gateway
 | `NCS_MOCK_GATEWAY_API_URL` | http://127.0.0.1:8080 | 回执上报目标 API 基址 |
 | `NCS_CHARGER_GATEWAY_TOKEN` | 必填（开启回执时） | 回执端点的服务令牌，必须与 API 侧一致；缺失时进程拒绝启动 |
 | `NCS_MOCK_GATEWAY_ENERGY_WH` | 1000 | 模拟停止时上报的计费电量（瓦时）；同时作为始末表底，保证三者自洽 |
+| `NCS_MOCK_GATEWAY_METER_INTERVAL` | 3s | 开启自动回执后，充电中周期上报运行计量的间隔（`CHARGE_PROGRESS`）；设为 `0` 可单独关闭实时计量 |
+| `NCS_MOCK_GATEWAY_CHARGE_SECONDS` | 60 | 模拟一次充电达到 `ENERGY_WH` 所需的秒数；运行计量在这段时间内线性爬升，之后停止上报 |
 
-回执默认关闭：`backend/scripts/verify-closed-loop.sh` 断言“设备接受命令本身不改变订单状态”，
-并自行上报回执以便把设备事实时间放进指定费率时段。网关自动上报会悄悄改变该门禁证明的内容。
+### 运行计量（充电中的实时电量与金额）
+
+平台只在**停止回执**里拿到计量时，App 在充电中只能显示占位符或估算。真实充电桩会在充电过程中
+持续上报运行计量（现场即 OCPP 的 MeterValues），因此契约里多了一种回执：
+
+```text
+CHARGE_PROGRESS  { orderNo, chargerId, energyWh(已充电量,绝对值), occurredAt, eventId }
+```
+
+- 只对 `CHARGING` 的订单生效；读数**单调不回退**，比已存读数更小的投递按"迟到"忽略并返回当前状态，
+  因此它不需要幂等键（绝对值的重复写入天然幂等，幂等表也不会每条读数长一行）。
+- 平台把读数存进 `metered_energy_wh/metered_at`，并在读取订单详情时用**与最终账单同一个分时引擎**
+  算出 `meteredAmountCent`：客户盯着的数字会收敛到发票金额，而不是另一套算法。
+- 实时值（`meteredEnergyWh/meteredAmountCent/meteredAt`）与结算值（`energyWh/amountCent`）**分开**：
+  实时读数绝不写进结算金额，结算仍由停止回执决定，停止后实时字段消失。
+- 开启 `NCS_MOCK_GATEWAY_METER_INTERVAL` 后，模拟网关按该间隔上报，且**停止时按已计量的电量结算**
+  （否则会出现"充电中 0.25 kWh、结算 1.00 kWh"这种设备不可能给出的数字）。
+
+`mock-gateway` 单独启动时回执仍默认关闭：`backend/scripts/verify-closed-loop.sh`
+断言“设备接受命令本身不改变订单状态”，并自行上报回执以便把设备事实时间放进指定费率时段。
+用于实际页面联调的 `backend/scripts/local-stack.sh` 与 Compose `mock` profile 默认开启自动回执和 3 秒计量，
+使 START/STOP 与实时金额形成完整闭环；需要验证半闭环语义时可显式设置
+`NCS_MOCK_GATEWAY_RECEIPTS=false`。
 
 设备回执以命令号为幂等键：同一命令重复投递只上报一次，平台拒绝的上报会在该命令下一次
 投递时以**完全相同的报文**重试（回执 id 与事实时间首次决定后不再变化，否则重试会变成冲突）。

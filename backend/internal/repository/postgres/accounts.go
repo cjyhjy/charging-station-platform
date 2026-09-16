@@ -67,6 +67,22 @@ LIMIT 1`
 	return &admin, nil
 }
 
+// FindAdminByID revalidates live administrator sessions against the current account state.
+func (s *AccountStore) FindAdminByID(ctx context.Context, adminID int64) (*auth.AdminAccount, error) {
+	const query = `SELECT id, username, role, password_hash, status
+FROM admin_accounts WHERE id = $1 LIMIT 1`
+	var account auth.AdminAccount
+	if err := s.db.QueryRowContext(ctx, query, adminID).Scan(
+		&account.ID, &account.Username, &account.Role, &account.PasswordHash, &account.Status,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &account, nil
+}
+
 // AccountMutationAdapter implements the A-line auth.AccountMutation port
 // over user_accounts. Delivered by A-01 per the two-track split: the port
 // lives in internal/auth, the PostgreSQL adapter lives here (B-02).

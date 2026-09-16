@@ -38,6 +38,13 @@ func (f *fakeAccountReader) FindAdminByUsername(_ context.Context, username stri
 	return nil, nil
 }
 
+func (f *fakeAccountReader) FindAdminByID(_ context.Context, adminID int64) (*AdminAccount, error) {
+	if f.admin != nil && adminID == f.admin.ID {
+		return f.admin, nil
+	}
+	return nil, nil
+}
+
 func (f *fakeAccountReader) EnsureUserWithWallet(_ context.Context, phone string) (UserAccount, error) {
 	if f.user != nil && f.user.Phone == phone {
 		return *f.user, nil
@@ -157,6 +164,26 @@ func TestLoginAdminSuccessAndRole(t *testing.T) {
 	}
 	if Authorize(result.Identity, RoleUser) {
 		t.Fatal("admin identity passes user authorization")
+	}
+}
+
+func TestIdentifyRejectsAnAdministratorDisabledAfterLogin(t *testing.T) {
+	reader := &fakeAccountReader{admin: &AdminAccount{
+		ID: 7, Username: "operator", Role: AdminRoleOperator,
+		PasswordHash: hashForTest(t, testPassword), Status: StatusActive,
+	}}
+	service := newTestService(t, reader, NewFixedWindowLimiter(10, time.Minute, nil))
+	result, err := service.LoginAdmin(context.Background(), "operator", testPassword)
+	if err != nil {
+		t.Fatalf("LoginAdmin() error = %v", err)
+	}
+
+	reader.admin.Status = StatusDisable
+	if _, err := service.Identify(context.Background(), result.Token); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("Identify() after disable error = %v, want ErrUnauthorized", err)
+	}
+	if _, err := service.Identify(context.Background(), result.Token); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("disabled session was not deleted: %v", err)
 	}
 }
 

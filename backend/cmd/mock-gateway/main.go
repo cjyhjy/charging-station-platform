@@ -67,6 +67,8 @@ func main() {
 		apiFlag     = flag.String("api-url", envOr("NCS_MOCK_GATEWAY_API_URL", defaultAPIURL), "platform API base URL the device facts are reported to (only used with -receipts)")
 		tokenFlag   = flag.String("gateway-token", envOr("NCS_CHARGER_GATEWAY_TOKEN", ""), "service token the receipt endpoint accepts; required with -receipts, never invented")
 		energyFlag  = flag.Int64("energy-wh", int64Or("NCS_MOCK_GATEWAY_ENERGY_WH", defaultEnergyWh), "metered energy a simulated stop reports, in watt-hours")
+		meterFlag   = flag.Duration("meter-interval", durationOr(os.Getenv("NCS_MOCK_GATEWAY_METER_INTERVAL"), defaultMeterInterval), "how often a charging device reports its running meter (0 disables progress receipts)")
+		chargeFlag  = flag.Float64("charge-seconds", floatOr(os.Getenv("NCS_MOCK_GATEWAY_CHARGE_SECONDS"), defaultChargeSeconds), "simulated seconds a session takes to reach -energy-wh; the running meter ramps linearly over it")
 	)
 	flag.Parse()
 
@@ -75,11 +77,14 @@ func main() {
 		"addr", *addrFlag, "result", *resultFlag, "delay", delayFlag.String(), "receipts", *receiptFlag)
 
 	gateway := &mockGateway{
-		logger:   logger,
-		delay:    *delayFlag,
-		result:   strings.ToUpper(strings.TrimSpace(*resultFlag)),
-		failing:  parseIDSet(*failingFlag),
-		commands: map[string]*commandRecord{},
+		logger:        logger,
+		delay:         *delayFlag,
+		result:        strings.ToUpper(strings.TrimSpace(*resultFlag)),
+		failing:       parseIDSet(*failingFlag),
+		commands:      map[string]*commandRecord{},
+		meters:        map[string]*chargingMeter{},
+		meterInterval: *meterFlag,
+		chargeSeconds: *chargeFlag,
 	}
 
 	if *receiptFlag {
@@ -102,6 +107,10 @@ func main() {
 		gateway.receipts = reporter
 		logger.Info("the mock gateway will report device facts",
 			"api_url", reporter.baseURL, "endpoint", chargerEventPath, "energy_wh", reporter.energyWh)
+		if gateway.meterInterval > 0 {
+			logger.Info("the mock gateway will also report a running meter while charging",
+				"interval", gateway.meterInterval.String(), "session_seconds", gateway.chargeSeconds)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -150,6 +159,13 @@ type mockGateway struct {
 
 	mu       sync.Mutex
 	commands map[string]*commandRecord
+	// meters are the charges whose simulated meter is still reporting. The keys are order
+	// numbers, because that is what a progress receipt identifies.
+	meters map[string]*chargingMeter
+	// meterInterval is how often the running meter is reported, and chargeSeconds how long the
+	// simulated session takes to reach the configured energy. Zero interval disables reporting.
+	meterInterval time.Duration
+	chargeSeconds float64
 
 	// executions counts how many times device work was actually simulated, so a test can show that
 	// concurrent duplicates did not execute it twice.
@@ -385,6 +401,16 @@ func (g *mockGateway) simulate(ctx context.Context, commandID, chargerID, orderN
 	// a caller that has been told the device completed the command can then observe the order the
 	// fact produced, instead of racing the report it triggered.
 	g.reportReceipt(record)
+	// A completed start begins a charge, so the simulated meter starts reporting; a completed
+	// stop ends it. Failed commands change nothing.
+	if status == statusCompleted {
+		switch action {
+		case actionStartCharging:
+			g.startMeterReporting(orderNo, chargerID, traceID)
+		case actionStopCharging:
+			g.stopMeterReporting(orderNo)
+		}
+	}
 	return status, detail, true
 }
 
@@ -525,6 +551,21 @@ func int64Or(name string, fallback int64) int64 {
 		return fallback
 	}
 	return value
+}
+
+// floatOr parses an environment/inline numeric value, keeping the fallback when it is unusable:
+// the mock is a development tool, and refusing to start over a mistyped simulation knob would be
+// worse than simulating with the default.
+func floatOr(raw string, fallback float64) float64 {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func durationOr(raw string, fallback time.Duration) time.Duration {

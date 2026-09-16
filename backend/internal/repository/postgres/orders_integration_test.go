@@ -773,6 +773,70 @@ func TestExpireStaleOrdersReleasesChargers(t *testing.T) {
 	assertChargerStatus(t, db, ctx, chargerA, "IDLE")
 }
 
+func TestReservationDeadlineIsReturnedAndEnforcedAtStart(t *testing.T) {
+	db, ctx := integrationDB(t)
+	store, err := NewOrderStore(db, WithReservationDuration(15*time.Minute))
+	if err != nil {
+		t.Fatalf("NewOrderStore() error = %v", err)
+	}
+	suffix := uniqueSuffix(t)
+	userA, _, _, _, chargerA := orderFlowFixture(t, db, ctx, suffix)
+
+	beforeCreate := time.Now().UTC()
+	created, err := store.CreateOrder(ctx, order.CreateOrderCommand{
+		UserID: userA, ChargerID: chargerA, IdempotencyKey: "reserve-create-" + suffix, RequestHash: "h", TraceID: "t",
+	})
+	if err != nil {
+		t.Fatalf("CreateOrder() error = %v", err)
+	}
+	if created.ReservedUntil == nil {
+		t.Fatal("created reservation has no reservedUntil")
+	}
+	if created.ReservedUntil.Before(beforeCreate.Add(14*time.Minute+50*time.Second)) ||
+		created.ReservedUntil.After(time.Now().UTC().Add(15*time.Minute+10*time.Second)) {
+		t.Fatalf("reservedUntil = %v, want a 15-minute hold", created.ReservedUntil)
+	}
+	got, err := store.GetOrderByNo(ctx, userA, created.OrderNo)
+	if err != nil || got.ReservedUntil == nil || !got.ReservedUntil.Equal(*created.ReservedUntil) {
+		t.Fatalf("GetOrderByNo() reservation = %#v, %v", got.ReservedUntil, err)
+	}
+	page, err := store.ListOrdersByUser(ctx, order.ListFilter{UserID: userA, Page: 1, PageSize: 20})
+	if err != nil || len(page.Items) == 0 || page.Items[0].ReservedUntil == nil {
+		t.Fatalf("ListOrdersByUser() = %#v, %v; reservation deadline must survive list mapping", page, err)
+	}
+
+	// Simulate a user leaving the reservation page open beyond its deadline.
+	// Start itself must enforce the deadline; correctness cannot depend on the
+	// minute-based janitor having run first.
+	if _, err := db.ExecContext(ctx, `UPDATE charging_orders
+SET requested_at = requested_at - interval '16 minutes'
+WHERE order_no = $1`, created.OrderNo); err != nil {
+		t.Fatalf("backdate reservation: %v", err)
+	}
+	_, err = store.StartCharging(ctx, order.TransitionCommand{
+		UserID: userA, OrderNo: created.OrderNo, IdempotencyKey: "reserve-start-" + suffix, RequestHash: "h", TraceID: "t",
+	})
+	if !errors.Is(err, order.ErrReservationExpired) {
+		t.Fatalf("StartCharging() error = %v, want ErrReservationExpired", err)
+	}
+	var status string
+	if err := db.QueryRowContext(ctx, `SELECT status FROM charging_orders WHERE order_no = $1`, created.OrderNo).Scan(&status); err != nil {
+		t.Fatalf("read expired order: %v", err)
+	}
+	if status != order.StatusExpired {
+		t.Fatalf("order status = %s, want EXPIRED", status)
+	}
+	assertChargerStatus(t, db, ctx, chargerA, "IDLE")
+
+	// The failed start does not strand an IN_PROGRESS idempotency claim.
+	_, err = store.StartCharging(ctx, order.TransitionCommand{
+		UserID: userA, OrderNo: created.OrderNo, IdempotencyKey: "reserve-start-" + suffix, RequestHash: "h", TraceID: "t",
+	})
+	if !errors.Is(err, order.ErrReservationExpired) {
+		t.Fatalf("repeated StartCharging() error = %v, want ErrReservationExpired", err)
+	}
+}
+
 func TestIdempotencyRecordExpiryAllowsFreshRequest(t *testing.T) {
 	db, ctx := integrationDB(t)
 	store, err := NewOrderStore(db)

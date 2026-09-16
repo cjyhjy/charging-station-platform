@@ -69,6 +69,8 @@ func (h *Handlers) Register(server interface {
 	h.registerProfile(server)
 	h.registerChargerBatch(server)
 	h.registerUserArchive(server)
+	server.Register("/api/v1/admin/accounts", h.auth.RequireRole(auth.RoleAdmin, h.adminAccounts))
+	server.Register("/api/v1/admin/accounts/{accountId}/status", h.auth.RequireRole(auth.RoleAdmin, h.adminAccountStatus))
 	server.Register("/api/v1/admin/chargers/{chargerId}/tariff", h.tariffRoutes)
 	server.Register("/api/v1/admin/chargers/{chargerId}/release", h.auth.RequireAdminWrite(h.forceRelease))
 	server.Register("/api/v1/admin/audit", h.auth.RequireRole(auth.RoleAdmin, h.listAudit))
@@ -740,10 +742,18 @@ func writeAdminError(w http.ResponseWriter, r *http.Request, err error) {
 		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeResourceNotFound, "station not found", nil)
 	case errors.Is(err, ErrChargerNotFound):
 		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeResourceNotFound, "charger not found", nil)
+	case errors.Is(err, ErrAdminAccountNotFound):
+		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeResourceNotFound, "administrator account not found", nil)
+	case errors.Is(err, ErrAdminAccountExists):
+		httpapi.WriteError(w, r, http.StatusConflict, codeAlreadyExists, "administrator username already exists", nil)
+	case errors.Is(err, ErrAdminAccountVersionConflict):
+		httpapi.WriteError(w, r, http.StatusConflict, 22, "administrator account version conflict", nil)
+	case errors.Is(err, ErrAdminAccountSelfDisable), errors.Is(err, ErrLastSuperAdmin):
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, err.Error(), nil)
 	case errors.Is(err, ErrInvalidStationFilter), errors.Is(err, ErrInvalidStationProfile),
 		errors.Is(err, ErrInvalidUserStatus), errors.Is(err, ErrInvalidReason),
 		errors.Is(err, ErrInvalidTariff), errors.Is(err, ErrInvalidLedgerFilter),
-		errors.Is(err, ErrInvalidStatusValue):
+		errors.Is(err, ErrInvalidStatusValue), errors.Is(err, ErrInvalidAdminAccount):
 		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "invalid request parameter", nil)
 	default:
 		httpapi.WriteError(w, r, http.StatusServiceUnavailable, httpapi.CodeDatabaseError, "administration is temporarily unavailable", nil)
