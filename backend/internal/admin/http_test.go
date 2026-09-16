@@ -46,6 +46,16 @@ type fakeStore struct {
 	restarts             []RestartCommand
 	tariffErr            error
 	releaseErr           error
+
+	// Station editing and the fleet tariff.
+	updateResult    StationRecord
+	updateErr       error
+	updateCommands  []UpdateStationCommand
+	globalTariff    []GlobalTariff
+	globalTariffErr error
+	globalResult    GlobalTariffResult
+	globalErr       error
+	globalUpdates   []GlobalTariffUpdate
 }
 
 func (f *fakeStore) CreateStation(context.Context, CreateStationCommand) (StationRecord, error) {
@@ -100,6 +110,20 @@ func (f *fakeStore) FindDeviceCommand(_ context.Context, commandID string) (Devi
 func (f *fakeStore) RestartCharger(_ context.Context, command RestartCommand) (Command, error) {
 	f.restarts = append(f.restarts, command)
 	return f.restartCmd, f.restartErr
+}
+
+func (f *fakeStore) UpdateStation(_ context.Context, command UpdateStationCommand) (StationRecord, error) {
+	f.updateCommands = append(f.updateCommands, command)
+	return f.updateResult, f.updateErr
+}
+
+func (f *fakeStore) GlobalTariff(context.Context) ([]GlobalTariff, error) {
+	return f.globalTariff, f.globalTariffErr
+}
+
+func (f *fakeStore) UpdateGlobalTariff(_ context.Context, update GlobalTariffUpdate) (GlobalTariffResult, error) {
+	f.globalUpdates = append(f.globalUpdates, update)
+	return f.globalResult, f.globalErr
 }
 
 func (f *fakeStore) GetTariff(context.Context, int64) (TariffView, error) {

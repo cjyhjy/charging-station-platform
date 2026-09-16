@@ -65,6 +65,7 @@ func (h *Handlers) Register(server interface {
 	server.Register("/api/v1/admin/orders", h.auth.RequireRole(auth.RoleAdmin, h.listOrders))
 	server.Register("/api/v1/admin/users/{userId}", h.auth.RequireRole(auth.RoleAdmin, h.userDetail))
 	server.Register("/api/v1/admin/users/{userId}/transactions", h.auth.RequireRole(auth.RoleAdmin, h.userLedger))
+	h.registerProfile(server)
 	server.Register("/api/v1/admin/chargers/{chargerId}/tariff", h.tariffRoutes)
 	server.Register("/api/v1/admin/chargers/{chargerId}/release", h.auth.RequireAdminWrite(h.forceRelease))
 	server.Register("/api/v1/admin/audit", h.auth.RequireRole(auth.RoleAdmin, h.listAudit))
@@ -722,7 +723,8 @@ func writeAdminError(w http.ResponseWriter, r *http.Request, err error) {
 		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeResourceNotFound, "station not found", nil)
 	case errors.Is(err, ErrChargerNotFound):
 		httpapi.WriteError(w, r, http.StatusNotFound, httpapi.CodeResourceNotFound, "charger not found", nil)
-	case errors.Is(err, ErrInvalidStationFilter), errors.Is(err, ErrInvalidUserStatus), errors.Is(err, ErrInvalidReason),
+	case errors.Is(err, ErrInvalidStationFilter), errors.Is(err, ErrInvalidStationProfile),
+		errors.Is(err, ErrInvalidUserStatus), errors.Is(err, ErrInvalidReason),
 		errors.Is(err, ErrInvalidTariff), errors.Is(err, ErrInvalidLedgerFilter),
 		errors.Is(err, ErrInvalidStatusValue):
 		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, "invalid request parameter", nil)

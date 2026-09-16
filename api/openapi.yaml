@@ -1467,6 +1467,109 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
+  /admin/stations/{stationId}:
+    put:
+      tags: [admin]
+      operationId: adminUpdateStationProfile
+      summary: Edit a station's name, address and coordinates
+      description: |-
+        The change is written and audited in one transaction, so the recorded
+        before-and-after pair is the one this request actually replaced even when
+        two administrators edit the same station at once.
+
+        Only four fields are editable: the name, the address and the two
+        coordinates. The code is identity - the audit trail and the order
+        history reference it - and the status has its own endpoint with its own
+        lifecycle rule. A body that carries either of them is not obeyed.
+
+        Coordinates are E6 integers (degrees times one million): the column holds
+        degrees and the conversion happens here, so a client never has to guess
+        which unit it is reading.
+      parameters:
+        - name: stationId
+          in: path
+          required: true
+          schema: {type: integer, format: int64, minimum: 1}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StationProfileUpdate'}
+      responses:
+        '200':
+          description: Station profile updated
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StationProfileResponseEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /admin/tariffs:
+    get:
+      tags: [admin]
+      operationId: adminGlobalTariff
+      summary: The tariff every charger currently carries
+      description: |-
+        Prices live on chargers, not in a tariff table, so this reports the
+        fleet's actual state: the distinct configurations and how many chargers
+        share each one, with the ranges and the time-of-use split beside them.
+
+        The range is what makes the view worth reading before a change. A fleet
+        where every charger already agrees is a no-op; a fleet spread across a
+        wide range is a change worth pausing over.
+
+        The old district-scoped price versions are not modelled here. That is a
+        pricing-version subsystem - a version table, an effective-time resolver
+        and a scheduled rollover - and this is the smaller thing that is usable
+        today against the columns the platform already has.
+      responses:
+        '200':
+          description: The fleet tariff picture
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GlobalTariffViewEnvelope'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+    put:
+      tags: [admin]
+      operationId: adminUpdateGlobalTariff
+      summary: Set one tariff on every charger
+      description: |-
+        The single most consequential write on this boundary: it changes what
+        every charge costs. The reason is required and audited for that reason -
+        "who set the platform's price to this, and why" has to be answerable
+        afterwards.
+
+        The body is the complete tariff, not a patch. Absent off-peak fields mean
+        the fleet becomes flat, the same rule the per-charger endpoint follows:
+        after the call every charger holds exactly what was sent, and nobody has
+        to reason about which devices were touched.
+
+        Every charger is in scope, a disabled one too: a device switched off
+        today is switched on again tomorrow, and leaving it on last year's price
+        would be discovered by a customer. Running orders are unaffected - the
+        order domain snapshots the tariff when charging starts.
+
+        The response reports how many devices now carry the tariff and how many
+        distinct tariffs the change replaced.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/GlobalTariffUpdate'}
+      responses:
+        '200':
+          description: Fleet tariff applied
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GlobalTariffResultEnvelope'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/ServiceUnavailable'}
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2040,7 +2143,8 @@ components:
     StationCreateResponse:
       type: object
       description: |-
-        The station a write returns (create, or a status change). The seven
+        The station a write returns (create, a profile edit, or a status change).
+        The seven
         required properties are what the write itself produces. The aggregates the
         Station read schema also carries are declared here as optional: a create
         answers with zeros for them, which is true for a station that has no
@@ -2511,6 +2615,137 @@ components:
               type: array
               items: {$ref: '#/components/schemas/AuditEntry'}
             meta: {$ref: '#/components/schemas/PageMeta'}
+
+    StationProfileUpdate:
+      type: object
+      description: |-
+        The editable profile of a station. The code and the status are absent on
+        purpose: this endpoint does not accept them.
+      required: [name, address, latitudeE6, longitudeE6]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        address:
+          type: string
+          minLength: 1
+          maxLength: 255
+        latitudeE6:
+          type: integer
+          format: int64
+          minimum: -90000000
+          maximum: 90000000
+        longitudeE6:
+          type: integer
+          format: int64
+          minimum: -180000000
+          maximum: 180000000
+    StationProfileResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/StationCreateResponse'}
+    GlobalTariff:
+      type: object
+      description: One tariff configuration and how many chargers share it.
+      required: [electricityPriceCentPerKwh, servicePriceCentPerKwh, chargerCount]
+      properties:
+        electricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        servicePriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        offPeakElectricityPriceCentPerKwh:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Present only for a charger with a time-of-use window.
+        offPeakStartHour: {type: integer, minimum: 0, maximum: 23}
+        offPeakEndHour: {type: integer, minimum: 0, maximum: 23}
+        chargerCount: {type: integer, format: int64, minimum: 0}
+    GlobalTariffView:
+      type: object
+      required: [chargerCount, configurationCount, minElectricityPriceCentPerKwh, maxElectricityPriceCentPerKwh, minServicePriceCentPerKwh, maxServicePriceCentPerKwh, offPeakChargerCount, flatChargerCount, configurations]
+      properties:
+        chargerCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Every charger in the fleet.
+        configurationCount: {type: integer, format: int64, minimum: 0}
+        minElectricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        maxElectricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        minServicePriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        maxServicePriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        offPeakChargerCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Chargers with a time-of-use window.
+        flatChargerCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Chargers with a single price.
+        configurations:
+          type: array
+          description: Every distinct configuration, most common first. A list
+            even when the fleet is empty.
+          items: {$ref: '#/components/schemas/GlobalTariff'}
+    GlobalTariffUpdate:
+      type: object
+      description: |-
+        The tariff every charger should hold. The off-peak triple is
+        all-or-nothing; absent means the fleet becomes flat.
+      required: [electricityPriceCentPerKwh, servicePriceCentPerKwh, reason]
+      properties:
+        electricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        servicePriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        offPeakElectricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        offPeakStartHour: {type: integer, minimum: 0, maximum: 23}
+        offPeakEndHour: {type: integer, minimum: 0, maximum: 23}
+        reason:
+          type: string
+          minLength: 2
+          maxLength: 200
+          description: Why the fleet's price changed. Written to the audit trail.
+    GlobalTariffResult:
+      type: object
+      required: [affectedChargers, previousConfigurations, electricityPriceCentPerKwh, servicePriceCentPerKwh]
+      properties:
+        affectedChargers:
+          type: integer
+          format: int64
+          minimum: 0
+          description: How many devices now carry the new tariff.
+        previousConfigurations:
+          type: integer
+          format: int64
+          minimum: 0
+          description: How many distinct tariffs the change replaced. One means
+            the fleet already agreed.
+        electricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        servicePriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        offPeakElectricityPriceCentPerKwh: {type: integer, format: int64, minimum: 0}
+        offPeakStartHour: {type: integer, minimum: 0, maximum: 23}
+        offPeakEndHour: {type: integer, minimum: 0, maximum: 23}
+    GlobalTariffViewEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/GlobalTariffView'}
+    GlobalTariffResultEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/GlobalTariffResult'}
 
 security:
   - bearerAuth: []
