@@ -1,10 +1,16 @@
+import { api } from './http'
 import { toInteger, toNumber } from '../utils/format'
 import { CHARGER_STATUS } from '../utils/domain'
 
 /**
- * 统计接口：Go 契约暂无 /admin/stats/*（A-07 统计模块，待立项）。
- * 两个 fetch 显式抛出不可用；本文件的 DTO 解析助手保留，
- * 供 dashboard/Overview 在拿到合法结构前维持空状态与格式约束。
+ * 统计接口（Go 契约 GET /admin/stats/revenue 与 /admin/stats/chargers）。
+ *
+ * 旧 Qt 管理端的统计来自服务端预计算的驾驶舱快照，Go 侧改为按需聚合：
+ * 营收按「已完成订单的冻结金额、归属停止充电时刻」统计，分桶对齐请求区间起点，
+ * 空区间也会返回零值桶，图表因此不会把安静的日子跳过。
+ *
+ * 服务端返回整数分与整数毫瓦时；这里只做契约校验，不做任何隐式换算，
+ * 单位换算全部留给展示层。
  */
 
 /** 响应体结构不符合契约时抛出的错误，携带可直接展示的 userMessage。 */
@@ -16,13 +22,18 @@ export class DtoError extends Error {
   }
 }
 
-/** 营收统计与设备状态统计在 Go 后端暂未提供。 */
-export function fetchRevenueStats() {
-  return Promise.reject(new DtoError('营收统计在 Go 后端暂未提供（A-07 统计待立项）'))
+/**
+ * 营收统计：fromAt/toAt 为 UTC 秒且必填，单次区间上限 90 天；
+ * stationId 可选，bucket 为 day（趋势）或 hour（单日明细）。
+ * 解析交给 parseRevenueStats，使 DTO 校验只有一处。
+ */
+export function fetchRevenueStats({ fromAt, toAt, stationId, bucket } = {}) {
+  return api.get('/admin/stats/revenue', { fromAt, toAt, stationId, bucket })
 }
 
-export function fetchChargerStatusStats() {
-  return Promise.reject(new DtoError('设备状态统计在 Go 后端暂未提供（A-07 统计待立项）'))
+/** 设备状态统计；stationId 可选。解析交给 parseChargerStatusStats。 */
+export function fetchChargerStatusStats({ stationId } = {}) {
+  return api.get('/admin/stats/chargers', { stationId })
 }
 
 function requireInteger(value, field) {

@@ -3,9 +3,12 @@ import {
   DtoError,
   chargerStatusBreakdown,
   emptyChargerStatusStats,
+  fetchChargerStatusStats,
+  fetchRevenueStats,
   parseChargerStatusStats,
   parseRevenueStats
 } from '../src/api/stats'
+import { installFetch, okResponse } from './helpers'
 import {
   EMPTY,
   formatAmount,
@@ -73,6 +76,52 @@ describe('营收统计 DTO 解析', () => {
     expect(() =>
       parseRevenueStats({ ...REVENUE_DTO, items: [{ bucketStart: null, amountCent: 1, energyMwh: 0, orderCount: 0 }] })
     ).toThrow(/bucketStart/)
+  })
+})
+
+describe('统计接口请求', () => {
+  it('营收统计把区间、站点与桶粒度原样传给 Go 契约', async () => {
+    const harness = installFetch([okResponse(REVENUE_DTO)])
+
+    const data = await fetchRevenueStats({ fromAt: 1788134400, toAt: 1788220800, stationId: 3, bucket: 'day' })
+
+    expect(harness.methodOf(0)).toBe('GET')
+    expect(harness.urlOf(0)).toBe(
+      '/api/v1/admin/stats/revenue?fromAt=1788134400&toAt=1788220800&stationId=3&bucket=day'
+    )
+    // 请求层不做换算也不做解析：整数分与整数毫瓦时原样返回，由 parseRevenueStats 校验。
+    expect(data.totalAmountCent).toBe(123456)
+    expect(data.totalEnergyMwh).toBe(1500000)
+    expect(parseRevenueStats(data).items).toHaveLength(2)
+  })
+
+  it('未选择的站点筛选不会变成 stationId=null 或空串', async () => {
+    const harness = installFetch([okResponse(REVENUE_DTO)])
+
+    await fetchRevenueStats({ fromAt: 1788134400, toAt: 1788220800, stationId: null, bucket: 'hour' })
+
+    const query = harness.queryOf(0)
+    expect(query.has('stationId')).toBe(false)
+    expect(query.get('bucket')).toBe('hour')
+  })
+
+  it('设备状态统计请求 /admin/stats/chargers，并按需带上站点', async () => {
+    const harness = installFetch([okResponse(CHARGER_STATUS_DTO)])
+
+    const all = await fetchChargerStatusStats()
+    expect(harness.urlOf(0)).toBe('/api/v1/admin/stats/chargers')
+    expect(parseChargerStatusStats(all).totalCount).toBe(24)
+
+    await fetchChargerStatusStats({ stationId: 7 })
+    expect(harness.queryOf(1).get('stationId')).toBe('7')
+  })
+
+  it('服务端返回不符合契约的统计时抛出 DtoError，而不是渲染 NaN', async () => {
+    installFetch([okResponse({ items: [] })])
+
+    const data = await fetchRevenueStats({ fromAt: 1, toAt: 2, bucket: 'day' })
+
+    expect(() => parseRevenueStats(data)).toThrow(DtoError)
   })
 })
 

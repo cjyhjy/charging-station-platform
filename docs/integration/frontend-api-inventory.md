@@ -106,8 +106,8 @@
 | A23 | `station.js:59 fetchTariffs` | GET `/admin/tariffs` | — | 车队费率构成 | GET `/admin/tariffs` | 已改造 | **模型变更**：旧的行政区价格版本（adcode + 生效时间窗）未迁移，改为车队级视图——按配置分组、含数量、价格区间与分时/单一费率分布 |
 | A24 | `station.js:69 setGlobalTariff` | POST `/admin/tariffs` | 价格版本（幂等键） | — | PUT `/admin/tariffs` | 已改造 | 方法/语义变更：一次把完整费率写入**所有**电桩（含停用），原因必填并写审计；不带分时字段即改为单一费率，与设备级端点同一规则 |
 | A25 | `station.js:84 createPriceAdjustment` | POST `/admin/price-adjustments` | `{adjustmentBp…}`（幂等键） | — | — | 后端缺失 | 按桩型/比例的服务费调整未迁移；当前只有全局费率统一下发，按钮保留并提示"暂未提供" |
-| A26 | `stats.js:39 fetchRevenueStats` | GET `/admin/stats/revenue` | `{fromAt, toAt, stationId, bucket}` | `items[]/total*`（DTO 严格校验） | — | 后端缺失 | 统计属 A-07 |
-| A27 | `stats.js:68 fetchChargerStatusStats` | GET `/admin/stats/charger-status` | `{stationId?}` | 八个统计字段 | — | 后端缺失 | 同上 |
+| A26 | `stats.js:30 fetchRevenueStats` | GET `/admin/stats/revenue` | `{fromAt, toAt, stationId, bucket}` | `items[]/total*`（DTO 严格校验） | GET `/admin/stats/revenue` | 已改造 | 路径一致；`fromAt`/`toAt` 必填且为 UTC 秒、单区间 ≤90 天；`bucket` 为 `hour`/`day`；分桶对齐请求区间起点；空桶补零使序列稠密；营收=已完成订单冻结金额，归属停止充电时刻 |
+| A27 | `stats.js:35 fetchChargerStatusStats` | GET `/admin/stats/chargers` | `{stationId?}` | 八个统计字段 | GET `/admin/stats/chargers` | 已改造 | 路径由 `charger-status` 改为复数形式；`operationalCount`=空闲+在用，`healthPercent` 保留两位小数 |
 | A28 | `user.js:9 fetchUsers` | GET `/admin/users` | `{status, phoneExact, phoneLast4, page, pageSize, sort}` | `{items, meta}` | GET `/admin/users` | 需改造 | 路径一致；Go 支持 `keyword/status`+分页；`phoneExact/phoneLast4/sort` 不支持（隐私口径一致：无模糊扫描） |
 | A29 | `user.js:14 fetchUser` | GET `/admin/users/{userId}` | — | 脱敏手机号、钱包汇总、会话数、活动流程摘要 | GET `/admin/users/{userId}` | 需改造 | 路径一致；Go 返回 `{id, phone, displayName, avatarUrl, status, balanceCent, createdAt, deletedAt}`，无会话数/活动流程摘要 |
 | A30 | `user.js:19 setUserStatus` | PUT `/admin/users/{userId}/status` | `{status(0|1), reason, version}`（幂等键） | — | POST `/admin/users/{userId}/freeze`、`/unfreeze` | 需改造 | 方法/路径/body 全不同；Go 无 `version` 乐观锁 |
@@ -153,6 +153,10 @@
 > "已改造"；A25 按桩型的服务费比例调整仍未迁移。旧 A23/A24 的行政区价格版本模型（adcode +
 > 生效时间窗）未迁移，改为车队级视图与统一下发。
 
+> 三轮更新（统计模块迁移后）：A26 营收统计、A27 设备状态统计由"后端缺失"改为"已改造"，
+> 服务端新增 `GET /admin/stats/revenue`、`/admin/stats/chargers`、`/admin/stats/overview`
+> 三个 PostgreSQL 聚合端点，管理端总览页已接回真实数据。
+
 > 二轮更新（B 线第二批交付后）：U4 注册、U8/U9 头像 URL、A10 桩状态、A12 命令查询（commandId）、
 > A22 站点状态、A31 按用户订单由"后端缺失"改为"需改造"并已完成前端接线；A9/A21/A16-A18 等
 > 其余后端缺失项状态不变。
@@ -161,8 +165,26 @@
 
 B 线需要在矩阵中优先裁决的契约决策点：U4（注册）、U10/U13（下单模型）、U11/U16（活动流程与进度）、
 U17（结算语义）、U28（报价）、A2（重验证）、A9/A10（设备创建与状态）、A12（命令查询）、
-A21–A25（站点修改/启停/价格模型）、A26/A27（统计）、A32–A34（ML）、A16–A18（备份）、
+A21–A25（站点修改/启停/价格模型）、A32–A34（ML）、A16–A18（备份）、
 A1/A4（`deviceId`、`mustChangePassword`）、C6（错误码 23）。
+
+### 管理端仍未迁移的清单（截至统计模块交付）
+
+以下仍在管理端以 `unsupported(...)` 显式拒绝，Go 后端没有对应端点。
+站点编辑与全局费率已随 A 线交付（见 A21/A23/A24），不在下表内。按"能否独立交付"排序：
+
+| 优先级 | 能力 | 前端入口 | 缺的后端 | 说明 |
+|---|---|---|---|---|
+| 1 | 管理员账号管理 | `account.js` 三个函数 | `/admin/accounts` 列表、创建、启停 | 影响最大：管理端目前无法自助开通运营账号，只能用种子账号 |
+| 2 | 充电桩批量建档 | `charger.js: createChargersBatch` | `POST /admin/chargers/batch` | 新站上线时的高频操作 |
+| 3 | 运维备份 | `ops.js: fetchBackups/createBackup/verifyBackup` | `/admin/backups` | B-06 运维域，与部署脚本同源 |
+| 4 | ML 预测 | `ml.js` 三个函数 | `/admin/predictions`、`/admin/ml-tasks` | 独立子系统（特征、模型版本、预测写回），不宜与其他项捆绑 |
+| 5 | 管理员改密与重验证 | `auth.js: reauth/changeOwnPassword` | `/admin/me/password`、重验证机制 | 依赖 B-01 的错误码 23 决策，前端已按"机制休眠"处理 |
+| 6 | 桩状态目标集合 | `charger.js: setChargerStatus` | —（部分可用） | 刻意只允许 IDLE/DISABLED；OCCUPIED/RESTARTING 由设备回执决定 |
+| 7 | 按桩型的服务费比例调整 | `station.js: createPriceAdjustment` | `/admin/price-adjustments` | 当前只有全局费率统一下发 |
+
+其中 1、2 是运营日常必需且互不依赖，建议作为下一批；3、4 属于独立子系统，
+需要各自的审批（B-06 与 ML 任务书）；5 取决于 B-01。
 
 ## 8. 对 A-02 的落地评估（下一步）
 
