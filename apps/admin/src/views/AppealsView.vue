@@ -33,8 +33,10 @@ const columns = [
   { key: 'id', label: '申诉编号', align: 'right' },
   { key: 'orderNo', label: '订单号' },
   { key: 'reason', label: '申诉原因' },
-  { key: 'orderAmountCent', label: '应付（分）', align: 'right' },
-  { key: 'orderPaidCent', label: '实付（分）', align: 'right' },
+  // 金额口径与其它管理端表格一致：契约给整数分，展示按元（旧表头写"分"、
+  // 单元格却渲染"1.70 元"，同一行两种单位）。
+  { key: 'orderAmountCent', label: '应付（元）', align: 'right', format: value => formatAmount(value) },
+  { key: 'orderPaidCent', label: '实付（元）', align: 'right', format: value => formatAmount(value) },
   { key: 'createdAt', label: '提交时间', format: value => formatDateTime(value) },
   { key: 'statusText', label: '状态' }
 ]
@@ -107,9 +109,6 @@ async function confirmApprove() {
         :row-test-id="row => `appeal-row-${row.id}`"
         @retry="appeals.load()"
       >
-        <template #cell-orderPaidCent="{ row }">
-          <span class="row-amount">{{ formatAmount(row.orderPaidCent) }} 元</span>
-        </template>
         <template #cell-statusText="{ row }">
           <StatusPill :text="statusText(row.status)" :tone="statusTone(row.status)" :test-id="`appeal-state-${row.id}`" />
         </template>
@@ -164,9 +163,5 @@ async function confirmApprove() {
 .pager {
   justify-content: flex-end;
   margin-top: var(--ncs-s-3);
-}
-
-.row-amount {
-  font-variant-numeric: tabular-nums;
 }
 </style>

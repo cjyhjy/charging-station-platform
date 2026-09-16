@@ -2,8 +2,9 @@
 /**
  * 管理员账号（接口文档 §6.8–§6.11）。
  *
- * 列表与写入需要 OWNER 权限；创建账号与停启用属于敏感操作（重新验证 + 幂等键），
- * 创建出来的账号角色固定为 OPERATOR 且 mustChangePassword=true。
+ * Go 契约暂无该域（api/account.js 抛 unsupported），页面按可写角色门控并显示真实原因；
+ * 创建账号与停启用属于敏感操作（重新验证 + 幂等键），创建出来的账号角色固定为 OPERATOR
+ * 且 mustChangePassword=true。
  * 页面同时提供“修改本人密码”，用于完成首次登录改密与定期换密。
  */
 import { computed, onMounted, ref } from 'vue'
@@ -29,7 +30,7 @@ const passwordLoading = ref(false)
 const passwordNotice = ref('')
 
 onMounted(() => {
-  if (auth.isOwner) accounts.load()
+  if (auth.canWrite) accounts.load()
 })
 
 const columns = [
@@ -52,7 +53,7 @@ const roleSummary = computed(() => ADMIN_ROLES.map(item => item.label).join('、
 const statusHint = computed(() => {
   if (!statusTarget.value) return ''
   const action = statusTarget.value.status === 1 ? '停用' : '启用'
-  return `确认${action}管理员 ${statusTarget.value.username}？停用会立即撤销该账号全部会话并阻止登录；OWNER 不得停用本人账号。`
+  return `确认${action}管理员 ${statusTarget.value.username}？停用会立即撤销该账号全部会话并阻止登录；管理员不得停用本人账号。`
 })
 
 function statusTone(status) {
@@ -107,14 +108,14 @@ async function submitPassword() {
     <p v-if="auth.mustChangePassword" class="alert" data-testid="accounts-must-change-hint">
       当前账号处于首次登录状态（mustChangePassword=true），请先在下方修改密码。
     </p>
-    <p v-if="!auth.isOwner" class="alert" data-testid="accounts-permission-hint">
-      管理员账号列表与写入需要 OWNER 权限（{{ roleSummary }}）；服务端会拒绝越权请求。
+    <p v-if="!auth.canWrite" class="alert" data-testid="accounts-permission-hint">
+      管理员账号列表与写入需要可写管理员角色（{{ roleSummary }}）；服务端会拒绝越权请求。
     </p>
     <p v-if="accounts.notice" class="alert alert--ok" data-testid="accounts-notice">{{ accounts.notice }}</p>
     <p v-if="accounts.error" class="alert alert--error" data-testid="accounts-error-banner">{{ accounts.error }}</p>
     <p v-if="accounts.conflict" class="alert" data-testid="accounts-conflict">{{ accounts.conflict }}</p>
 
-    <section v-if="auth.isOwner" class="panel" v-reveal>
+    <section v-if="auth.canWrite" class="panel" v-reveal>
       <div class="panel__title">
         <div>
           <h2>管理员账号</h2>

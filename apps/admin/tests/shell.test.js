@@ -60,9 +60,17 @@ async function mountShell({ desktop = true, authenticated = true } = {}) {
   router.beforeEach(authGuard)
   await router.push('/')
   await router.isReady()
-  const wrapper = mount(AdminShell, { global: { plugins: [pinia, router] } })
+  // stubs.transition=false 关掉 test-utils 对 <Transition> 的替身，让路由切换走真实过渡逻辑
+  const wrapper = mount(AdminShell, { global: { plugins: [pinia, router], stubs: { transition: false } } })
   await wrapper.vm.$nextTick()
   return { wrapper, router, auth, pinia }
+}
+
+/** 等待若干真实帧：CSS 过渡在下一帧推进，await nextTick() 等不到它结束。 */
+async function frames(times = 6) {
+  for (let index = 0; index < times; index += 1) {
+    await new Promise(resolve => requestAnimationFrame(resolve))
+  }
 }
 
 beforeEach(() => {
@@ -134,6 +142,20 @@ describe('页面骨架与侧栏', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/components/AdminShell.vue'), 'utf8')
     expect(source).toContain('<Transition name="page" mode="out-in">')
     expect(source).toContain('<RouterView v-slot="{ Component, route: current }">')
+    // 关掉 CSS 过渡会让离场同步结束，out-in 的重渲染重入 patch 后内容会全部消失。
+    expect(source).not.toContain(':css="false"')
+  })
+
+  it('侧栏切换路由后新页面必须重新出现，而不是只剩空内容区', async () => {
+    const { wrapper, router } = await mountShell()
+    expect(wrapper.get('[data-testid="admin-content"]').find('[data-testid="page-stub"]').exists()).toBe(true)
+
+    for (const destination of ['/stations', '/chargers', '/accounts', '/']) {
+      await router.push(destination)
+      await frames()
+      expect(router.currentRoute.value.path).toBe(destination)
+      expect(wrapper.get('[data-testid="admin-content"]').find('[data-testid="page-stub"]').exists()).toBe(true)
+    }
   })
 
   it('窄屏（<1024px）侧栏收为抽屉，可由顶栏按钮开合并由遮罩关闭', async () => {

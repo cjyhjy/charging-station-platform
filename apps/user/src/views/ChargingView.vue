@@ -33,7 +33,50 @@ const status = computed(() => order.value?.status ?? '')
 const isActive = computed(() => order.value !== null && order.value.active === true)
 const energyMwh = computed(() => (Number.isFinite(order.value?.energyMwh) ? order.value.energyMwh : 0))
 const amountCent = computed(() => (Number.isFinite(order.value?.amountCent) ? order.value.amountCent : 0))
-const durationSec = computed(() => (Number.isFinite(order.value?.durationSec) ? order.value.durationSec : 0))
+
+/**
+ * 充电中是否有计量读数。
+ *
+ * Go 契约只在**停止回执**里带 `energyWh`（"EnergyWh is required for a stop"），
+ * 平台在结算那一刻才算账单，因此充电中的订单 `amountCent` 恒为 0、`energyWh` 因为
+ * omitempty 干脆不返回。这里把"还没有读数"与"读数是 0"分开：
+ * 没有读数就显示占位符，而不是让用户以为电量/金额真的是 0.00。
+ */
+const hasMetering = computed(() => {
+  const value = order.value?.energyMwh
+  return value !== null && value !== undefined && Number.isFinite(value)
+})
+
+/**
+ * 充电时长：本地时钟实时走。
+ *
+ * 不能用订单行的 updatedAt - createdAt —— 充电中订单行不再更新（没有计量就没有写库），
+ * 那个差值会一直冻在状态切换那一刻（实测是"4 秒"），看起来像卡死。
+ * 契约没有 startedAt，适配层用 createdAt 兜底（下单到进入 CHARGING 通常只隔几秒）。
+ */
+const nowSecond = ref(Math.floor(Date.now() / 1000))
+const durationSec = computed(() => {
+  const startedAt = order.value?.startedAt
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return 0
+  return Math.max(0, nowSecond.value - startedAt)
+})
+
+let tickTimer = null
+
+function startTicking() {
+  nowSecond.value = Math.floor(Date.now() / 1000)
+  if (tickTimer) return
+  tickTimer = setInterval(() => {
+    nowSecond.value = Math.floor(Date.now() / 1000)
+  }, 1000)
+}
+
+function stopTicking() {
+  if (tickTimer) {
+    clearInterval(tickTimer)
+    tickTimer = null
+  }
+}
 
 /**
  * 充电量/金额变化时用一次短暂高亮提示“数据刚更新”。
@@ -49,7 +92,10 @@ onMounted(async () => {
   await refreshOrder()
 })
 
-onBeforeUnmount(stopPolling)
+onBeforeUnmount(() => {
+  stopPolling()
+  stopTicking()
+})
 
 function stopPolling() {
   if (pollTimer) {
@@ -74,10 +120,12 @@ async function refreshOrder() {
     const active = await chargingApi.fetchActiveOrder()
     order.value = active
     if (active) {
-      // STARTING/STOPPING 阶段等待设备回执，CHARGING 阶段跟踪累计电量与金额。
+      // STARTING/STOPPING 阶段等待设备回执；CHARGING 阶段跟踪订单状态与时长。
       startPolling()
+      startTicking()
     } else {
       stopPolling()
+      stopTicking()
       // 轮询期间订单离开活动集合：此前进行中的订单已到终态，拉取小票。
       if (previous?.orderNo && previous.active) await loadReceipt(previous.orderNo)
     }
@@ -109,16 +157,37 @@ async function runAction(action) {
   }
 }
 
+/** 待确认的结算单（UC-U-09）：不确认会阻止下一个充电流程，按钮必须可见。 */
+const receiptUnsettled = computed(() => receipt.value?.paymentStatus === 'PENDING')
+
 /** 小票：订单离开活动集合且终态为 COMPLETED 时展示；其余终态直接回空闲页。 */
 async function loadReceipt(orderNo) {
   // 小票属于订单接口组（@/api/order，与"我的订单"页同一入口），不在 @/api/charging 中。
   const detail = await orderApi.fetchOrderReceipt(orderNo)
   stopPolling()
+  stopTicking()
   order.value = null
   if (detail?.status === 'COMPLETED') {
     receipt.value = detail
     await auth.refreshWallet()
     await auth.refreshProfile()
+  }
+}
+
+async function confirmPayment() {
+  if (!receipt.value) return
+  busy.value = true
+  actionError.value = ''
+  try {
+    // 超时重试复用同一幂等键由 http 层处理；确认本身幂等，重复提交返回首次结果。
+    const updated = await orderApi.confirmOrder(receipt.value.orderNo, randomId())
+    receipt.value = updated
+    await auth.refreshWallet()
+    await auth.refreshProfile()
+  } catch (caught) {
+    actionError.value = caught?.userMessage || '确认支付失败，请稍后重试'
+  } finally {
+    busy.value = false
   }
 }
 
@@ -190,9 +259,27 @@ function goHome() {
           <li><span>电量</span><strong data-testid="receipt-energy">{{ formatEnergy(receipt.energyMwh) }}</strong></li>
           <li><span>应付</span><strong data-testid="receipt-amount">{{ formatYuan(receipt.amountCent) }} 元</strong></li>
           <li><span>实付</span><strong>{{ formatYuan(receipt.paidCent) }} 元</strong></li>
-          <li v-if="receipt.paymentStatus === 'PARTIAL_PAID'"><span>支付状态</span><strong>部分支付（余额不足部分待结清）</strong></li>
+          <li>
+            <span>支付状态</span>
+            <strong data-testid="receipt-payment">
+              {{ receipt.paymentStatus === 'PARTIAL_PAID' ? '部分支付（余额不足部分待结清）' : receipt.paymentStatus === 'PAID' ? '已支付' : '待确认' }}
+            </strong>
+          </li>
         </ul>
+        <p v-if="receiptUnsettled" class="muted" data-testid="receipt-confirm-hint">
+          确认后从余额扣款；未确认的订单会阻止发起下一次充电。
+        </p>
         <div class="panel__row">
+          <button
+            v-if="receiptUnsettled"
+            type="button"
+            class="btn btn--primary"
+            data-testid="receipt-confirm-payment"
+            :disabled="busy"
+            @click="confirmPayment"
+          >
+            {{ busy ? '确认中…' : '确认支付' }}
+          </button>
           <RouterLink class="btn btn--primary" to="/orders">查看订单</RouterLink>
           <button type="button" class="btn" @click="goHome">返回首页</button>
         </div>
@@ -221,19 +308,22 @@ function goHome() {
         <template v-else-if="status === 'CHARGING'">
           <div class="charge-energy" aria-hidden="true">
             <span>已充电量</span>
-            <strong>{{ formatEnergy(energyMwh) }}</strong>
+            <strong>{{ hasMetering ? formatEnergy(energyMwh) : '—' }}</strong>
           </div>
           <ul class="metric-list" data-testid="charging-progress">
             <li>
               <span>已充电量</span>
-              <strong class="value-target" :class="{ 'value-flash': energyFlashing }" data-testid="progress-energy">{{ formatEnergy(energyMwh) }}</strong>
+              <strong class="value-target" :class="{ 'value-flash': energyFlashing }" data-testid="progress-energy">{{ hasMetering ? formatEnergy(energyMwh) : '—' }}</strong>
             </li>
             <li>
               <span>已充金额</span>
-              <strong class="value-target" :class="{ 'value-flash': amountFlashing }" data-testid="progress-amount">{{ formatYuan(amountCent) }} 元</strong>
+              <strong class="value-target" :class="{ 'value-flash': amountFlashing }" data-testid="progress-amount">{{ hasMetering ? `${formatYuan(amountCent)} 元` : '—' }}</strong>
             </li>
             <li><span>时长</span><strong data-testid="progress-duration">{{ formatDuration(durationSec) }}</strong></li>
           </ul>
+          <p v-if="!hasMetering" class="muted" data-testid="progress-metering-hint">
+            平台在设备停止回执时才拿到计量读数，所以充电中暂不显示电量与金额；停止充电后的小票会给出准确数字。
+          </p>
           <button type="button" class="btn btn--primary" data-testid="charging-stop" :disabled="busy" @click="runAction('stop')">停止充电</button>
         </template>
 

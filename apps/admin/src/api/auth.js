@@ -14,6 +14,11 @@ export function login({ account, password }) {
   }))
 }
 
+/** 刷新页面后用当前 Bearer 令牌恢复管理员身份与 Go 角色。 */
+export function currentIdentity() {
+  return api.get('/me').then(identity => mapAdminIdentity(identity))
+}
+
 /**
  * 重新验证（旧 §6.2）与修改本人密码（旧 §6.11）在 Go 契约中暂缺：
  * runWithReauth 由服务端 REAUTH_REQUIRED(23) 驱动，Go 永不返回该码，机制自然休眠；

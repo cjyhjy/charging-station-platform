@@ -89,7 +89,7 @@
 | A6 | `account.js:11 createAccount` | POST `/admin/accounts` | `{username, password, reason}`（幂等键） | — | — | 后端缺失 | 同上 |
 | A7 | `account.js:16 setAccountStatus` | PUT `/admin/accounts/{adminId}/status` | `{status, reason, version}`（幂等键） | — | — | 后端缺失 | 同上 |
 | A8 | `charger.js:6 fetchChargers` | GET `/admin/chargers` | `{stationId, status, chargerType, keyword, page, pageSize}` | `{items, meta}` | GET `/admin/chargers` | 需改造 | 路径一致；Go 支持 `keyword/stationId/status`+分页，`chargerType` 参数不支持 |
-| A9 | `charger.js:11 createChargersBatch` | POST `/admin/chargers/batch` | `{stationId, chargers[]}`（幂等键） | — | — | 后端缺失 | Go 无建设备端点 |
+| A9 | `charger.js:71 createChargersBatch` | POST `/admin/chargers/batch` | `{stationId, chargers:[{code, connectorType, powerWatt}]}`（幂等键） | `{stationId, chargerCount, created[]}` | POST `/admin/chargers/batch` | 已改造 | 路径与语义一致；**`chargerType`(0/1) → `connectorType`(AC/DC)**；`connectorStandard` 在 Go 契约中无对应列，前端表单已移除且不发送；整批同事务，任一编号已存在（含请求内重复）→ 409 ALREADY_EXISTS 且一台都不创建；新设备为空闲状态、价格为库默认值，费率走费率接口 |
 | A10 | `charger.js:16 setChargerStatus` | PUT `/admin/chargers/{chargerId}/status` | `{targetStatus, reason, version}`（幂等键） | 就地更新该行 | PUT `/admin/chargers/{chargerId}/status` | 需改造 | B 线已实现：body 为 `{status: IDLE\|DISABLED, reason}`（仅两个目标状态；OCCUPIED/RESTARTING 409），无版本乐观锁；前端已接线并限制可选目标 |
 | A11 | `charger.js:25 createRestartCommand` | POST `/admin/chargers/{chargerId}/restart-commands` | `{confirm: true, reason}`（幂等键） | 202 `{commandNo, status}` | POST `/admin/chargers/{chargerId}/restart` | 需改造 | 路径；Go 契约未定义 `confirm` 字段（二次确认由前端承担）；响应语义一致 |
 | A12 | `charger.js:34 fetchDeviceCommand` | GET `/admin/device-commands/{commandNo}` | — | `PENDING/RUNNING/SUCCEEDED/FAILED` | GET `/admin/device-commands/{commandId}` | 需改造 | B 线已实现：标识为 **commandId**；回执模型为 `{result: COMPLETED\|FAILED, applied}`（回执未到 404），前端已恢复轮询并映射到既有命令状态面板 |
@@ -157,6 +157,9 @@
 > "已改造"；A25 按桩型的服务费比例调整仍未迁移。旧 A23/A24 的行政区价格版本模型（adcode +
 > 生效时间窗）未迁移，改为车队级视图与统一下发。
 
+> 五轮更新（B 线批量建桩后）：A9 批量创建设备由"后端缺失"改为"已改造"；服务端新增
+> `POST /admin/chargers/batch`（单语句事务、编号查重、审计、幂等键），管理端批量建档对话框已接线。
+
 > 三轮更新（统计模块迁移后）：A26 营收统计、A27 设备状态统计由"后端缺失"改为"已改造"，
 > 服务端新增 `GET /admin/stats/revenue`、`/admin/stats/chargers`、`/admin/stats/overview`
 > 三个 PostgreSQL 聚合端点，管理端总览页已接回真实数据。
@@ -180,14 +183,13 @@ A1/A4（`deviceId`、`mustChangePassword`）、C6（错误码 23）。
 | 优先级 | 能力 | 前端入口 | 缺的后端 | 说明 |
 |---|---|---|---|---|
 | 1 | 管理员账号管理 | `account.js` 三个函数 | `/admin/accounts` 列表、创建、启停 | 影响最大：管理端目前无法自助开通运营账号，只能用种子账号 |
-| 2 | 充电桩批量建档 | `charger.js: createChargersBatch` | `POST /admin/chargers/batch` | 新站上线时的高频操作 |
 | 3 | 运维备份 | `ops.js: fetchBackups/createBackup/verifyBackup` | `/admin/backups` | B-06 运维域，与部署脚本同源 |
 | 4 | ML 预测 | `ml.js` 三个函数 | `/admin/predictions`、`/admin/ml-tasks` | 独立子系统（特征、模型版本、预测写回），不宜与其他项捆绑 |
 | 5 | 管理员改密与重验证 | `auth.js: reauth/changeOwnPassword` | `/admin/me/password`、重验证机制 | 依赖 B-01 的错误码 23 决策，前端已按"机制休眠"处理 |
 | 6 | 桩状态目标集合 | `charger.js: setChargerStatus` | —（部分可用） | 刻意只允许 IDLE/DISABLED；OCCUPIED/RESTARTING 由设备回执决定 |
 | 7 | 按桩型的服务费比例调整 | `station.js: createPriceAdjustment` | `/admin/price-adjustments` | 当前只有全局费率统一下发 |
 
-其中 1、2 是运营日常必需且互不依赖，建议作为下一批；3、4 属于独立子系统，
+其中管理员账号管理是运营日常必需；3、4 属于独立子系统，
 需要各自的审批（B-06 与 ML 任务书）；5 取决于 B-01。
 
 ## 8. 对 A-02 的落地评估（下一步）

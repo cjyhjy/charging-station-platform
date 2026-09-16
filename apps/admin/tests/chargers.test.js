@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import ChargersView from '../src/views/ChargersView.vue'
+import { vReveal } from '../src/directives/reveal'
 import { useChargersStore, COMMAND_POLL_INTERVAL_MS } from '../src/stores/chargers'
+import { formatDateTime } from '../src/utils/format'
 import { failResponse, installFetch, okResponse } from './helpers'
 
 /** Go Charger 契约字段（type 为 AC/DC 字符串，status 为字符串枚举）。 */
@@ -32,9 +36,11 @@ function goPage(items, total = items.length) {
 
 let chargers = null
 let harness = null
+let pinia = null
 
 beforeEach(() => {
-  setActivePinia(createPinia())
+  pinia = createPinia()
+  setActivePinia(pinia)
   sessionStorage.clear()
   localStorage.clear()
   chargers = useChargersStore()
@@ -103,12 +109,61 @@ describe('设备状态变更（Go 契约：PUT status，仅 IDLE/DISABLED）', (
     expect(harness.count()).toBe(0)
   })
 
-  it('批量创建设备显式失败，不发起任何请求', async () => {
-    harness = installFetch([])
-    const ok = await chargers.batchCreate({ stationId: 1, chargers: [{ code: 'X-01', chargerType: 0, powerWatt: 7000 }] })
-    expect(ok).toBe(false)
-    expect(chargers.error).toContain('暂未提供')
-    expect(harness.count()).toBe(0)
+  it('批量建桩走 POST /admin/chargers/batch，桩型翻译为 AC/DC 且不带接口标准', async () => {
+    harness = installFetch([
+      okResponse({
+        stationId: 1,
+        chargerCount: 2,
+        created: [
+          { id: 11, stationId: 1, code: 'ZGC-DC-11', type: 'DC', powerWatt: 120000, status: 'IDLE' },
+          { id: 12, stationId: 1, code: 'ZGC-DC-12', type: 'DC', powerWatt: 120000, status: 'IDLE' }
+        ]
+      }),
+      okResponse(goPage([]))
+    ])
+
+    const ok = await chargers.batchCreate({
+      stationId: 1,
+      chargers: [
+        { code: 'ZGC-DC-11', chargerType: 1, powerWatt: 120000, connectorStandard: 'GB/T 20234.3' },
+        { code: 'ZGC-DC-12', chargerType: 1, powerWatt: 120000 }
+      ]
+    })
+
+    expect(ok).toBe(true)
+    const index = harness.indexOf('POST', '/admin/chargers/batch')
+    expect(index).toBe(0)
+    // 旧数字桩型（1=直流）翻译成契约用词；接口标准在 Go 契约里没有对应列，不发送。
+    expect(harness.bodyOf(index)).toEqual({
+      stationId: 1,
+      chargers: [
+        { code: 'ZGC-DC-11', connectorType: 'DC', powerWatt: 120000 },
+        { code: 'ZGC-DC-12', connectorType: 'DC', powerWatt: 120000 }
+      ]
+    })
+    expect(harness.headersOf(index)['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/)
+    expect(chargers.notice).toContain('2')
+  })
+
+  it('交流桩型翻译为 AC', async () => {
+    harness = installFetch([okResponse({ stationId: 1, chargerCount: 1, created: [] }), okResponse(goPage([]))])
+    await chargers.batchCreate({
+      stationId: 1,
+      chargers: [{ code: 'ZGC-AC-01', chargerType: 0, powerWatt: 7000 }]
+    })
+    expect(harness.bodyOf(0).chargers[0].connectorType).toBe('AC')
+  })
+
+  it('编号已存在（409 ALREADY_EXISTS）时保留错误提示且不改动列表', async () => {
+    harness = installFetch([failResponse({ status: 409, code: 5, userMessage: '编号 ZGC-DC-11 已存在' })])
+    chargers.items = [{ ...MAPPED_ROW }]
+
+    await expect(
+      chargers.batchCreate({ stationId: 1, chargers: [{ code: 'ZGC-DC-11', chargerType: 1, powerWatt: 120000 }] })
+    ).resolves.toBe(false)
+
+    expect(chargers.error).toContain('已存在')
+    expect(chargers.items).toHaveLength(1)
   })
 })
 
@@ -120,7 +175,9 @@ describe('远程重启与命令查询（Go 契约，标识为 commandId）', () 
       // 第一轮轮询：回执未到达，Go 返回 404 —— 按"仍在等待"处理。
       failResponse({ status: 404, code: 4, userMessage: '命令不存在或尚未产生回执' }),
       // 第二轮轮询：网关回执已记录。
-      okResponse({ commandId: 'CMD202609160001', chargerId: 11, action: 'RESTART', result: 'COMPLETED', applied: true, recordedAt: '2026-09-16T12:00:05Z' })
+      // 回执时间戳带毫秒（Go 的 RFC3339 就是这样），曾经被 Date.parse(...)/1000 + toInteger
+      // 判成"非整数"而丢掉，面板因此永远显示"待执行"。用例必须用真实形态的时间戳。
+      okResponse({ commandId: 'CMD202609160001', chargerId: 11, action: 'RESTART', result: 'COMPLETED', applied: true, recordedAt: '2026-09-16T12:00:05.123456789Z' })
     ])
 
     chargers.items = [{ ...MAPPED_ROW }]
@@ -143,6 +200,11 @@ describe('远程重启与命令查询（Go 契约，标识为 commandId）', () 
     expect(chargers.command.status).toBe('SUCCEEDED')
     expect(chargers.commandFinished).toBe(true)
     expect(chargers.commandPolling).toBe(false)
+    // 回执时间落成整数秒（毫秒向下取整），面板才能显示完成时间而不是"待执行"
+    expect(chargers.command.completedAt).toBe(Date.UTC(2026, 8, 16, 12, 0, 5) / 1000)
+    expect(formatDateTime(chargers.command.completedAt)).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
+    // 受理响应没有受理时间字段：不伪造 0（否则页面渲染"提交于 —"）
+    expect(chargers.command.createdAt).toBeUndefined()
     // 终态后自动刷新设备列表
     expect(harness.indexOf('GET', '/admin/chargers')).toBeGreaterThan(0)
     vi.useRealTimers()
@@ -152,7 +214,7 @@ describe('远程重启与命令查询（Go 契约，标识为 commandId）', () 
     vi.useFakeTimers()
     harness = installFetch([
       okResponse({ commandId: 'CMD-2', status: 'PENDING' }),
-      okResponse({ commandId: 'CMD-2', chargerId: 11, action: 'RESTART', result: 'FAILED', applied: false, recordedAt: '2026-09-16T12:00:06Z' })
+      okResponse({ commandId: 'CMD-2', chargerId: 11, action: 'RESTART', result: 'FAILED', applied: false, recordedAt: '2026-09-16T12:00:06.987654321Z' })
     ])
     chargers.items = [{ ...MAPPED_ROW }]
     await chargers.restart(chargers.items[0], '远程恢复测试')
@@ -167,5 +229,44 @@ describe('远程重启与命令查询（Go 契约，标识为 commandId）', () 
     chargers.items = [{ ...MAPPED_ROW }]
     await expect(chargers.restart(chargers.items[0], '远程恢复测试')).resolves.toBe(false)
     expect(chargers.error).toBe('当前状态不允许重启')
+  })
+})
+
+describe('重启命令面板', () => {
+  it('回执到达后显示完成时间，且不渲染契约里没有的受理时间', async () => {
+    window.matchMedia = vi.fn(() => ({
+      matches: false,
+      media: '(prefers-reduced-motion: reduce)',
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {}
+    }))
+    installFetch([okResponse({ items: [], meta: { page: 1, pageSize: 20, total: 0 } })])
+
+    // 回执时间戳（毫秒已向下取整为整数秒），来自 DeviceCommand.recordedAt
+    const completedAt = Date.UTC(2026, 8, 16, 12, 0, 5) / 1000
+    chargers.command = {
+      commandId: 'CMD202609160001',
+      status: 'SUCCEEDED',
+      chargerStatus: null,
+      completedAt,
+      errorSummary: '',
+      chargerCode: 'ZGC-DC-01'
+    }
+
+    const wrapper = mount(ChargersView, {
+      global: { plugins: [pinia], directives: { reveal: vReveal } }
+    })
+    await flushPromises()
+
+    const panel = wrapper.get('[data-testid="charger-command-panel"]').text()
+    expect(panel).toContain('CMD202609160001')
+    // 完成时间必须落地：之前 completedAt 被判成非整数而丢掉，这里永远显示"待执行"
+    expect(panel).toContain(formatDateTime(completedAt))
+    expect(panel).not.toContain('待执行')
+    // 受理响应没有受理时间字段，面板不该出现"提交于 —"
+    expect(panel).not.toContain('提交于')
+    delete window.matchMedia
   })
 })

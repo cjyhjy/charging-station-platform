@@ -109,8 +109,16 @@ function submitReauth(password) {
         </p>
 
         <RouterView v-slot="{ Component, route: current }">
+          <!--
+            必须保留 CSS 过渡（不要把 Transition 的 css 选项设为 false）：out-in 模式靠
+            离场结束后的 afterLeave 回调触发重新渲染，而 CSS 过渡是异步结束的。
+            若关掉 CSS 又不给 @enter/@leave 钩子，Vue 会同步判定离场完成，
+            afterLeave 里的 instance.update() 会在旧子树正卸载时重入 patch，
+            抛 "Cannot read properties of null (reading 'parentNode')"，
+            BaseTransition 的 isLeaving 卡在 true，此后每次切换都只剩注释占位（内容全空）。
+          -->
           <Transition name="page" mode="out-in">
-            <component :is="Component" :key="current.path" />
+            <component :is="Component" :key="current.fullPath" />
           </Transition>
         </RouterView>
       </main>

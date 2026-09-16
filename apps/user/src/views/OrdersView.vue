@@ -33,7 +33,12 @@ const appealReason = ref('')
 const appealError = ref('')
 const appealBusy = ref(false)
 const appealDone = ref(false)
+/** 该订单已存在申诉（契约：一单一申诉，内容不同返回 409）。 */
+const appealExists = ref(false)
 const stationNames = ref({})
+
+const confirmingOrderNo = ref('')
+const confirmError = ref('')
 
 let pendingReviewKey = null
 let pendingAppealKey = null
@@ -52,6 +57,27 @@ onMounted(async () => {
   await loadStationNames()
   await loadOrders(1)
 })
+
+/**
+ * 确认支付（UC-U-09）：COMPLETED 且 PENDING 的订单从余额扣款；未确认订单会
+ * 阻止新的充电流程，因此列表里必须能直接确认。余额不足时服务端扣至零并记录
+ * 欠费（PARTIAL_PAID），属最终状态，不再提供二次确认。
+ */
+async function confirmPayment(order) {
+  if (order.status !== 'COMPLETED' || order.paymentStatus !== 'PENDING') return
+  confirmingOrderNo.value = order.orderNo
+  confirmError.value = ''
+  try {
+    const updated = await orderApi.confirmOrder(order.orderNo, randomId())
+    const index = orders.value.findIndex(item => item.orderNo === order.orderNo)
+    if (index >= 0) orders.value[index] = updated
+    await auth.refreshWallet()
+  } catch (caught) {
+    confirmError.value = caught?.userMessage || '确认支付失败，请稍后重试'
+  } finally {
+    confirmingOrderNo.value = ''
+  }
+}
 
 /** 订单列表只带 stationId；拉一次站点列表把 id 解析成名称，失败时回退“站点 #id”。 */
 async function loadStationNames() {
@@ -96,6 +122,7 @@ async function openOrder(orderNo) {
   reviewError.value = ''
   appealError.value = ''
   appealDone.value = false
+  appealExists.value = false
   pendingReviewKey = null
   pendingAppealKey = null
   content.value = ''
@@ -154,7 +181,9 @@ async function submitAppeal() {
     appealDone.value = true
   } catch (caught) {
     if (caught?.status === 409) {
-      appealDone.value = true
+      // 契约：同一订单只能有一条申诉，内容不同返回 409。
+      // 以前这里直接置 appealDone=true，用户会以为"这次填的内容也被受理了"。
+      appealExists.value = true
       appealError.value = ''
       pendingAppealKey = null
     } else {
@@ -206,6 +235,8 @@ function changeStatus(value) {
 
       <p v-else-if="!orders.length" class="empty-state" data-testid="orders-empty">还没有充电订单，去附近站点开始第一次充电吧。</p>
 
+      <p v-if="confirmError" class="alert alert--error" data-testid="orders-confirm-error" role="alert">{{ confirmError }}</p>
+
       <TransitionGroup v-else name="list" tag="ul" class="order-list" data-testid="orders-list">
         <li v-for="(order, index) in orders" :key="order.orderNo" class="stagger-item" :style="staggerStyle(index)">
           <button type="button" class="order-list__item" :data-testid="`order-${order.orderNo}`" @click="openOrder(order.orderNo)">
@@ -216,6 +247,21 @@ function changeStatus(value) {
             <span>{{ formatEnergy(order.energyMwh) }}</span>
             <strong>{{ formatYuan(order.amountCent) }} 元</strong>
           </button>
+          <div
+            v-if="order.status === 'COMPLETED' && order.paymentStatus === 'PENDING'"
+            class="order-list__settle"
+          >
+            <span class="muted">充电已完成，请确认支付后才能发起下一次充电。</span>
+            <button
+              type="button"
+              class="btn btn--sm btn--primary"
+              :data-testid="`order-confirm-${order.orderNo}`"
+              :disabled="confirmingOrderNo === order.orderNo"
+              @click="confirmPayment(order)"
+            >
+              {{ confirmingOrderNo === order.orderNo ? '确认中…' : '确认支付' }}
+            </button>
+          </div>
         </li>
       </TransitionGroup>
 
@@ -237,7 +283,11 @@ function changeStatus(value) {
           <li><span>结算时间</span><strong>{{ formatDateTime(receipt.settledAt) }}</strong></li>
         </ul>
 
-        <div class="review-box" data-testid="order-review">
+        <!--
+          评价与申诉都只对 COMPLETED 订单开放（契约原文），而且"有申诉的订单不能再评价"。
+          receipt 为 null（详情还没回来或加载失败）时不能读它的字段——直接读会让整页渲染抛错。
+        -->
+        <div v-if="receipt && receipt.status === 'COMPLETED'" class="review-box" data-testid="order-review">
           <h3>订单评价</h3>
 
           <div v-if="review" data-testid="order-review-existing">
@@ -261,11 +311,15 @@ function changeStatus(value) {
           <p v-if="reviewError" class="alert alert--error" data-testid="review-error">{{ reviewError }}</p>
         </div>
 
-        <div v-if="receipt.status === 'COMPLETED'" class="review-box" data-testid="order-appeal">
+        <div v-if="receipt && receipt.status === 'COMPLETED'" class="review-box" data-testid="order-appeal">
           <h3>订单申诉</h3>
 
           <div v-if="appealDone" data-testid="order-appeal-done">
             <p>申诉已提交，客服审核通过后会把实付金额退回钱包。</p>
+          </div>
+
+          <div v-else-if="appealExists" data-testid="order-appeal-exists">
+            <p>该订单已有申诉记录：同一订单只能申诉一次，本次填写的内容没有提交。</p>
           </div>
 
           <form v-else class="review-form" @submit.prevent="submitAppeal">
@@ -329,6 +383,20 @@ function changeStatus(value) {
   background: linear-gradient(180deg, var(--ncs-brand-bright), var(--ncs-brand-strong));
   transform: scaleY(0);
   transition: transform var(--ncs-dur-2) var(--ncs-ease-out);
+}
+
+/* 待结算行内联操作条：提示 + 确认支付 */
+.order-list__settle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ncs-s-2);
+  margin-top: var(--ncs-s-1);
+  padding: 8px 14px;
+  border: 1px dashed var(--ncs-line);
+  border-radius: var(--ncs-r-sm);
+  background: var(--ncs-surface-2);
+  font-size: var(--ncs-fs-sm);
 }
 
 .order-list__item:hover {

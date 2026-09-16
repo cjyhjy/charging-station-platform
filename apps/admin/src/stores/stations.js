@@ -26,7 +26,7 @@ export const useStationsStore = defineStore('adminStations', {
     total: 0,
     page: 1,
     pageSize: 20,
-    filters: { status: null, adcode: '', keyword: '' },
+    filters: { keyword: '' },
     loading: false,
     saving: false,
     error: '',
@@ -48,11 +48,13 @@ export const useStationsStore = defineStore('adminStations', {
   },
 
   actions: {
-    /** 查询参数：空字符串按未提供处理（§1.5）。 */
+    /**
+     * 查询参数：空字符串按未提供处理（§1.5）。
+     * Go 列表契约只有 keyword + 分页，所以这里也只产出这两项——
+     * 不再保留 status/adcode 这类服务端不认的字段，避免“看起来生效了”。
+     */
     params() {
       return {
-        status: this.filters.status === null ? undefined : this.filters.status,
-        adcode: this.filters.adcode.trim() || undefined,
         keyword: this.filters.keyword.trim() || undefined,
         page: this.page,
         pageSize: this.pageSize
@@ -86,7 +88,7 @@ export const useStationsStore = defineStore('adminStations', {
     },
 
     resetFilters() {
-      this.filters = { status: null, adcode: '', keyword: '' }
+      this.filters = { keyword: '' }
       this.page = 1
       return this.load()
     },

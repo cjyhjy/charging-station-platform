@@ -15,15 +15,13 @@ import FormDialog from '@/components/FormDialog.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useStationsStore } from '@/stores/stations'
-import { CHARGER_TYPES, STATION_STATUS, ADJUSTMENT_SOURCES } from '@/utils/domain'
-import { formatAmount, formatDateTime, fromDateTimeInputValue } from '@/utils/format'
+import { CHARGER_TYPES, ADJUSTMENT_SOURCES } from '@/utils/domain'
+import { formatAmount, formatDateTime, formatInt, fromDateTimeInputValue } from '@/utils/format'
 
 const stations = useStationsStore()
 const auth = useAuthStore()
 
 const keyword = ref('')
-const statusFilter = ref(null)
-const adcodeFilter = ref('')
 
 const createOpen = ref(false)
 const editTarget = ref(null)
@@ -36,16 +34,17 @@ onMounted(async () => {
   await stations.loadTariffs()
 })
 
+/**
+ * 列与 Go Station 契约一一对应：编码、名称、运营状态，末列放行内操作。
+ *
+ * 行政区编码与版本在 Go 契约里没有对应字段，列出来只会是「—」；行内操作
+ * 原本挂在「版本」列上，现在挂到诚实的「操作」列。
+ */
 const stationColumns = [
   { key: 'code', label: '站点编码' },
   { key: 'name', label: '站点名称' },
-  { key: 'adcode', label: '行政区编码' },
-  {
-    key: 'enabled',
-    label: '运营状态',
-    format: value => (value === true ? '运营中' : '已停用')
-  },
-  { key: 'version', label: '版本', align: 'right' }
+  { key: 'enabled', label: '运营状态', format: (value, row) => stationStateText(row) },
+  { key: 'actions', label: '操作', align: 'right' }
 ]
 
 const tariffColumns = [
@@ -74,24 +73,20 @@ const tariffColumns = [
   { key: 'chargerCount', label: '设备数', align: 'right', format: value => formatInt(value) }
 ]
 
-/** 新增站点：经纬度按十进制度输入，提交前换算为整数 E6 度。 */
+/**
+ * 新增站点：字段就是 Go CreateStationRequest 的全部五个。
+ *
+ * 行政区编码、营业时间、初始设备（数量/类型/功率/接口标准）在 Go 契约里都不存在，
+ * 收进表单只会在提交时被静默丢掉，让管理员以为填了就算数。
+ * 上限按契约取（编码 2~32、名称 100、地址 255），避免表单比服务端更严。
+ * 经纬度按十进制度输入，提交前换算为整数 E6 度。
+ */
 const createFields = [
-  { key: 'code', label: '站点编码', required: true, minLength: 2, maxLength: 16, placeholder: '如 ZGC2' },
-  { key: 'name', label: '站点名称', required: true, maxLength: 64 },
-  { key: 'address', label: '地址', required: true, maxLength: 128 },
-  { key: 'adcode', label: '行政区编码', required: true, minLength: 6, maxLength: 6, placeholder: '6 位行政区编码' },
+  { key: 'code', label: '站点编码', required: true, minLength: 2, maxLength: 32, placeholder: '如 ZGC2' },
+  { key: 'name', label: '站点名称', required: true, maxLength: 100 },
+  { key: 'address', label: '地址', required: true, maxLength: 255 },
   { key: 'latitude', label: '纬度（度）', type: 'number', integer: false, required: true, min: -90, max: 90 },
-  { key: 'longitude', label: '经度（度）', type: 'number', integer: false, required: true, min: -180, max: 180 },
-  { key: 'businessHours', label: '营业时间', default: '00:00-24:00', maxLength: 64 },
-  { key: 'count', label: '初始电桩数量', type: 'number', required: true, min: 1, max: 100, default: 4 },
-  {
-    key: 'chargerType',
-    label: '电桩类型',
-    type: 'select',
-    options: CHARGER_TYPES.map(item => ({ value: item.value, label: item.label }))
-  },
-  { key: 'powerWatt', label: '单桩功率（W）', type: 'number', required: true, min: 1, max: 1000000, default: 60000 },
-  { key: 'connectorStandard', label: '接口标准', default: 'GB/T 20234.3', maxLength: 32 }
+  { key: 'longitude', label: '经度（度）', type: 'number', integer: false, required: true, min: -180, max: 180 }
 ]
 
 /**
@@ -101,8 +96,8 @@ const createFields = [
  * 自己改动的字段被保存了。
  */
 const editFields = computed(() => [
-  { key: 'name', label: '站点名称', required: true, maxLength: 64 },
-  { key: 'address', label: '地址', required: true, maxLength: 128 },
+  { key: 'name', label: '站点名称', required: true, maxLength: 100 },
+  { key: 'address', label: '地址', required: true, maxLength: 255 },
   { key: 'latitude', label: '纬度（度）', type: 'number', integer: false, required: true, min: -90, max: 90 },
   { key: 'longitude', label: '经度（度）', type: 'number', integer: false, required: true, min: -180, max: 180 }
 ])
@@ -170,16 +165,8 @@ async function submitCreate(values) {
     code: values.code,
     name: values.name,
     address: values.address,
-    adcode: values.adcode,
     latitudeE6: toE6(values.latitude),
-    longitudeE6: toE6(values.longitude),
-    businessHours: values.businessHours || '00:00-24:00',
-    initialCharger: {
-      count: values.count,
-      chargerType: values.chargerType,
-      powerWatt: values.powerWatt,
-      connectorStandard: values.connectorStandard || 'GB/T 20234.3'
-    }
+    longitudeE6: toE6(values.longitude)
   })
   if (ok) createOpen.value = false
 }
@@ -234,18 +221,28 @@ async function submitAdjustment(values) {
 }
 
 function applyFilters() {
-  stations.setFilter({ keyword: keyword.value, status: statusFilter.value, adcode: adcodeFilter.value })
+  stations.setFilter({ keyword: keyword.value })
 }
 
 function resetFilters() {
   keyword.value = ''
-  statusFilter.value = null
-  adcodeFilter.value = ''
   stations.resetFilters()
 }
 
-function statusTone(enabled) {
-  return enabled === true ? 'ok' : 'muted'
+/**
+ * Go 契约只给 status（OPEN/CLOSED/DISABLED），没有 enabled 布尔列；
+ * enabled 由 api/station.js 在列表与状态变更两处统一换算，页面沿用两态展示。
+ */
+function isStationOpen(row) {
+  return row?.enabled === true
+}
+
+function stationStateText(row) {
+  return isStationOpen(row) ? '运营中' : '已停用'
+}
+
+function statusTone(row) {
+  return isStationOpen(row) ? 'ok' : 'muted'
 }
 </script>
 
@@ -263,15 +260,15 @@ function statusTone(enabled) {
         <button type="button" class="btn btn--sm" @click="stations.load()">刷新列表</button>
       </span>
     </p>
-    <p v-if="!auth.isOwner" class="alert" data-testid="stations-permission-hint">
-      当前账号非 OWNER：站点启停、价格版本与价格调整需要 OWNER 权限，服务端会拒绝越权请求。
+    <p v-if="!auth.canWrite" class="alert" data-testid="stations-permission-hint">
+      当前账号为只读角色（{{ auth.roles.join(' / ') || '未识别' }}）：站点编辑、启停与费率写入需要 SUPER_ADMIN 或 OPERATOR 权限。
     </p>
 
     <section class="panel" v-reveal>
       <div class="panel__title">
         <div>
           <h2>站点检索</h2>
-          <p class="panel__hint">支持名称/地址关键词、行政区编码（6 位）与运营状态过滤</p>
+          <p class="panel__hint">Go 列表契约只支持名称/地址关键词 + 分页，因此这里只提供关键词检索</p>
         </div>
         <div class="panel__row">
           <button type="button" class="btn btn--sm btn--primary" data-testid="station-create" @click="createOpen = true">
@@ -284,17 +281,6 @@ function statusTone(enabled) {
         <label class="field">
           <span>关键词</span>
           <input v-model="keyword" type="search" placeholder="站点名称或地址" data-testid="stations-keyword" />
-        </label>
-        <label class="field">
-          <span>行政区编码</span>
-          <input v-model="adcodeFilter" type="text" placeholder="6 位编码" data-testid="stations-adcode" />
-        </label>
-        <label class="field">
-          <span>运营状态</span>
-          <select v-model="statusFilter" data-testid="stations-status">
-            <option :value="null">全部状态</option>
-            <option v-for="item in STATION_STATUS" :key="item.value" :value="item.value">{{ item.label }}</option>
-          </select>
         </label>
         <template #actions>
           <button type="button" class="btn" data-testid="stations-reset" @click="resetFilters">重置</button>
@@ -326,9 +312,9 @@ function statusTone(enabled) {
         @retry="stations.load()"
       >
         <template #cell-enabled="{ row }">
-          <StatusPill :text="row.enabled ? '运营中' : '已停用'" :tone="statusTone(row.enabled)" :test-id="`station-state-${row.id}`" />
+          <StatusPill :text="stationStateText(row)" :tone="statusTone(row)" :test-id="`station-state-${row.id}`" />
         </template>
-        <template #cell-version="{ row }">
+        <template #cell-actions="{ row }">
           <span class="row-actions">
             <button
               type="button"
@@ -407,7 +393,7 @@ function statusTone(enabled) {
       v-if="createOpen"
       test-id="station-create-dialog"
       title="新增站点"
-      hint="站点与初始设备在同一事务内创建；行政区必须已存在生效的基础价格版本"
+      hint="Go 契约一次只创建站点本身（编码/名称/地址/经纬度）；初始设备请在充电桩页新增"
       :fields="createFields"
       submit-label="创建站点"
       :loading="stations.saving"

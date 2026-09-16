@@ -71,6 +71,11 @@ export const useAuthStore = defineStore('adminAuth', {
     isLoggedIn: state => !!state.token,
     displayName: state => state.admin?.username || '未登录',
     roles: state => (Array.isArray(state.admin?.roles) ? state.admin.roles : []),
+    /** Go 写角色：SUPER_ADMIN 与 OPERATOR 可执行运营写操作，AUDITOR 只读。 */
+    canWrite: state => {
+      const roles = Array.isArray(state.admin?.roles) ? state.admin.roles : []
+      return roles.includes('SUPER_ADMIN') || roles.includes('OPERATOR')
+    },
     isOwner: state => (Array.isArray(state.admin?.roles) ? state.admin.roles.includes('OWNER') : false),
     mustChangePassword: state => state.admin?.mustChangePassword === true,
     isLocked: state => state.lockedSeconds > 0
@@ -285,6 +290,14 @@ export const useAuthStore = defineStore('adminAuth', {
       if (!token) return false
       this.token = token
       this.admin = readProfile()
+      if (this.admin) return true
+      authApi.currentIdentity().then(identity => {
+        this.admin = identity
+        writeProfile(this.admin)
+      }).catch(() => {
+        // 令牌可能已过期；请求层会清理令牌并触发登录跳转。
+      })
+      // 令牌本身仍可用于路由守卫；身份资料会在请求完成后补齐。
       return true
     }
   }

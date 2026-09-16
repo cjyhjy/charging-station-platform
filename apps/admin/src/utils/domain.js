@@ -53,9 +53,9 @@ export const ADMIN_STATUS = [
 
 /** 管理员角色取值。 */
 export const ADMIN_ROLES = [
-  { value: 'OWNER', label: '所有者 OWNER' },
+  { value: 'SUPER_ADMIN', label: '超级管理员 SUPER_ADMIN' },
   { value: 'OPERATOR', label: '运营 OPERATOR' },
-  { value: 'VIEWER', label: '查看 VIEWER' }
+  { value: 'AUDITOR', label: '审计员 AUDITOR' }
 ]
 
 /** 站点运营状态（列表接口用 status=0/1 过滤）。 */

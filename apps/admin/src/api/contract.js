@@ -32,6 +32,16 @@ export function mapChargerStatusText(status) {
   return CHARGER_STATUS_LABELS[status] || status
 }
 
+/**
+ * 旧数字桩型（0 交流慢充 / 1 直流快充）→ Go 的连接器类型。
+ * 契约用 AC/DC 这两个词，与列名、列表载荷和站点筛选参数一致。
+ */
+export function legacyToConnectorType(value) {
+  if (value === 1) return 'DC'
+  if (value === 0) return 'AC'
+  return undefined
+}
+
 /** 旧数字设备状态 → Go 枚举（列表过滤参数）。 */
 export function legacyToChargerStatus(value) {
   const map = { 0: 'IDLE', 1: 'OCCUPIED', 2: 'FAULT', 3: 'DISABLED', 4: 'RESTARTING' }
@@ -113,11 +123,12 @@ export function flattenPage(data) {
 /** Go 身份 → 管理端 profile 快照（角色取 adminRole；Go 契约无 OWNER/改密标记）。 */
 export function mapAdminIdentity(identity) {
   if (!identity || typeof identity !== 'object') return null
+  const role = identity.adminRole || identity.role
   return {
     id: identity.id,
-    username: identity.displayName,
-    displayName: identity.displayName,
-    roles: identity.adminRole ? [identity.adminRole] : [],
+    username: identity.displayName || identity.username || '',
+    displayName: identity.displayName || identity.username || '',
+    roles: role ? [role] : [],
     status: identity.status,
     mustChangePassword: false
   }

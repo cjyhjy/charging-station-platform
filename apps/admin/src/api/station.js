@@ -9,7 +9,19 @@ import { flattenPage } from './contract'
  */
 export function fetchStations(params = {}) {
   const { keyword, page, pageSize } = params
-  return api.get('/admin/stations', { keyword, page, pageSize }).then(flattenPage)
+  return api
+    .get('/admin/stations', { keyword, page, pageSize })
+    .then(flattenPage)
+    .then(pageData => ({ ...pageData, items: pageData.items.map(withStationState) }))
+}
+
+/**
+ * 列表行也补齐 enabled：Go 只返回 status，缺了它页面会把运营中的站点
+ * 显示成「已停用」，启停按钮也会反过来发同一个目标状态（服务端 409）。
+ * 与 setStationEnabled 的响应换算保持同一套语义。
+ */
+function withStationState(station) {
+  return { ...station, enabled: station?.status === 'OPEN' }
 }
 
 /**

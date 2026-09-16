@@ -33,6 +33,12 @@ const stationLocation = computed(() => {
   return { latitudeE6: detail.latitudeE6, longitudeE6: detail.longitudeE6, coordinateType: 'gcj02' }
 })
 
+/** 导航页负责换算、距离与跳转；这里只做入口，不带定位职责。 */
+function openNavigation() {
+  if (!stationLocation.value) return
+  void router.push({ name: 'navigation', params: { stationId: stationId.value } })
+}
+
 const priceRows = computed(() => {
   const detail = station.detail
   if (!detail || !Number.isFinite(detail.minPriceCentPerKwh)) return []
@@ -136,9 +142,22 @@ async function startCharging() {
 
       <div v-reveal="{ delay: 180 }" class="panel" data-testid="station-route">
         <h3>路线规划</h3>
-        <p class="muted" data-testid="station-route-unavailable">
-          路线规划暂未开放：导航服务（A-07）尚未接入 Go 后端。站点位置与导航入口将在服务上线后提供。
+        <p class="muted" data-testid="station-route-hint">
+          服务端路线规划（A-07）尚未接入 Go 后端，站内画线暂未开放；导航页提供坐标换算、
+          距离与腾讯地图一键跳转。
         </p>
+        <div class="panel__row">
+          <button
+            type="button"
+            class="btn btn--primary"
+            data-testid="station-navigate"
+            :disabled="!stationLocation"
+            @click="openNavigation"
+          >
+            进入导航
+          </button>
+        </div>
+        <p v-if="!stationLocation" class="muted" data-testid="station-route-no-coords">该站点缺少坐标信息，暂无法导航。</p>
       </div>
 
       <div v-if="stationLocation" class="panel">
@@ -180,8 +199,6 @@ async function startCharging() {
   font-size: var(--ncs-fs-lg);
   letter-spacing: -0.02em;
 }
-
-/* 路线规划入口（A-07 接入后恢复）；当前仅显示未开放说明。 */
 
 .review-list {
   list-style: none;

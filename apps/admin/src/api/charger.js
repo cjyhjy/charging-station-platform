@@ -1,5 +1,5 @@
 import { api, unsupported } from './http'
-import { flattenPage, legacyToChargerStatus, mapCharger } from './contract'
+import { flattenPage, legacyToChargerStatus, legacyToConnectorType, mapCharger } from './contract'
 
 /** 设备接口（Go 契约）。写入均携带幂等键（16..128，服务端强制）。 */
 
@@ -61,6 +61,24 @@ export function setChargerStatus(chargerId, { targetStatus, reason }, { idempote
 }
 
 /** 批量创建设备：Go 契约暂无该端点（待 B-01 决策）。 */
-export function createChargersBatch() {
-  return unsupported('批量创建设备在 Go 后端暂未提供（待 B-01 契约决策）')
+/**
+ * 批量建桩（POST /admin/chargers/batch）：一次 1~100 台，整批同事务。
+ *
+ * 请求体只带操作员输入的字段：编号、连接器类型与功率。状态、价格与版本由服务端决定，
+ * 前端不提交；旧表单里的接口标准在 Go 契约中没有对应列，因此不发送。
+ * 连接器类型在这里从旧数字桩型翻译为契约用词 AC/DC。
+ */
+export function createChargersBatch({ stationId, chargers } = {}, { idempotencyKey } = {}) {
+  return api.post(
+    '/admin/chargers/batch',
+    {
+      stationId,
+      chargers: (Array.isArray(chargers) ? chargers : []).map(charger => ({
+        code: charger.code,
+        connectorType: legacyToConnectorType(charger.chargerType),
+        powerWatt: charger.powerWatt
+      }))
+    },
+    { idempotent: true, idempotencyKey }
+  )
 }

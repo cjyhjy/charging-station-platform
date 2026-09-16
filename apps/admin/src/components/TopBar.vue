@@ -19,9 +19,9 @@ const auth = useAuthStore()
 /** 角色只做展示；权限判定始终以服务端响应为准。 */
 const roleLabel = computed(() => {
   const roles = auth.roles
-  if (roles.includes('OWNER')) return '所有者'
+  if (roles.includes('SUPER_ADMIN')) return '超级管理员'
   if (roles.includes('OPERATOR')) return '运营管理员'
-  if (roles.includes('VIEWER')) return '查看者'
+  if (roles.includes('AUDITOR')) return '审计员'
   return '未识别角色'
 })
 

@@ -7,7 +7,7 @@ const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, repositoryRoot, ['VITE_', 'TENCENT_MAP_JS_KEY'])
-  const apiTarget = env.VITE_NCS_API_TARGET || 'https://127.0.0.1:8443'
+  const apiTarget = env.VITE_NCS_API_TARGET || 'http://127.0.0.1:8080'
 
   return {
     plugins: [vue()],

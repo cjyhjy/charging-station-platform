@@ -12,6 +12,7 @@ const routes = [
     children: [
       { path: '', name: 'home', component: () => import('@/views/HomeView.vue'), meta: { title: '附近充电站' } },
       { path: 'stations/:stationId', name: 'station', component: () => import('@/views/StationView.vue'), meta: { title: '站点详情' } },
+      { path: 'stations/:stationId/navigation', name: 'navigation', component: () => import('@/views/NavigationView.vue'), meta: { title: '导航' } },
       { path: 'charging', name: 'charging', component: () => import('@/views/ChargingView.vue'), meta: { title: '充电流程' } },
       { path: 'agent', name: 'agent', component: () => import('@/views/AgentView.vue'), meta: { title: 'AI 助手' } },
       { path: 'orders', name: 'orders', component: () => import('@/views/OrdersView.vue'), meta: { title: '我的订单' } },

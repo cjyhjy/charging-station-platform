@@ -22,6 +22,17 @@ export function fetchOrderReview(orderNo) {
   return api.get(`/orders/${encodeURIComponent(orderNo)}/review`).then(mapReview)
 }
 
+/**
+ * 确认支付（UC-U-09）：结算 COMPLETED 且 paymentStatus=PENDING 的订单，从钱包扣款；
+ * 余额不足时扣至零、差额记为欠费（PARTIAL_PAID）。未确认的订单会阻止新的充电流程，
+ * 因此这是充电闭环的必经一步，不是可选操作。
+ */
+export function confirmOrder(orderNo, idempotencyKey) {
+  return api
+    .post(`/orders/${encodeURIComponent(orderNo)}/confirm`, {}, { idempotent: true, idempotencyKey })
+    .then(mapOrder)
+}
+
 /** 提交评价：Go 字段为 stars/comment（1..5 星、1..500 码点），同内容重放幂等返回首次结果。 */
 export function submitOrderReview(orderNo, { rating, content }, idempotencyKey) {
   return api

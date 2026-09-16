@@ -7,6 +7,7 @@ import {
   setChargerStatus
 } from '../api/charger'
 import { fetchStations } from '../api/station'
+import { isoToUnixSecond } from '../api/contract'
 import { ERROR_CODES } from '../api/http'
 import { toInteger } from '../utils/format'
 import { COMMAND_STATUS } from '../utils/domain'
@@ -162,7 +163,8 @@ export const useChargersStore = defineStore('adminChargers', {
           createChargersBatch({ stationId, chargers }, { idempotencyKey })
         )
         const created = Array.isArray(data.created) ? data.created : []
-        this.notice = `已创建设备 ${created.length} 台`
+        const count = toInteger(data.chargerCount) ?? created.length
+        this.notice = `已创建设备 ${count} 台`
         await this.load()
         return true
       } catch (error) {
@@ -187,7 +189,9 @@ export const useChargersStore = defineStore('adminChargers', {
           commandId: data.commandId || '',
           status: data.status || 'PENDING',
           chargerStatus: null,
-          createdAt: toInteger(data.createdAt) ?? 0,
+          // 契约的受理响应只有 commandId + status（backend Command 结构），
+          // 没有受理时间：以前这里写 createdAt: toInteger(data.createdAt) ?? 0，
+          // 页面就会渲染成"提交于 —"。宁可不说，也不编一个 1970。
           completedAt: null,
           errorSummary: '',
           chargerCode: charger.code
@@ -220,7 +224,7 @@ export const useChargersStore = defineStore('adminChargers', {
       this.command = {
         ...this.command,
         status: data.result === 'COMPLETED' ? 'SUCCEEDED' : data.result === 'FAILED' ? 'FAILED' : this.command.status,
-        completedAt: toInteger(data.recordedAt ? Date.parse(data.recordedAt) / 1000 : null),
+        completedAt: isoToUnixSecond(data.recordedAt),
         errorSummary: data.result === 'FAILED' ? '设备回执报告重启失败' : ''
       }
       if (COMMAND_STATUS[this.command.status]?.terminal) {
