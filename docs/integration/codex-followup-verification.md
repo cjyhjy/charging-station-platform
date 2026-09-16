@@ -1,6 +1,6 @@
 # Claude 修复后续验证（2026-09-16）
 
-本轮以 Go API/Go Agent 为目标，保留主工作区 `rebase/postgres-on-develop` 的已有修改。没有提交、推送、合并或修改 PR。远端只读核对结果：develop=`422ee83`、后端 #45=`d6c6dcd`、前端 #44=`d615794`，与交接一致。
+本轮以 Go API/Go Agent 为目标，保留主工作区 `rebase/postgres-on-develop` 的已有修改。已有修复已按用户要求提交：后端 `1e24942`，前端 `8a648a0`；后续 Agent 超时修复为 `ff672e0`。没有推送、合并或修改远端 PR。远端只读核对结果：develop=`422ee83`、后端 #45=`d6c6dcd`、前端 #44=`d615794`，与交接一致。
 
 ## 工作区与修复
 
@@ -14,7 +14,7 @@
 - 前端修复轮询达到上限时显示 `commandId`，避免 `undefined`，新增对应回归测试（UC-A-05、NFR-U-01）。
 - 更新后端部署文档及 service/compose 注释中落后的迁移版本说明。
 
-没有更改 Idempotency-Key 的 16–128 字符契约、错误码、数据库迁移文件、超时数值或需求完成状态。
+没有更改 Idempotency-Key 的 16–128 字符契约、错误码、数据库迁移文件或需求完成状态。后续 Agent 总预算调整见文末。
 
 ## 原始基线
 
@@ -49,7 +49,7 @@ Go 命令设置 `NCS_TEST_PG_DSN`、`NCS_TEST_REDIS_ADDR`、`NCS_REDIS_TEST_ADDR
 
 ## 仍需明确的边界
 
-- Agent 总超时预算尚未修改：15 秒服务端写超时、20 秒前端等待与最多约 39 秒串行工作存在冲突；已向用户提出 14 秒总预算并返回降级结果的选项，尚未收到裁定。本轮通过不代表慢模型场景已修复。
+- Agent 总超时冲突已在后续修复中解决，慢模型与取消回归通过；真实供应商服务仍需单独验收。
 - #44 仍包含从 #42 继承的 C++ 历史代码，本轮没有执行剥离；正式架构/需求矩阵仍存在旧栈描述，未擅自将功能标为完成。
 - 真实 LLM、腾讯地图、外部短信/支付、设备 Modbus/OCPP 未配置，未声称通过供应商实网验证。
 - 原来的 `node_modules` 软链接是本地依赖，不得加入提交。
@@ -61,3 +61,14 @@ Go 命令设置 `NCS_TEST_PG_DSN`、`NCS_TEST_REDIS_ADDR`、`NCS_REDIS_TEST_ADDR
 - 调用方取消后不会启动后续工具或模型调用；数据库、地图和模型客户端继续接收并遵守同一 `context`。
 - 回归覆盖慢规划、慢模型组织、慢工具、调用方取消，以及真实 HTTP socket deadline；Agent 定向竞态测试通过。
 - 该预算不代表真实 LLM、腾讯地图或设备协议实网验收；前端等待上限仍为 20 秒。
+
+### 后续验证结果与记录
+
+- `go vet ./...`、`go build ./...` 通过。
+- `go test -count=1 -race -json ./...`：20 个含测试包通过，1311 个测试及子用例通过，零测试跳过；migrations 包无测试文件。使用新建专用 PostgreSQL 库 `ncs_budget_test_0916` 与 Redis 16389。
+- 全量之后补充“活动模型收到调用方取消”回归，并运行 `go test -count=1 -race ./internal/agent ./internal/httpapi`，通过。
+- 重新运行 `backend/scripts/verify-closed-loop.sh`：通过。使用新建库 `ncs_budget_e2e_test_0916`、Redis DB 12，与此前测试和浏览器进程隔离。
+- `git diff --check`、`bash scripts/check.sh` 通过；本轮无 C/C++ 或 Web 代码修改，未重复 Web 构建。
+- 后续原始日志位于 `/private/tmp/ncs-budget-20260916/`：`go-tests.jsonl`、`closed-loop.log`。
+- 补录上轮独立 C++ 验证：构建成功，CTest 44/44 通过（`/private/tmp/ncs-followup-20260916/legacy-ctest.log`）。macOS Qt 6.11.2 / Apple Clang 不等于正式 Qt 6.2.x / GCC 11+ 基线，未降低仓库工具链要求。
+- 只读核对需求矩阵：保留九个业务列，NFR-U-01 在第 261 行仍为“△ 进行中”；没有独立 Agent 条目。未改变矩阵状态，也未将旧栈完成标记移用于 Go 迁移。
