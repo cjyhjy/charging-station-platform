@@ -781,6 +781,31 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /agent/chat:
+    post:
+      tags: [agent]
+      operationId: agentChat
+      summary: Ask the travel assistant about charging stations, nearby places and routes
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentChatRequest'
+      responses:
+        '200':
+          description: Assistant reply, including structured results and degradation state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentChatResponseEnvelope'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
   /admin/stations:
     get:
       tags: [admin]
@@ -1795,6 +1820,115 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
   schemas:
+    AgentChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string, minLength: 1, maxLength: 500 }
+        location:
+          type: object
+          required: [latitudeE6, longitudeE6]
+          properties:
+            latitudeE6: { type: integer, format: int64, minimum: -90000000, maximum: 90000000 }
+            longitudeE6: { type: integer, format: int64, minimum: -180000000, maximum: 180000000 }
+        coordinateType: { type: string, enum: [gcj02, wgs84], default: gcj02 }
+        chargerType: { type: integer, enum: [0, 1] }
+    AgentStation:
+      type: object
+      required: [id, code, name, address, status, latitudeE6, longitudeE6, chargerCount, idleChargerCount, minPriceCentPerKwh]
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string }
+        name: { type: string }
+        address: { type: string }
+        status: { type: string, enum: [OPEN, CLOSED, DISABLED] }
+        latitudeE6: { type: integer, format: int64 }
+        longitudeE6: { type: integer, format: int64 }
+        chargerCount: { type: integer, minimum: 0 }
+        idleChargerCount: { type: integer, minimum: 0 }
+        operationalChargerCount: { type: integer, minimum: 0 }
+        minPriceCentPerKwh: { type: integer, minimum: 0 }
+        electricityPriceCentPerKwh: { type: integer, minimum: 0 }
+        servicePriceCentPerKwh: { type: integer, minimum: 0 }
+        fastChargerCount: { type: integer, minimum: 0 }
+        slowChargerCount: { type: integer, minimum: 0 }
+        chargerTypes:
+          type: array
+          items: { type: string, enum: [AC, DC] }
+        distanceMeter: { type: integer, format: int64, minimum: 0 }
+    AgentPoi:
+      type: object
+      required: [id, name, category, address, latitudeE6, longitudeE6, distanceMeter]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        category: { type: string }
+        address: { type: string }
+        latitudeE6: { type: integer, format: int64 }
+        longitudeE6: { type: integer, format: int64 }
+        distanceMeter: { type: integer, format: int64, minimum: 0 }
+        tel: { type: string }
+    AgentRouteStep:
+      type: object
+      required: [instruction, distanceMeter, durationSecond]
+      properties:
+        instruction: { type: string }
+        distanceMeter: { type: integer, format: int64, minimum: 0 }
+        durationSecond: { type: integer, format: int64, minimum: 0 }
+    AgentPolylinePoint:
+      type: object
+      required: [latitudeE6, longitudeE6]
+      properties:
+        latitudeE6: { type: integer, format: int64 }
+        longitudeE6: { type: integer, format: int64 }
+    AgentRoute:
+      type: object
+      required: [destinationName, originLatitudeE6, originLongitudeE6, destinationLatitudeE6, destinationLongitudeE6, distanceMeter, durationSecond, provider, fallback, steps, polyline, browserUrl]
+      properties:
+        destinationName: { type: string }
+        originLatitudeE6: { type: integer, format: int64 }
+        originLongitudeE6: { type: integer, format: int64 }
+        destinationLatitudeE6: { type: integer, format: int64 }
+        destinationLongitudeE6: { type: integer, format: int64 }
+        distanceMeter: { type: integer, format: int64, minimum: 0 }
+        durationSecond: { type: integer, format: int64, minimum: 0 }
+        provider: { type: string, enum: [TENCENT_MAP, LOCAL_FALLBACK] }
+        fallback: { type: boolean }
+        steps: { type: array, items: { $ref: '#/components/schemas/AgentRouteStep' } }
+        polyline: { type: array, items: { $ref: '#/components/schemas/AgentPolylinePoint' } }
+        browserUrl: { type: string }
+    AgentAction:
+      type: object
+      required: [type, label]
+      properties:
+        type: { type: string, enum: [open_station, navigate] }
+        label: { type: string }
+        targetId: { type: string }
+        url: { type: string }
+    AgentChatResponse:
+      type: object
+      required: [reply, stations, pois, route, actions, tools, llmUsed, degraded]
+      properties:
+        reply: { type: string }
+        stations: { type: array, items: { $ref: '#/components/schemas/AgentStation' } }
+        pois: { type: array, items: { $ref: '#/components/schemas/AgentPoi' } }
+        route:
+          allOf: [{ $ref: '#/components/schemas/AgentRoute' }]
+          nullable: true
+        actions: { type: array, items: { $ref: '#/components/schemas/AgentAction' } }
+        tools:
+          type: array
+          items: { type: string, enum: [station_search, station_detail, poi_search, route] }
+        llmUsed: { type: boolean }
+        degraded: { type: boolean }
+    AgentChatResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        code: { type: integer, enum: [0] }
+        message: { type: string }
+        data: { $ref: '#/components/schemas/AgentChatResponse' }
     SuccessEnvelope:
       type: object
       required: [success, code, message, data]

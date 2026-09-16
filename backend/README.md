@@ -135,6 +135,36 @@ Go 侧改为**按需聚合**，不再维护第二份事实来源：PostgreSQL �
 > 生效时间解析与定时切换。这里做的是今天就能用的小东西，复用已有的列，不引入关于"一次充电
 > 值多少钱"的第二份事实来源。
 
+## AI 助手（A-07）
+
+`POST /api/v1/agent/chat` 是浏览器访问助手的唯一入口，需要用户会话。
+
+助手是**只读**的：它读取站点、周边地点与路线，不写订单、充电桩或余额。请求体只有问题、
+自己的位置与可选桩型偏好；地图 Server Key、模型凭据、工具编排与降级策略全部留在服务端。
+
+服务端**不因模型或地图不可用而失败**。未配置时就按确定性意图判断选择工具、用规则文案作答，
+并在响应里以 `degraded=true` 说明；`route.fallback=true` 表示路线是直线估算。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `TENCENT_MAP_SERVER_KEY` | 空 | 腾讯地图 WebService 密钥。为空时 POI/路线不可用，助手降级但仍能用站点数据作答 |
+| `TENCENT_MAP_BASE_URL` | 空（官方主机） | 覆盖地图服务主机；用于沙箱、出口代理与联调 |
+| `AI_PROVIDER` | openai | `openai` / `deepseek` / `qwen` / `claude` / `custom` |
+| `AI_MODEL` | 空 | 模型名。与 `AI_API_KEY` 任一为空即视为未配置模型 |
+| `AI_API_KEY` | 空 | 模型凭据；只出现在请求头，绝不进日志、响应或前端产物 |
+| `AI_BASE_URL` | 空（按 provider 预设） | 自定义端点必须显式设置；非 loopback 只接受 HTTPS |
+| `AI_TIMEOUT_MS` | 15000 | 单次模型调用上限，客户端会再夹到 1000~60000 毫秒 |
+
+四个工具（`station_search` / `station_detail` / `poi_search` / `route`）的参数一律按不可信输入
+校验：越界、类型不符或缺失都不进入业务层。模型编造的工具名会被丢弃；模型只给结论不选工具时
+由确定性判断补上计划；计划里缺少站点 ID 或目的地坐标时，服务端会先补一次站点检索建立锚点。
+
+启动时会打印一行能力状态，便于确认当前部署处于哪一档：
+
+```
+msg="assistant capability" map_provider=false model=false tools="[station_search station_detail poi_search route]"
+```
+
 ## 集成测试
 
 需要真实 PostgreSQL 的测试通过 `NCS_TEST_PG_DSN` 守卫，未设置时自动跳过。

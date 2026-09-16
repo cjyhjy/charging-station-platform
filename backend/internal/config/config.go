@@ -36,6 +36,13 @@ const (
 	envFactTimeSkew         = "NCS_CHARGER_EVENT_MAX_FUTURE_SKEW"
 	envStopRecoveryAttempts = "NCS_STOP_RECOVERY_MAX_ATTEMPTS"
 	envStopRecoveryBackoff  = "NCS_STOP_RECOVERY_BACKOFF"
+	envMapServerKey         = "TENCENT_MAP_SERVER_KEY"
+	envMapBaseURL           = "TENCENT_MAP_BASE_URL"
+	envLLMProvider          = "AI_PROVIDER"
+	envLLMModel             = "AI_MODEL"
+	envLLMBaseURL           = "AI_BASE_URL"
+	envLLMAPIKey            = "AI_API_KEY"
+	envLLMTimeoutMS         = "AI_TIMEOUT_MS"
 	sessionMinIdleTTL       = time.Second
 	sessionMinAbsoluteTTL   = 168 * time.Hour // A-03 review: the absolute session window may not be shortened below seven days
 	loginMinRateLimit       = 1
@@ -47,7 +54,18 @@ const (
 	defaultFactTimeSkew         = 5 * time.Minute
 	defaultStopRecoveryAttempts = 3
 	defaultStopRecoveryBackoff  = 5 * time.Minute
+	defaultLLMTimeoutMS         = 15000
 )
+
+type AssistantConfig struct {
+	MapServerKey string
+	MapBaseURL   string
+	LLMProvider  string
+	LLMModel     string
+	LLMBaseURL   string
+	LLMAPIKey    string
+	LLMTimeout   time.Duration
+}
 
 // Config contains process-level settings for the API service.
 //
@@ -89,6 +107,7 @@ type Config struct {
 	// and how long the sweep waits between two of them.
 	StopRecoveryAttempts int
 	StopRecoveryBackoff  time.Duration
+	Assistant            AssistantConfig
 }
 
 // Load reads configuration from the process environment and applies safe
@@ -133,6 +152,13 @@ func Load() (Config, error) {
 	stopRecoveryAttempts, err := intFromEnv(envStopRecoveryAttempts, defaultStopRecoveryAttempts)
 	if err != nil {
 		return Config{}, err
+	}
+	llmTimeoutMS, err := intFromEnv(envLLMTimeoutMS, defaultLLMTimeoutMS)
+	if err != nil {
+		return Config{}, err
+	}
+	if llmTimeoutMS < 1 {
+		return Config{}, fmt.Errorf("invalid %s=%d: must be at least 1", envLLMTimeoutMS, llmTimeoutMS)
 	}
 	if stopRecoveryAttempts < 1 {
 		return Config{}, fmt.Errorf("invalid %s=%d: must be at least 1", envStopRecoveryAttempts, stopRecoveryAttempts)
@@ -186,6 +212,15 @@ func Load() (Config, error) {
 		FactTimeSkew:         factTimeSkew,
 		StopRecoveryAttempts: stopRecoveryAttempts,
 		StopRecoveryBackoff:  stopRecoveryBackoff,
+		Assistant: AssistantConfig{
+			MapServerKey: strings.TrimSpace(os.Getenv(envMapServerKey)),
+			MapBaseURL:   strings.TrimSpace(os.Getenv(envMapBaseURL)),
+			LLMProvider:  strings.TrimSpace(os.Getenv(envLLMProvider)),
+			LLMModel:     strings.TrimSpace(os.Getenv(envLLMModel)),
+			LLMBaseURL:   strings.TrimSpace(os.Getenv(envLLMBaseURL)),
+			LLMAPIKey:    strings.TrimSpace(os.Getenv(envLLMAPIKey)),
+			LLMTimeout:   time.Duration(llmTimeoutMS) * time.Millisecond,
+		},
 	}, nil
 }
 
