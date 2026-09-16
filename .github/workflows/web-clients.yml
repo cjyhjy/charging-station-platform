@@ -1,27 +1,19 @@
 name: Web clients
 
 on:
+  workflow_dispatch:
   pull_request:
     branches: [develop, main]
-    paths:
-      - 'apps/user/**'
-      - 'apps/admin/**'
-      - 'apps/shared/**'
-      - '.github/workflows/web-clients.yml'
   push:
-    branches: [develop, main]
-    paths:
-      - 'apps/user/**'
-      - 'apps/admin/**'
-      - 'apps/shared/**'
-      - '.github/workflows/web-clients.yml'
+    branches: [develop, main, 'codex/go-vue-retirement']
 
 permissions:
   contents: read
 
 jobs:
   web:
-    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         app: [user, admin]

@@ -1,5 +1,9 @@
 # NCS 研发实施指南
 
+## 当前分支工程入口
+
+当前 fork 候选分支以 `backend/` 的 Go 命令和 `apps/{user,admin,dashboard}` 的独立 Web 构建为入口；旧目录已归档至 `legacy/`。下文旧架构与阶段表是历史基线，协作流程仍有效。当前 CI、合并和回滚步骤见 [退役说明](integration/go-vue-retirement.md)。
+
 | 项目 | 内容 |
 | --- | --- |
 | 用途 | 规定工程拆分、研发顺序、质量门禁和完成条件 |

@@ -38,7 +38,7 @@ for dump in "${dumps[@]}"; do
     step "verify $(basename "${dump}")"
     [[ -f "${dump}.manifest" ]] || fail "manifest missing for ${dump}: the checksum cannot be checked"
     recorded="$(sed -n 's/^sha256=//p' "${dump}.manifest")"
-    actual="$(sha256sum "${dump}" | cut -d' ' -f1)"
+    actual="$(if command -v sha256sum >/dev/null 2>&1; then sha256sum "${dump}" | cut -d' ' -f1; else shasum -a 256 "${dump}" | cut -d' ' -f1; fi)"
     [[ "${recorded}" == "${actual}" ]] || fail "checksum mismatch for ${dump}: ${recorded} != ${actual}"
 
     # The archive's own table of contents is the cheapest proof that it is readable end to end.

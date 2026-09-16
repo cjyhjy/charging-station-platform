@@ -111,6 +111,10 @@ restore_dsn="$(dsn_for "${restore_db}")"
 
 step "build the migration gate"
 (cd "${backend_dir}" && go build -o "${work_dir}/ncs-api" ./cmd/api)
+# The API refuses to start without a gateway service token, because the receipt endpoint advances
+# orders. The drill only runs the migration gate, so it generates a throwaway token for the run
+# instead of making the caller supply a real credential (verify-closed-loop.sh does the same).
+drill_gateway_token="drill-gateway-token-$(date -u +%s%N)"
 
 step "check the instance can create and drop databases"
 # The drill's whole flow depends on these privileges; checking once here turns a confusing mid-run
@@ -122,7 +126,8 @@ echo "instance allows create/drop: ok"
 
 step "create ${source_db} and migrate it through the real runner"
 psql "${maintenance_dsn}" -q -c "CREATE DATABASE \"${source_db}\""
-NCS_POSTGRES_DSN="${source_dsn}" NCS_MIGRATE_ONLY=true "${work_dir}/ncs-api" 2>&1 | tail -1 || fail "migration gate failed"
+NCS_POSTGRES_DSN="${source_dsn}" NCS_CHARGER_GATEWAY_TOKEN="${drill_gateway_token}" \
+    NCS_MIGRATE_ONLY=true "${work_dir}/ncs-api" 2>&1 | tail -1 || fail "migration gate failed"
 
 step "seed data that must survive the restore"
 # Two users, a station, a charger and an order: enough that the restored copy can be checked for real
@@ -167,13 +172,17 @@ restore_seconds="$(sed -n 's/^RESTORE_SECONDS=//p' <<<"${restore_output}")"
 [[ -n "${restore_seconds}" ]] || fail "the restore did not report its duration"
 
 step "assertions"
+# The expected version is derived from the embedded migration files rather than written down here.
+# A hard-coded number goes stale on the next migration and turns the drill red for the wrong reason.
+expected_version="$(find "${backend_dir}/migrations" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]_*.sql' -exec basename {} \; | cut -d_ -f1 | sort -n | tail -1)"
+expected_version="$((10#${expected_version}))"
 restored_version="$(psql "${restore_dsn}" -tAc 'SELECT coalesce(max(version),0) FROM schema_migrations')"
 restored_orders="$(psql "${restore_dsn}" -tAc 'SELECT count(*) FROM charging_orders')"
 restored_marker="$(psql "${restore_dsn}" -tAc "SELECT count(*) FROM charging_orders WHERE order_no = 'ORD-DRILL-0001'")"
 lost_marker="$(psql "${restore_dsn}" -tAc "SELECT count(*) FROM charging_orders WHERE order_no = 'ORD-DRILL-AFTER'")"
 restored_wallets="$(psql "${restore_dsn}" -tAc 'SELECT count(*) FROM wallet_accounts')"
 
-[[ "${restored_version}" == "7" ]] || fail "restored schema version = ${restored_version}, want 7"
+[[ "${restored_version}" == "${expected_version}" ]] || fail "restored schema version = ${restored_version}, want ${expected_version} (the highest embedded migration)"
 [[ "${restored_marker}" == "1" ]] || fail "the pre-backup order is missing from the restored copy"
 [[ "${restored_orders}" == "${orders_before}" ]] || fail "restored ${restored_orders} orders, want the ${orders_before} the dump held"
 [[ "${restored_wallets}" == "2" ]] || fail "restored ${restored_wallets} wallets, want 2"
@@ -199,7 +208,7 @@ PostgreSQL RTO                <= 60 minutes   ${rto_minutes} minutes (restore of
 Redis                         recoverable     no unique business fact is stored only in Redis
 ledger and orders             from PostgreSQL  restored and asserted row by row
 
-verified: the dump is readable (pg_restore --list), the restored database carries schema version 7,
+verified: the dump is readable (pg_restore --list), the restored database carries schema version ${expected_version},
 the pre-backup order and both wallets are present, and the post-backup write is absent.
 
 limits of this drill: the restore targets the same PostgreSQL instance, so it measures the database

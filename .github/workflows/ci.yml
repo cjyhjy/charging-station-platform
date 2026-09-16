@@ -1,104 +1,94 @@
-name: CI
-
+name: Go integration
 on:
-  pull_request:
-    branches: [main, develop, codex/tencent-navigation-integration]
+  workflow_dispatch:
   push:
-    branches: [main, develop, codex/tencent-navigation-integration]
-
+    branches: [main, develop, 'codex/go-vue-retirement']
+  pull_request:
+    branches: [main, develop]
 permissions:
   contents: read
-
+concurrency:
+  group: go-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  mobile-contract:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
+  go-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ncs
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: ncs_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ncs -d ncs_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+      redis:
+        image: redis:7.4
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      NCS_TEST_PG_DSN: postgres://ncs:ci-only-password@127.0.0.1:5432/ncs_test?sslmode=disable
+      NCS_REDIS_TEST_ADDR: 127.0.0.1:6379
+      NCS_REDIS_TEST_DB: '15'
     steps:
       - uses: actions/checkout@v5
-      - name: Install CMake
-        run: python3 -m pip install --disable-pip-version-check cmake==3.31.6
-      - uses: jurplel/install-qt-action@v4
-        with:
-          version: "6.8.3"
-          arch: linux_gcc_64
-          cache: true
-      - name: Build and test mobile contracts and layouts
-        run: |
-          cmake -S tests/mobile -B build/mobile-contract
-          cmake --build build/mobile-contract --parallel 2
-          ctest --test-dir build/mobile-contract --output-on-failure
-      - name: Build and test device frame codec
-        run: |
-          cmake -S tools/device_link_sim -B build/device-link
-          cmake --build build/device-link --parallel 2
-          ctest --test-dir build/device-link --output-on-failure
-
-  ubuntu:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
-      - name: Install toolchain
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: backend/go.sum
+      - name: Install PostgreSQL 18 client and Redis CLI
         run: |
           sudo apt-get update
-          sudo apt-get install --yes clang-format ninja-build qt6-base-dev libgl1-mesa-dev
-          python3 -m pip install --disable-pip-version-check cmake==3.31.6
-
-      - name: Configure
-        run: cmake --preset dev
-
-      - name: Build
-        run: cmake --build --preset dev --parallel 2
-
-      - name: Test
-        env:
-          QT_QPA_PLATFORM: offscreen
-        run: ctest --preset dev
-
+          sudo apt-get install -y postgresql-common redis-tools
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-18
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
       - name: Repository checks
-        env:
-          NCS_CHECK_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: ./scripts/check.sh
-
-  windows-source-build:
-    runs-on: windows-2022
-    timeout-minutes: 25
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Install Qt 6.2
-        uses: jurplel/install-qt-action@v4
+      - name: Real PostgreSQL and Redis tests (no skipped tests)
+        run: ./scripts/test-backend.sh
+      - name: Four-process charging closed loop
+        env:
+          NCS_POSTGRES_DSN: postgres://ncs:ci-only-password@127.0.0.1:5432/ncs_e2e_test?sslmode=disable
+          NCS_REDIS_ADDR: 127.0.0.1:6379
+          NCS_REDIS_DB: '14'
+          NCS_E2E_ALLOW_DESTRUCTIVE: 'true'
+        run: |
+          psql "$NCS_TEST_PG_DSN" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE ncs_e2e_test'
+          set -o pipefail
+          backend/scripts/verify-closed-loop.sh 2>&1 | tee closed-loop.log
+      - name: PostgreSQL backup and restore drill
+        run: |
+          set -o pipefail
+          backend/scripts/drill-backup-restore.sh 2>&1 | tee backup-restore.log
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          version: "6.2.4"
-          arch: win64_msvc2019_64
-          cache: true
-
-      - name: Install SQLite3
-        run: vcpkg install sqlite3:x64-windows
-
-      - name: Configure
-        run: >-
-          cmake -S . -B build/windows
-          -G "Visual Studio 17 2022" -A x64
-          "-DCMAKE_TOOLCHAIN_FILE=${env:VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake"
-          -DBUILD_TESTING=ON
-          -DNCS_ENABLE_STRICT_WARNINGS=ON
-
-      - name: Build
-        run: cmake --build build/windows --config Debug --parallel 2
-
-      - name: Test
-        run: ctest --test-dir build/windows -C Debug --output-on-failure
-
+          name: go-integration-evidence
+          path: |
+            backend/go-tests.jsonl
+            closed-loop.log
+            backup-restore.log
+  go-windows-build:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: backend/go.sum
+      - run: go build ./...
+        working-directory: backend
   dashboard:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -110,14 +100,14 @@ jobs:
           package_json_file: apps/dashboard/package.json
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '22'
           cache: pnpm
           cache-dependency-path: apps/dashboard/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run test
       - run: pnpm run build
       - run: pnpm exec playwright install --with-deps chromium
-      - run: cmake -S . -B ../../build/dashboard-tests
-      - run: ctest --test-dir ../../build/dashboard-tests --output-on-failure
+      - run: pnpm run test:ui
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

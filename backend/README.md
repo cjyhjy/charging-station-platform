@@ -2,7 +2,7 @@
 
 该目录承载新 Go API 和 Redis Streams Worker。
 
-在 P0 闭环完成前，现有 C++/Crow 服务继续保留，不在本目录中复制或修改旧实现。
+本 fork 候选分支以 Go 为运行入口，旧 C++/Crow 源码归档至 `legacy/`。P0 闭环验证不等于全部业务迁移验收，参见 `docs/integration/go-vue-retirement.md`。
 
 ## 当前交付范围
 

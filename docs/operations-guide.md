@@ -1,5 +1,9 @@
 # NCS 运行与运维手册
 
+## 分支适用范围
+
+本文件的旧 C++/SQLite 操作只适用于历史版本，禁止对当前 Go 数据库执行。Go/PostgreSQL 启动、备份及恢复以 [后端部署说明](../backend/deploy/README.md) 为准，候选环境边界见 [退役说明](integration/go-vue-retirement.md)。
+
 | 项目 | 内容 |
 | --- | --- |
 | 适用范围 | 开发、测试和验收环境的启动、检查、备份、恢复与清理 |

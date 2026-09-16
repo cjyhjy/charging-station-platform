@@ -10,13 +10,13 @@ import (
 	bredis "github.com/heguangV/charging-station-platform/backend/internal/repository/redis"
 )
 
-// redisCommands returns a live command surface when NCS_TEST_REDIS_ADDR is
+// redisCommands returns a live command surface when NCS_REDIS_TEST_ADDR is
 // set; tests skip otherwise. Keys are namespaced per run and cleaned up.
 func redisCommands(t *testing.T) (bredis.Commands, func()) {
 	t.Helper()
-	addr := os.Getenv("NCS_TEST_REDIS_ADDR")
+	addr := os.Getenv("NCS_REDIS_TEST_ADDR")
 	if addr == "" {
-		t.Skip("NCS_TEST_REDIS_ADDR not set; Redis integration tests skipped")
+		t.Skip("NCS_REDIS_TEST_ADDR not set; Redis integration tests skipped")
 	}
 	config := bredis.DefaultConnConfig()
 	config.Address = addr

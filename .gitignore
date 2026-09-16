@@ -66,3 +66,6 @@ ml/models/
 # Web client bundles
 /apps/user/dist/
 /apps/admin/dist/
+
+/apps/dashboard/dist/
+/backend/go-tests.jsonl

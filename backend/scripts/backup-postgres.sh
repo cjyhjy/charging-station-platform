@@ -84,8 +84,24 @@ mv "${temporary}.toc" "${target}.toc"
 
 # The manifest is what the restore drill and an operator read: it records the numbers the RPO/RTO
 # targets are measured against, and the checksum proves the file on disk is the file that was taken.
-checksum="$(sha256sum "${target}" | cut -d' ' -f1)"
-size_bytes="$(stat -c%s "${target}")"
+# GNU coreutils and BSD userland disagree on both of these, so the manifest records the same numbers
+# whether the operator runs the drill on Linux or on a workstation.
+file_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+file_size_bytes() {
+    if stat -c%s "$1" >/dev/null 2>&1; then
+        stat -c%s "$1"
+    else
+        stat -f%z "$1"
+    fi
+}
+checksum="$(file_sha256 "${target}")"
+size_bytes="$(file_size_bytes "${target}")"
 cat > "${target}.manifest" <<MANIFEST
 database=${database_name}
 taken_at=${stamp}

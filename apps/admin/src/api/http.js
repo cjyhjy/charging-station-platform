@@ -236,6 +236,19 @@ function statusUserMessage(status) {
 }
 
 /**
+ * Go 契约中部分管理端动作端点要求请求体为空，收到 `{}` 会按 400 拒绝。
+ * 前端用 `api.post(path, {})` 表示“无参数”，这里把空对象归一为无请求体。
+ */
+function isEmptyBody(body) {
+  return (
+    typeof body === 'object' &&
+    !Array.isArray(body) &&
+    body !== null &&
+    Object.keys(body).length === 0
+  )
+}
+
+/**
  * 发送请求并解包 `{success, code, message, userMessage, requestId, data}` 信封。
  * @param {string} path 以 `/admin/...` 开头的接口路径。
  * @param {object} options method/body/timeout/idempotent/idempotencyKey/signal/headers。
@@ -259,7 +272,7 @@ export async function request(path, options = {}) {
   let payload
   if (typeof FormData !== 'undefined' && body instanceof FormData) {
     payload = body
-  } else if (body !== undefined && body !== null) {
+  } else if (body !== undefined && body !== null && !isEmptyBody(body)) {
     headers['Content-Type'] = 'application/json; charset=utf-8'
     payload = JSON.stringify(body)
   }
