@@ -81,7 +81,7 @@
 
 | # | 调用位置 | 方法与路径 | 请求体 | 前端消费的响应 | Go OpenAPI 对应 | 状态 | 差距说明 |
 |---|---|---|---|---|---|---|---|
-| A1 | `auth.js:6 login` | POST `/admin/auth/login` | `{username, password, deviceId}` | `accessToken/expiresAt`、`admin.mustChangePassword` | POST `/auth/admin/login` | 需改造 | 路径；`deviceId`；`mustChangePassword` 后端缺失（首登改密流程） |
+| A1 | `auth.js:6 login` | POST `/admin/auth/login` | `{username, password, deviceId}` | `accessToken/expiresAt`、`admin.mustChangePassword` | POST `/auth/admin/login` | 已改造 | 路径一致（去 `/admin`）；**请求体字段已由 `username` 改为 `account`**（Go `LoginRequest` 要求 `account`，发 `username` 会被判为长度越界返回 400）；`deviceId` 被 `api/auth.js` 丢弃、不入请求体；`mustChangePassword` 后端缺失（首登改密流程） |
 | A2 | `auth.js:11 reauth` | POST `/admin/auth/reauth` | `{password}` | 15 分钟免重验窗口 | — | 后端缺失 | Go 无重验证机制（错误码 23 未实现）；B-01 决策补契约或 A 线降级（C6） |
 | A3 | `auth.js:16 logout` | POST `/admin/auth/logout` | — | — | POST `/auth/logout` | 需改造 | Go 为统一注销端点 |
 | A4 | `auth.js:21 changeOwnPassword` | PUT `/admin/me/password` | `{currentPassword, newPassword}` | 清除 `mustChangePassword` | — | 后端缺失 | Go 无管理端改密端点 |

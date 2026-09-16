@@ -4,8 +4,11 @@ import { mapAdminIdentity } from './contract'
 /** 管理员认证接口（Go 契约）。 */
 
 /** 管理员登录；Go 契约不收 deviceId，身份里带 adminRole（SUPER_ADMIN/OPERATOR/AUDITOR）。 */
-export function login({ username, password }) {
-  return api.post('/auth/admin/login', { username, password }).then(session => ({
+export function login({ account, password }) {
+  // 字段名是契约的一部分：Go 的 LoginRequest 要求 `account`，发送 `username` 会被判为
+  // 参数越界并返回 400 invalid_argument，登录永远失败。这里的入参沿用契约用词，
+  // 避免调用方以为可以传任意用户名字段。
+  return api.post('/auth/admin/login', { account, password }).then(session => ({
     ...session,
     admin: mapAdminIdentity(session?.identity)
   }))

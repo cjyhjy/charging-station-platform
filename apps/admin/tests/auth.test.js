@@ -44,7 +44,7 @@ afterEach(() => {
 describe('登录与令牌存储', () => {
   it('登录成功后令牌只写 sessionStorage，localStorage 完全不被触碰', async () => {
     harness = installFetch([loginEnvelope()])
-    await expect(auth.login({ username: 'admin', password: 'example-password' })).resolves.toBe(true)
+    await expect(auth.login({ account: 'admin', password: 'example-password' })).resolves.toBe(true)
 
     expect(auth.token).toBe('admin-token-1')
     expect(getAccessToken()).toBe('admin-token-1')
@@ -58,11 +58,11 @@ describe('登录与令牌存储', () => {
     expect(auth.isOwner).toBe(false)
   })
 
-  it('登录请求体包含账号与密码（Go 契约不收 deviceId）', async () => {
+  it('登录请求体使用 Go 契约字段 account（发送 username 会被判为 400）', async () => {
     harness = installFetch([loginEnvelope()])
-    await auth.login({ username: 'ops_wang', password: 'ncs-Initial-2026' })
+    await auth.login({ account: 'ops_wang', password: 'ncs-Initial-2026' })
     expect(harness.bodyOf(0)).toEqual({
-      username: 'ops_wang',
+      account: 'ops_wang',
       password: 'ncs-Initial-2026'
     })
     expect(harness.urlOf(0)).toBe('/api/v1/auth/admin/login')
@@ -70,7 +70,7 @@ describe('登录与令牌存储', () => {
 
   it('刷新页面后可从 sessionStorage 恢复令牌与资料快照', async () => {
     harness = installFetch([loginEnvelope()])
-    await auth.login({ username: 'admin', password: 'example-password' })
+    await auth.login({ account: 'admin', password: 'example-password' })
 
     const restored = useAuthStore()
     restored.$reset()
@@ -87,7 +87,7 @@ describe('登录与令牌存储', () => {
 describe('退出与改密', () => {
   it('退出清理令牌、资料与 sessionStorage（Go 为统一注销端点）', async () => {
     harness = installFetch([loginEnvelope(), okResponse({})])
-    await auth.login({ username: 'admin', password: 'example-password' })
+    await auth.login({ account: 'admin', password: 'example-password' })
     await auth.logout()
 
     expect(auth.token).toBeNull()
@@ -99,7 +99,7 @@ describe('退出与改密', () => {
 
   it('退出接口失败也要清理本地会话', async () => {
     harness = installFetch([loginEnvelope(), failResponse({ status: 500, code: 13, userMessage: '服务异常' })])
-    await auth.login({ username: 'admin', password: 'example-password' })
+    await auth.login({ account: 'admin', password: 'example-password' })
     await auth.logout()
     expect(auth.token).toBeNull()
     expect(getAccessToken()).toBeNull()
@@ -107,7 +107,7 @@ describe('退出与改密', () => {
 
   it('Go 契约暂无改密端点：mustChangePassword 恒为 false，改密调用显式失败', async () => {
     harness = installFetch([loginEnvelope()])
-    await auth.login({ username: 'ops_wang', password: 'ncs-Initial-2026' })
+    await auth.login({ account: 'ops_wang', password: 'ncs-Initial-2026' })
     expect(auth.mustChangePassword).toBe(false)
 
     await expect(
@@ -122,13 +122,13 @@ describe('登录锁定（连续失败 5 次锁定 30 秒）', () => {
     vi.useFakeTimers()
     harness = installFetch([failResponse({ status: 429, code: 19, userMessage: '请求过于频繁' })])
 
-    await expect(auth.login({ username: 'admin', password: 'wrong' })).resolves.toBe(false)
+    await expect(auth.login({ account: 'admin', password: 'wrong' })).resolves.toBe(false)
     expect(auth.isLocked).toBe(true)
     expect(auth.lockedSeconds).toBe(LOGIN_LOCK_SECONDS)
     expect(auth.error).toContain('锁定')
 
     // 锁定期间不再发起请求
-    await expect(auth.login({ username: 'admin', password: 'wrong-again' })).resolves.toBe(false)
+    await expect(auth.login({ account: 'admin', password: 'wrong-again' })).resolves.toBe(false)
     expect(harness.count()).toBe(1)
 
     vi.advanceTimersByTime(LOGIN_LOCK_SECONDS * 1000)
@@ -139,7 +139,7 @@ describe('登录锁定（连续失败 5 次锁定 30 秒）', () => {
 
   it('账号或密码错误（UNAUTHORIZED）只提示失败原因，不锁定', async () => {
     harness = installFetch([failResponse({ status: 401, code: 401, userMessage: '账号或密码错误' })])
-    await expect(auth.login({ username: 'admin', password: 'wrong' })).resolves.toBe(false)
+    await expect(auth.login({ account: 'admin', password: 'wrong' })).resolves.toBe(false)
     expect(auth.isLocked).toBe(false)
     expect(auth.error).toBe('账号或密码错误')
   })
@@ -181,7 +181,7 @@ describe('重新验证（REAUTH_REQUIRED，Go 契约休眠路径）', () => {
 describe('会话失效处理', () => {
   it('handleSessionExpired 清理令牌并置位 sessionExpired', async () => {
     harness = installFetch([loginEnvelope()])
-    await auth.login({ username: 'admin', password: 'example-password' })
+    await auth.login({ account: 'admin', password: 'example-password' })
 
     auth.handleSessionExpired('登录已失效，请重新登录')
     expect(auth.token).toBeNull()

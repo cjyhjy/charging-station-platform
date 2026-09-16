@@ -103,7 +103,7 @@ export const useAuthStore = defineStore('adminAuth', {
       return session
     },
 
-    async login({ username, password }) {
+    async login({ account, password }) {
       if (this.lockedSeconds > 0) {
         this.error = `账号已锁定，请 ${this.lockedSeconds} 秒后重试`
         return false
@@ -112,7 +112,9 @@ export const useAuthStore = defineStore('adminAuth', {
       this.error = ''
       this.notice = ''
       try {
-        const data = await authApi.login({ username, password, deviceId: this.deviceId })
+        // account 是 Go 契约的字段名（用户名为账号的一种）；deviceId 仅用于会话审计，
+        // 不在 Go 契约内，服务端会忽略未知字段。
+        const data = await authApi.login({ account, password, deviceId: this.deviceId })
         this.applySession(data)
         this.notice = this.mustChangePassword ? '首次登录，请先修改初始密码' : '登录成功'
         this.clearLock()
