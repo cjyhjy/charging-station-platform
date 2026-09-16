@@ -31,7 +31,30 @@ export function fetchStations({ latitudeE6, longitudeE6, keyword, chargerType, p
       pageSize
     })
     .then(flattenPage)
-    .then(data => ({ ...data, locationFallback: false }))
+    .then(data => ({
+      ...data,
+      // Go returns chargerCount/idleChargerCount/minPriceCentPerKwh;
+      // the existing card consumes the legacy display names below.
+      items: (Array.isArray(data.items) ? data.items : []).map(mapStation),
+      locationFallback: false
+    }))
+}
+
+/**
+ * Go 站点 DTO → 既有卡片消费的展示字段。
+ *
+ * 站点列表与 AI 助手的推荐结果共用这一份映射：两处各写一份就会出现同一站点
+ * 在列表里显示一个价格、在助手卡片里显示另一个的局面。
+ */
+export function mapStation(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  return {
+    ...raw,
+    operationalCount: raw.idleChargerCount,
+    idleCount: raw.idleChargerCount,
+    totalCount: raw.chargerCount,
+    totalPriceCentPerKwh: raw.minPriceCentPerKwh
+  }
 }
 
 /** 站点详情：Go 契约无营业时间（展示层回退“全天”）与可用/总数拆分字段，这里补齐。 */

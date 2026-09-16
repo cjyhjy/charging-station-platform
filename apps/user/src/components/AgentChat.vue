@@ -7,7 +7,7 @@ import { useStationStore } from '@/stores/station'
 
 /**
  * AI 助手聊天面板：空提示词不发送、等待中有加载态、失败可重试，
- * 结构化结果交给 AgentResult 渲染。所有 LLM 与地图调用都经服务端 /user/agent/chat。
+ * 结构化结果交给 AgentResult 渲染。所有 LLM 与地图调用都经服务端 POST /agent/chat。
  */
 const EXAMPLES = ['帮我找一个附近有快充并且旁边能吃饭的充电站', '充电站附近有什么咖啡店', '导航到最近的充电站']
 

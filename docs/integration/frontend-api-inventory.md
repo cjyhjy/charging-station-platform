@@ -75,7 +75,7 @@
 | U28 | `station.js:32 fetchQuote` | GET `/user/stations/{stationId}/quote` | `{chargerType}` | 预估价 | — | 后端缺失 | Go 无报价端点；展示价可用站点详情价格字段近似（B-01 决策） |
 | U29 | `station.js:40 fetchRoute` | GET `/user/stations/{stationId}/route` | `{latitudeE6, longitudeE6, keyword, mode, coordinateType}` | 路线 | — | 后端缺失 | 导航属 A-07 |
 | U30 | `station.js:52 fetchStationReviews` | GET `/user/stations/{stationId}/reviews` | — | `{items, meta}`（作者已脱敏） | GET `/stations/{stationId}/reviews` | 需改造 | 仅路径 |
-| U31 | `agent.js:16 chatWithAgent` | POST `/user/agent/chat` | `{message, location?, coordinateType?, chargerType?}` | 会话结果 | — | 后端缺失 | **BLOCKED**：等待 A-07 或独立 Agent 模块；A 线按任务文档 §A-05 只做请求层抽象与降级 UI，不得伪装已接通 |
+| U31 | `agent.js:24 chatWithAgent` | POST `/user/agent/chat` | `{message, location?, coordinateType?, chargerType?}` | `{reply, stations, pois, route, actions, tools, llmUsed, degraded}` | POST `/agent/chat` | 已改造 | 路径去 `/user`；请求体字段一致；响应 `stations` 由 `api/agent.js` 映射成卡片展示名（与站点列表共用 `mapStation`）；服务端永不为模型/地图不可用返回错误，降级由 `degraded` 表达 |
 
 ## 3. 管理端清单（apps/admin/src/api/）
 
@@ -116,12 +116,16 @@
 | A33 | `ml.js:23 startMlTask` | POST `/admin/ml-tasks` | `{taskType, horizonHours?}`（幂等键） | `taskNo` | — | 后端缺失 | 同上 |
 | A34 | `ml.js:28 fetchMlTask` | GET `/admin/ml-tasks/{taskNo}` | — | 任务状态 | — | 后端缺失 | 同上 |
 
-## 4. Agent（agent/）
+## 4. Agent
 
-- 浏览器侧唯一入口是用户端 U31（`POST /user/agent/chat`）；`agent/` 目录本身是 C++ 服务
-  （`CMakeLists.txt` + `agent_service.cpp`），属于 PR #42 的 C++ 服务端改造范围，不是浏览器代码。
-- 按任务文档 §A-05：Go 后端未提供 Agent 端点前，A 线只交付请求层抽象、工具调用模型、
-  loading/超时/错误/降级 UI 与"未实现"提示，**不得标记为已接通**。
+- 浏览器侧唯一入口是用户端 U31，已改为 `POST /agent/chat`。`agent/` 目录下的 C++ 服务
+  （`agent_service.cpp` 与四个工具）已按 A-07 迁移为 Go 模块：`backend/internal/agent`
+  （编排与工具）、`backend/internal/geo`（腾讯地图 POI/路线与坐标转换）、
+  `backend/internal/llm`（可选模型）。C++ 版本保留为参考实现，不再是运行时依赖。
+- 服务端保持只读：助手读取站点、周边地点与路线，不写订单、充电桩或余额。
+- 模型与地图 Key 都是可选的。未配置时助手按确定性意图判断与规则文案作答，并在
+  `degraded=true` 中说明；**端点不会因为模型或地图不可用而返回错误**，因此前端不再有
+  "未实现"提示，只把 `degraded` 渲染为结果上方的说明条。
 
 ## 5. 第三方与浏览器侧接口（非平台 API，按"不允许未登记的网络请求"一并登记）
 
@@ -199,7 +203,8 @@ A1/A4（`deviceId`、`mustChangePassword`）、C6（错误码 23）。
 4. 评价字段 `rating/content → stars/comment`、未评价 404 → `{review: null}`（U23/U24、C9）。
 5. 资料聚合：`/me` + `/me/profile` + `/wallet` 三接口替代 `/user/me` 合并视图（U6）。
 6. REAUTH 降级开关：在 B-01 裁决前隐藏依赖重验证的管理端操作并提示"暂未开放"（A2、C6）。
-7. Agent 降级：`/user/agent/chat` 返回 404/501 时展示"AI 助手暂未开放"（U31）。
+7. Agent 降级：`/agent/chat` 不再有"未开放"状态。服务端在模型或地图不可用时仍返回 200，
+   由 `degraded` 与 `route.fallback` 表达；前端按 `degraded` 渲染说明条（U31）。
 8. 每完成一个模块按任务文档 §A-03/§A-04 提交截图、Network 证据、成功/失败样例与自动化测试。
 
 > 二轮同步：上述 1-7 已落地；B 线第二批交付的六项能力（注册、头像 URL、按用户订单、

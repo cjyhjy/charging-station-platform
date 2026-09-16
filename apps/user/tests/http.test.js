@@ -205,7 +205,7 @@ describe('幂等键与查询参数', () => {
     await chatWithAgent({ message: '充电站附近有什么咖啡店', location: { latitudeE6: 39977680, longitudeE6: 116316417 }, coordinateType: 'gcj02' })
 
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('/api/v1/user/agent/chat')
+    expect(url).toBe('/api/v1/agent/chat')
     expect(init.headers['Idempotency-Key']).toBeUndefined()
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body)).toEqual({
@@ -228,5 +228,26 @@ describe('幂等键与查询参数', () => {
     const fetchMock = mockFetch(async () => jsonResponse(envelope({ items: [], meta: { page: 1, pageSize: 20, total: 0 } })))
     await fetchStations({ keyword: '中关村', chargerType: 1, page: 1, pageSize: 20 })
     expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/stations?keyword=%E4%B8%AD%E5%85%B3%E6%9D%91&connectorType=DC&page=1&pageSize=20')
+  })
+
+  it('站点列表将 Go 聚合字段映射为卡片展示字段', async () => {
+    mockFetch(async () => jsonResponse(envelope({
+      items: [{
+        id: 1,
+        name: '测试站',
+        chargerCount: 6,
+        idleChargerCount: 2,
+        minPriceCentPerKwh: 135
+      }],
+      meta: { page: 1, pageSize: 20, total: 1 }
+    })))
+
+    const result = await fetchStations({ page: 1, pageSize: 20 })
+    expect(result.items[0]).toMatchObject({
+      operationalCount: 2,
+      idleCount: 2,
+      totalCount: 6,
+      totalPriceCentPerKwh: 135
+    })
   })
 })

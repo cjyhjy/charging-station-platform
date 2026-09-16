@@ -7,6 +7,8 @@ import { clearAccessToken } from '../src/api/http'
 import { useAgentStore } from '../src/stores/agent'
 import { useStationStore } from '../src/stores/station'
 
+// Go 契约的助手结果：stations 是契约站点字段加价格拆分与桩型构成，
+// 由 api/agent.js 映射成卡片消费的展示名。
 const structuredResult = {
   reply: '为你推荐 NCS 中关村充电站：快充空闲 3 个，步行 200 米有 3 家餐厅。',
   stations: [
@@ -15,15 +17,18 @@ const structuredResult = {
       code: 'ZGC',
       name: 'NCS 中关村充电站',
       address: '北京市海淀区中关村大街 27 号',
-      adcode: '110108',
+      status: 'OPEN',
       latitudeE6: 39977680,
       longitudeE6: 116316417,
+      chargerCount: 10,
+      idleChargerCount: 3,
+      operationalChargerCount: 9,
+      fastChargerCount: 6,
+      slowChargerCount: 4,
+      chargerTypes: ['AC', 'DC'],
+      minPriceCentPerKwh: 135,
       electricityPriceCentPerKwh: 85,
       servicePriceCentPerKwh: 50,
-      totalPriceCentPerKwh: 135,
-      idleCount: 3,
-      operationalCount: 9,
-      totalCount: 10,
       distanceMeter: 2300
     }
   ],
@@ -127,7 +132,7 @@ describe('AgentChat 交互与状态', () => {
     expect(wrapper.get('[data-testid="agent-send"]').attributes('disabled')).toBeDefined()
 
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('/api/v1/user/agent/chat')
+    expect(url).toBe('/api/v1/agent/chat')
     expect(init.headers['Idempotency-Key']).toBeUndefined()
     expect(JSON.parse(init.body)).toEqual({
       message: '帮我找一个附近有快充并且旁边能吃饭的充电站',
@@ -153,6 +158,8 @@ describe('AgentChat 交互与状态', () => {
     expect(wrapper.find('[data-testid="agent-result"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="station-card"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="station-card-name"]').text()).toBe('NCS 中关村充电站')
+    // 站点字段由 api 层从 Go 契约映射到卡片展示名：价格取 minPriceCentPerKwh。
+    expect(wrapper.get('[data-testid="station-card"]').text()).toContain('1.35 元/kWh')
     expect(wrapper.find('[data-testid="poi-card"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="poi-card-name"]').text()).toBe('星巴克(中关村店)')
     expect(wrapper.get('[data-testid="agent-route-distance"]').text()).toBe('2.3 km')
