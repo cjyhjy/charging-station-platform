@@ -56,6 +56,17 @@ type fakeStore struct {
 	globalResult    GlobalTariffResult
 	globalErr       error
 	globalUpdates   []GlobalTariffUpdate
+	batchResult     ChargerBatchResult
+	batchErr        error
+	batchCommands   []CreateChargersCommand
+
+	// Manual user archiving.
+	userResult        UserRecord
+	userErr           error
+	userCommands      []CreateUserCommand
+	userBatchResult   UserBatchResult
+	userBatchErr      error
+	userBatchCommands []CreateUsersCommand
 
 	// The statistics reads. Their canned results are separate from the page
 	// fixtures because an aggregate is not a page: a test that configured one
@@ -140,6 +151,21 @@ func (f *fakeStore) ChargerCounts(_ context.Context, stationID int64) (ChargerCo
 
 func (f *fakeStore) FleetCounts(context.Context) (FleetCounts, error) {
 	return f.fleetCounts, f.statsErr
+}
+
+func (f *fakeStore) CreateChargers(_ context.Context, command CreateChargersCommand) (ChargerBatchResult, error) {
+	f.batchCommands = append(f.batchCommands, command)
+	return f.batchResult, f.batchErr
+}
+
+func (f *fakeStore) CreateUser(_ context.Context, command CreateUserCommand) (UserRecord, error) {
+	f.userCommands = append(f.userCommands, command)
+	return f.userResult, f.userErr
+}
+
+func (f *fakeStore) CreateUsers(_ context.Context, command CreateUsersCommand) (UserBatchResult, error) {
+	f.userBatchCommands = append(f.userBatchCommands, command)
+	return f.userBatchResult, f.userBatchErr
 }
 
 func (f *fakeStore) UpdateStation(_ context.Context, command UpdateStationCommand) (StationRecord, error) {

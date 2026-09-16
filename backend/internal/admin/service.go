@@ -322,6 +322,9 @@ type Store interface {
 	ChangeChargerStatus(ctx context.Context, command ChangeChargerStatusCommand) (ChargerStatusRecord, error)
 	GetTariff(ctx context.Context, chargerID int64) (TariffView, error)
 	UpdateStation(ctx context.Context, command UpdateStationCommand) (StationRecord, error)
+	CreateChargers(ctx context.Context, command CreateChargersCommand) (ChargerBatchResult, error)
+	CreateUser(ctx context.Context, command CreateUserCommand) (UserRecord, error)
+	CreateUsers(ctx context.Context, command CreateUsersCommand) (UserBatchResult, error)
 	GlobalTariff(ctx context.Context) ([]GlobalTariff, error)
 	UpdateGlobalTariff(ctx context.Context, update GlobalTariffUpdate) (GlobalTariffResult, error)
 

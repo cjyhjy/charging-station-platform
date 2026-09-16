@@ -66,6 +66,8 @@
 | GET | `/admin/users/{userId}` | `RequireRole(RoleAdmin, userDetail)` | ✅ | – | MATCH |
 | POST | `/admin/users/{userId}/freeze` | `RequireAdminWrite(freezeUser)` | ✅ | – | MATCH |
 | POST | `/admin/users/{userId}/unfreeze` | `RequireAdminWrite(unfreezeUser)` | ✅ | – | MATCH |
+| POST | `/admin/users` | `RequireRole(RoleAdmin, users)`（POST 分支内 `AdminCanWrite`） | ✅ | ✅ | MATCH（手工建档：ACTIVE + 零余额钱包 + 无密码；手机号已注册→409/code 5） |
+| POST | `/admin/users/batch` | `RequireAdminWrite(createUsers)` | ✅ | ✅ | MATCH（一页 ≤1000，整批同事务；任一手机号已注册→409/code 5 且全不创建） |
 | GET | `/admin/users/{userId}/transactions` | `RequireRole(RoleAdmin, userLedger)` | ✅ | – | MATCH |
 | GET | `/admin/orders` | `RequireRole(RoleAdmin, listOrders)` | ✅ | – | MATCH |
 | POST | `/admin/orders/{orderNo}/refund` | `RequireAdminWrite(refundOrder)` | ✅ | ✅ | MATCH（订单不存在→404/code 4；已退款→409/code 18） |
@@ -76,6 +78,7 @@
 | PUT | `/admin/chargers/{chargerId}/tariff` | 同上 | ✅ | – | MATCH |
 | POST | `/admin/chargers/{chargerId}/release` | `RequireAdminWrite(forceRelease)` | ✅ | ✅ | MATCH |
 | POST | `/admin/chargers/{chargerId}/restart` | `RequireAdminWrite(restartCharger)` | ✅ | ✅ | MATCH |
+| POST | `/admin/chargers/batch` | `RequireAdminWrite(createChargers)` | ✅ | ✅ | MATCH（一次 1..100 台、编码必填、整批同事务；编码已存在→409/code 5） |
 | GET | `/admin/appeals` | `RequireRole(RoleAdmin, adminListAppeals)` | ✅ | – | MATCH |
 | POST | `/admin/appeals/{appealId}/approve` | `RequireAdminWrite(adminApprove)` | ✅ | – | MATCH |
 | GET | `/admin/audit` | `RequireRole(RoleAdmin, listAudit)` | ✅ | – | MATCH |
@@ -249,7 +252,7 @@ NCS_POSTGRES_DSN=postgres://.../ncs_fe_nginx bash backend/scripts/local-stack.sh
 | GET | `/admin/chargers` | `GET /admin/chargers` | FRONTEND_CHANGE | 路径一致；仅分页字段（items+meta）与字段形状需对齐 | `admin/src/api/charger.js:7` |
 | POST | `/admin/chargers/{chargerId}/restart-commands` | `POST /admin/chargers/{chargerId}/restart` | FRONTEND_CHANGE | 命令式资源改为动作端点 | `admin/src/api/charger.js:26` |
 | PUT | `/admin/chargers/{chargerId}/status` | **无** | BACKEND_CHANGE | 无桩状态变更接口 | `admin/src/api/charger.js:17` |
-| POST | `/admin/chargers/batch` | **无** | BACKEND_CHANGE | 无批量建桩接口 | `admin/src/api/charger.js:12` |
+| POST | `/admin/chargers/batch` | `POST /admin/chargers/batch` | MATCH | 一致：body 只含 stationId + chargers[{code, connectorType, powerWatt}]，≤100 台整批同事务；前端 `createChargersBatch` 已按此实现 | `admin/src/api/charger.js:12` |
 | GET | `/admin/device-commands/{commandNo}` | **无** | BACKEND_CHANGE | 无命令状态查询接口 | `admin/src/api/charger.js:35` |
 | GET | `/admin/flows` | `GET /admin/orders` | FRONTEND_CHANGE | flow 列表映射为订单列表 | `admin/src/api/flow.js:7` |
 | POST | `/admin/flows/{flowNo}/force-releases` | `POST /admin/chargers/{chargerId}/release` | FRONTEND_CHANGE | 强释放按桩而非按流程 | `admin/src/api/flow.js:12` |
@@ -268,6 +271,8 @@ NCS_POSTGRES_DSN=postgres://.../ncs_fe_nginx bash backend/scripts/local-stack.sh
 | POST | `/admin/tariffs` | `PUT /admin/chargers/{chargerId}/tariff` | FRONTEND_CHANGE | 同上 | `admin/src/api/station.js:40` |
 | GET | `/admin/users` | `GET /admin/users` | FRONTEND_CHANGE | 路径一致；仅分页字段（items+meta）与字段形状需对齐 | `admin/src/api/user.js:10` |
 | GET | `/admin/users/{userId}` | `GET /admin/users/{userId}` | FRONTEND_CHANGE | 路径一致；仅分页字段（items+meta）与字段形状需对齐 | `admin/src/api/user.js:15` |
+| POST | `/admin/users` | `POST /admin/users` | MATCH | 新增手工建档（ACTIVE + 零余额钱包 + 无密码）；前端 `createUser` 已实现（`admin/src/views/UsersView.vue` 建档对话框） | `admin/src/api/user.js` |
+| POST | `/admin/users/batch` | `POST /admin/users/batch` | MATCH | 新增批量建档（一页 ≤1000 整批同事务）；前端 `createUsersBatch` + UsersView 名单文本域已实现 | `admin/src/api/user.js` |
 | GET | `/admin/users/{userId}/orders` | **无** | BACKEND_CHANGE | `AdminOrderFilter` 无 UserID（internal/admin/service.go:106-111） | `admin/src/api/user.js:29` |
 | PUT | `/admin/users/{userId}/status` | `POST .../freeze` \| `POST .../unfreeze` | FRONTEND_CHANGE | 状态 PUT 改为两个动作端点 | `admin/src/api/user.js:20` |
 

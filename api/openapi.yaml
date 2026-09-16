@@ -1255,6 +1255,101 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [admin]
+      operationId: adminCreateUser
+      summary: Archive one account on a user's behalf
+      description: |-
+        Most accounts arrive by themselves: a phone that signs in with an SMS
+        code registers automatically (UC-U-01). This archives the accounts that
+        loop cannot produce - a house account, a roster entry, a migrated user.
+
+        The account is born the way a self-registered one is: ACTIVE, with a
+        zero-balance wallet and no password. The user keeps signing in through
+        SMS, which is why no credential is accepted here - a password an
+        operator chose for a user is a credential the user never agreed to
+        carry. A phone that is already registered is a 409, not a warning: a
+        skipped entry would leave the operator guessing whether the account
+        exists.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserArchiveRequest'
+      responses:
+        '201':
+          description: The account was created (or replayed from the idempotency key)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserRecordEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: |-
+            The phone is already registered, or the idempotency key was reused
+            for a different request. No account was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /admin/users/batch:
+    post:
+      tags: [admin]
+      operationId: adminCreateUsersBatch
+      summary: Archive a page of a roster
+      description: |-
+        A roster is enrolled a page at a time, and the page is all-or-nothing:
+        one phone that already exists aborts it and nothing is created - not
+        the entries before it, not the entries after it. A phone repeated
+        inside one page is refused before the transaction opens, so the answer
+        names the phone instead of leaving the caller to compare two rows by
+        eye.
+
+        Every account is created the way a self-registered one is: ACTIVE, a
+        zero-balance wallet, no password. Beyond a page, bulk loads go through
+        the seed tooling, not this endpoint.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserBatchRequest'
+      responses:
+        '201':
+          description: Every account in the page was created (or replayed from the idempotency key)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserBatchResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: |-
+            A phone in the page is already registered, or the idempotency key
+            was reused for a different page. Nothing was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /admin/orders:
     get:
       tags: [admin]
@@ -1724,6 +1819,67 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '503': {$ref: '#/components/responses/ServiceUnavailable'}
+
+  /admin/chargers/batch:
+    post:
+      tags: [admin]
+      operationId: adminCreateChargersBatch
+      summary: Commission a bank of chargers at one station
+      description: |-
+        Entering a station's devices one at a time is twenty trips through a form
+        for a twenty-bay station. This is the batch, and its whole point is that
+        it is all-or-nothing: a batch that half-succeeded would leave an operator
+        counting rows to work out which devices exist, and a station whose device
+        list disagrees with the physical cabinet is worse than one that was never
+        created.
+
+        The batch is one statement inside one transaction. A code that already
+        exists at the station aborts it and nothing is created - not the devices
+        before it, not the devices after it. A code repeated inside one request is
+        refused before the transaction opens, so the answer names the code instead
+        of leaving the caller to compare two rows by eye.
+
+        Only what an operator types in travels: the bay's code, its connector type
+        and its power. Status, price and version are the platform's to decide. A
+        device is created IDLE at the schema's default price and takes its tariff
+        from the tariff endpoints - the platform does not guess a price for
+        hardware nobody has priced.
+
+        The station must exist. Its status is deliberately not checked: a device
+        bank is commissioned before the station opens.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargerBatchRequest'
+      responses:
+        '201':
+          description: Every device in the batch was created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChargerBatchResponseEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |-
+            A code in the batch already exists at the station, or the idempotency
+            key was reused for a different batch. Nothing was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
 components:
   securitySchemes:
@@ -3132,6 +3288,145 @@ components:
         code: {type: integer, enum: [0]}
         message: {type: string}
         data: {$ref: '#/components/schemas/GlobalTariffResult'}
+
+    ChargerBatchItem:
+      type: object
+      description: One device to create, as an operator types it in.
+      required: [code, connectorType, powerWatt]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: The bay's identifier, unique within the station.
+        connectorType:
+          type: string
+          enum: [AC, DC]
+          description: The platform's own words, not the console's 0/1 shorthand.
+        powerWatt:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 1000000
+    ChargerBatchRequest:
+      type: object
+      required: [stationId, chargers]
+      properties:
+        stationId:
+          type: integer
+          format: int64
+          minimum: 1
+        chargers:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: {$ref: '#/components/schemas/ChargerBatchItem'}
+    ChargerBatchResponse:
+      type: object
+      description: |-
+        The devices the batch created. `chargerCount` equals the length of
+        `created` and is stated separately so a client that only needs the count
+        does not have to walk the list.
+      required: [stationId, chargerCount, created]
+      properties:
+        stationId: {type: integer, format: int64}
+        chargerCount: {type: integer, format: int64, minimum: 0}
+        created:
+          type: array
+          items: {$ref: '#/components/schemas/Charger'}
+    ChargerBatchResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/ChargerBatchResponse'}
+
+    UserArchiveDraft:
+      type: object
+      description: One account to archive, as an operator types it in.
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          pattern: '^1[3-9]\d{9}$'
+          description: The phone that will own the account, and the door it
+            keeps signing in through.
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 20
+          description: Optional. An unnamed draft takes the registration
+            default, so an archived account is indistinguishable from a
+            self-registered one in every list.
+    UserArchiveRequest:
+      type: object
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          pattern: '^1[3-9]\d{9}$'
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 20
+    UserRecord:
+      type: object
+      description: One archived account. balanceCent is always zero at
+        creation; it is stated so the console can render an archived account
+        with the same card it uses everywhere else.
+      required: [id, phone, displayName, status, balanceCent]
+      properties:
+        id: {type: integer, format: int64}
+        phone: {type: string}
+        displayName: {type: string}
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        balanceCent:
+          type: integer
+          format: int64
+          minimum: 0
+    UserRecordEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/UserRecord'}
+    UserBatchRequest:
+      type: object
+      description: One page of a roster. Phones must be unique inside the page
+        as well as against the platform.
+      required: [users]
+      properties:
+        users:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: {$ref: '#/components/schemas/UserArchiveDraft'}
+    UserBatchResponse:
+      type: object
+      description: |-
+        The accounts the page created. `userCount` equals the length of
+        `created` and is stated separately so a client that only needs the
+        count does not have to walk the list.
+      required: [userCount, created]
+      properties:
+        userCount: {type: integer, format: int64, minimum: 0}
+        created:
+          type: array
+          items: {$ref: '#/components/schemas/UserRecord'}
+    UserBatchResponseEnvelope:
+      type: object
+      required: [success, code, message, data]
+      properties:
+        success: {type: boolean, enum: [true]}
+        code: {type: integer, enum: [0]}
+        message: {type: string}
+        data: {$ref: '#/components/schemas/UserBatchResponse'}
 
 security:
   - bearerAuth: []

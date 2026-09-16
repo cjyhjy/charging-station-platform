@@ -61,12 +61,14 @@ func (h *Handlers) Register(server interface {
 	// role (and any non-admin) out, which answers with 403.
 	server.Register("/api/v1/admin/stations/{stationId}/status", h.auth.RequireAdminWrite(h.changeStationStatus))
 	server.Register("/api/v1/admin/chargers/{chargerId}/status", h.auth.RequireAdminWrite(h.changeChargerStatus))
-	server.Register("/api/v1/admin/users", h.auth.RequireRole(auth.RoleAdmin, h.listUsers))
+	server.Register("/api/v1/admin/users", h.auth.RequireRole(auth.RoleAdmin, h.users))
 	server.Register("/api/v1/admin/orders", h.auth.RequireRole(auth.RoleAdmin, h.listOrders))
 	server.Register("/api/v1/admin/users/{userId}", h.auth.RequireRole(auth.RoleAdmin, h.userDetail))
 	server.Register("/api/v1/admin/users/{userId}/transactions", h.auth.RequireRole(auth.RoleAdmin, h.userLedger))
 	h.registerStats(server)
 	h.registerProfile(server)
+	h.registerChargerBatch(server)
+	h.registerUserArchive(server)
 	server.Register("/api/v1/admin/chargers/{chargerId}/tariff", h.tariffRoutes)
 	server.Register("/api/v1/admin/chargers/{chargerId}/release", h.auth.RequireAdminWrite(h.forceRelease))
 	server.Register("/api/v1/admin/audit", h.auth.RequireRole(auth.RoleAdmin, h.listAudit))
@@ -716,6 +718,20 @@ func writeAdminError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, order.ErrIdempotencyConflict), errors.Is(err, order.ErrIdempotencyInProgress):
 		// The contract requires 409 for a reused idempotency key.
 		httpapi.WriteError(w, r, http.StatusConflict, codeIdempotencyConflict, "idempotency key conflict", nil)
+	case errors.Is(err, ErrInvalidChargerBatch):
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, err.Error(), nil)
+	case errors.Is(err, ErrDuplicateChargerCode):
+		// The request is well formed; it collides with what exists. The registry's
+		// ALREADY_EXISTS is exactly this, and 409 tells the caller to change the
+		// code rather than to retry.
+		httpapi.WriteError(w, r, http.StatusConflict, codeAlreadyExists, err.Error(), nil)
+	case errors.Is(err, ErrInvalidUserDraft), errors.Is(err, ErrInvalidUserBatch):
+		httpapi.WriteError(w, r, http.StatusBadRequest, httpapi.CodeInvalidArgument, err.Error(), nil)
+	case errors.Is(err, ErrDuplicateUserPhone):
+		// A phone is the account's identity, so a collision is the same kind of
+		// answer as a duplicate charger code: 409 ALREADY_EXISTS, naming the
+		// problem rather than hinting at a retry.
+		httpapi.WriteError(w, r, http.StatusConflict, codeAlreadyExists, err.Error(), nil)
 	case errors.Is(err, ErrChargerUnavailable):
 		httpapi.WriteError(w, r, http.StatusConflict, codeChargerUnavailable, "charger is unavailable", nil)
 	case errors.Is(err, ErrInvalidStateTransition):
@@ -736,6 +752,7 @@ func writeAdminError(w http.ResponseWriter, r *http.Request, err error) {
 
 // Registry codes (docs/database-api.md §1.10).
 const (
+	codeAlreadyExists          = 5  // ALREADY_EXISTS, 409
 	codeChargerUnavailable     = 8  // CHARGER_UNAVAILABLE
 	codeIdempotencyConflict    = 14 // IDEMPOTENCY_CONFLICT
 	codeInvalidStateTransition = 15 // INVALID_STATE_TRANSITION
