@@ -46,6 +46,19 @@
 | 大屏测试与构建 | `apps/dashboard: pnpm run test && pnpm run build` | 13/13，构建通过 |
 | 前后端真实联调（浏览器） | Tabbit 浏览器 + 本地 Go 全栈 | 见下 |
 
+### fork CI 运行结果
+
+推送分支 `codex/go-vue-retirement` 后，fork 的两个工作流均通过（不涉及上游 `develop`）：
+
+| 工作流 | 运行 | 结果 |
+| --- | --- | --- |
+| Go integration | [35137501382](https://github.com/cjyhjy/charging-station-platform/actions/runs/35137501382) | 通过；`go-integration`、`dashboard`、`go-windows-build` 三个作业全部成功 |
+| Web clients | [35137501384](https://github.com/cjyhjy/charging-station-platform/actions/runs/35137501384) | 通过；`web (user)`、`web (admin)` 均成功 |
+
+CI 证据（`go-integration` 作业上传的 `go-integration-evidence` 制品）：真实 PostgreSQL 18 与 Redis 7.4 上
+`1312 tests/subtests passed, 0 skipped, 0 failed`（20 个包，`-race`）；四进程充电闭环 `PASS`；
+备份恢复演练 `RESTORED_SCHEMA_VERSION=12`、`RTO_MINUTES=0.02`。
+
 浏览器联调（真实 Go API + PostgreSQL + Redis + 模拟网关，非 mock 数据）：
 
 1. 车主端验证码登录成功，钱包读取为 50.00 元（来自 `wallet_accounts`）。
