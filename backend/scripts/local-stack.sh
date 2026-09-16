@@ -18,6 +18,8 @@
 # Environment (defaults shown):
 #   NCS_REDIS_ADDR=127.0.0.1:6379     NCS_REDIS_DB=14
 #   NCS_HTTP_ADDR=127.0.0.1:8080      NCS_CHARGER_GATEWAY_TOKEN=dev-gateway-token
+#   NCS_MOCK_GATEWAY_RECEIPTS=false    NCS_MOCK_GATEWAY_API_URL=http://127.0.0.1:8080
+#   NCS_MOCK_GATEWAY_ENERGY_WH=1000    (set receipts=true for a full automatic device-fact loop)
 #   NCS_STATIC_ROOT=apps/dashboard    (only needed with --with-nginx)
 set -euo pipefail
 
@@ -30,6 +32,9 @@ redis_addr="${NCS_REDIS_ADDR:-127.0.0.1:6379}"
 redis_db="${NCS_REDIS_DB:-14}"
 http_addr="${NCS_HTTP_ADDR:-127.0.0.1:8080}"
 gateway_token="${NCS_CHARGER_GATEWAY_TOKEN:-dev-gateway-token}"
+mock_receipts="${NCS_MOCK_GATEWAY_RECEIPTS:-false}"
+mock_api_url="${NCS_MOCK_GATEWAY_API_URL:-http://${http_addr}}"
+mock_energy_wh="${NCS_MOCK_GATEWAY_ENERGY_WH:-1000}"
 with_nginx="false"
 static_root="${NCS_STATIC_ROOT:-${repo_root}/apps/dashboard}"
 build="true"
@@ -118,6 +123,8 @@ fi
 
 step "start mock gateway, API, publisher and worker"
 env "${common_env[@]}" NCS_MOCK_GATEWAY_ADDR="127.0.0.1:${gateway_port}" \
+    NCS_MOCK_GATEWAY_RECEIPTS="${mock_receipts}" NCS_MOCK_GATEWAY_API_URL="${mock_api_url}" \
+    NCS_MOCK_GATEWAY_ENERGY_WH="${mock_energy_wh}" \
     "${run_dir}/ncs-mock-gateway" >"${run_dir}/gateway.log" 2>&1 &
 pids+=("$!")
 
