@@ -49,7 +49,6 @@ const stationColumns = [
 ]
 
 const tariffColumns = [
-  { key: 'adcode', label: '行政区编码' },
   {
     key: 'electricityPriceCentPerKwh',
     label: '电费（元/kWh）',
@@ -62,8 +61,17 @@ const tariffColumns = [
     align: 'right',
     format: value => formatAmount(value)
   },
-  { key: 'effectiveFrom', label: '生效时间', format: value => formatDateTime(value) },
-  { key: 'effectiveTo', label: '失效时间', format: value => (value ? formatDateTime(value) : '长期有效') }
+  {
+    key: 'offPeakElectricityPriceCentPerKwh',
+    label: '谷时电费',
+    align: 'right',
+    format: (value, row) => {
+      if (!Number.isFinite(value)) return '单一费率'
+      const window = `${String(row.offPeakStartHour ?? 0).padStart(2, '0')}:00-${String(row.offPeakEndHour ?? 0).padStart(2, '0')}:00`
+      return `${formatAmount(value)} 元（${window}）`
+    }
+  },
+  { key: 'chargerCount', label: '设备数', align: 'right', format: value => formatInt(value) }
 ]
 
 /** 新增站点：经纬度按十进制度输入，提交前换算为整数 E6 度。 */
@@ -86,21 +94,36 @@ const createFields = [
   { key: 'connectorStandard', label: '接口标准', default: 'GB/T 20234.3', maxLength: 32 }
 ]
 
+/**
+ * 可编辑字段就是服务端接受的四个：名称、地址与经纬度。
+ *
+ * 行政区编码与营业时间在 Go 契约里没有对应列，放进表单只会让管理员以为
+ * 自己改动的字段被保存了。
+ */
 const editFields = computed(() => [
   { key: 'name', label: '站点名称', required: true, maxLength: 64 },
   { key: 'address', label: '地址', required: true, maxLength: 128 },
-  { key: 'adcode', label: '行政区编码', required: true, minLength: 6, maxLength: 6 },
   { key: 'latitude', label: '纬度（度）', type: 'number', integer: false, required: true, min: -90, max: 90 },
-  { key: 'longitude', label: '经度（度）', type: 'number', integer: false, required: true, min: -180, max: 180 },
-  { key: 'businessHours', label: '营业时间', maxLength: 64 }
+  { key: 'longitude', label: '经度（度）', type: 'number', integer: false, required: true, min: -180, max: 180 }
 ])
 
+/**
+ * 全局费率下发：请求体是完整费率，不填谷时三项即表示全车队改为单一费率。
+ * 原因必填，会写入审计。
+ */
 const tariffFields = [
-  { key: 'adcode', label: '行政区编码', required: true, minLength: 6, maxLength: 6 },
   { key: 'electricityPriceCentPerKwh', label: '电费（分/kWh）', type: 'number', required: true, min: 0, max: 100000 },
   { key: 'servicePriceCentPerKwh', label: '服务费（分/kWh）', type: 'number', required: true, min: 0, max: 100000 },
-  { key: 'effectiveFrom', label: '生效时间', type: 'datetime', required: true },
-  { key: 'effectiveTo', label: '失效时间（可空）', type: 'datetime' },
+  {
+    key: 'offPeakElectricityPriceCentPerKwh',
+    label: '谷时电费（分/kWh，可空）',
+    type: 'number',
+    min: 0,
+    max: 100000,
+    help: '留空表示全车队改为单一费率；填写则必须同时填谷时起止小时'
+  },
+  { key: 'offPeakStartHour', label: '谷时开始小时（0-23）', type: 'number', min: 0, max: 23 },
+  { key: 'offPeakEndHour', label: '谷时结束小时（0-23）', type: 'number', min: 0, max: 23 },
   { key: 'reason', label: '调整原因', required: true, minLength: 2, maxLength: 200 }
 ]
 
@@ -166,10 +189,8 @@ async function submitEdit(values) {
   const ok = await stations.edit(editTarget.value, {
     name: values.name,
     address: values.address,
-    adcode: values.adcode,
     latitudeE6: toE6(values.latitude),
-    longitudeE6: toE6(values.longitude),
-    businessHours: values.businessHours || ''
+    longitudeE6: toE6(values.longitude)
   })
   if (ok) editTarget.value = null
 }
@@ -181,14 +202,21 @@ async function submitToggle({ reason }) {
 }
 
 async function submitTariff(values) {
-  const ok = await stations.createTariffVersion({
-    adcode: values.adcode,
+  // 谷时三项要么全给要么全不给：服务端拒绝半个窗口，这里先按同一规则整理。
+  const hasOffPeakWindow = values.offPeakElectricityPriceCentPerKwh !== undefined &&
+    values.offPeakElectricityPriceCentPerKwh !== '' &&
+    values.offPeakElectricityPriceCentPerKwh !== null
+  const payload = {
     electricityPriceCentPerKwh: values.electricityPriceCentPerKwh,
     servicePriceCentPerKwh: values.servicePriceCentPerKwh,
-    effectiveFrom: fromDateTimeInputValue(values.effectiveFrom),
-    effectiveTo: values.effectiveTo ? fromDateTimeInputValue(values.effectiveTo) : null,
     reason: values.reason
-  })
+  }
+  if (hasOffPeakWindow) {
+    payload.offPeakElectricityPriceCentPerKwh = values.offPeakElectricityPriceCentPerKwh
+    payload.offPeakStartHour = values.offPeakStartHour
+    payload.offPeakEndHour = values.offPeakEndHour
+  }
+  const ok = await stations.setGlobalTariff(payload)
   if (ok) tariffOpen.value = false
 }
 
@@ -349,12 +377,12 @@ function statusTone(enabled) {
     <section class="panel" v-reveal>
       <div class="panel__title">
         <div>
-          <h2>基础价格版本</h2>
-          <p class="panel__hint">同一行政区有效期不得重叠；已生成的订单价格快照不受影响</p>
+          <h2>全局费率</h2>
+          <p class="panel__hint">费率存在电桩上：下面是全车队当前的费率构成；下发会一次写入所有设备并记录审计，已生成订单的价格快照不受影响</p>
         </div>
         <div class="panel__row">
           <button type="button" class="btn btn--sm" data-testid="tariff-create" @click="tariffOpen = true">
-            新建价格版本
+            统一下发费率
           </button>
           <button type="button" class="btn btn--sm btn--ghost" data-testid="adjustment-create" @click="adjustmentOpen = true">
             服务费调整
@@ -368,10 +396,10 @@ function statusTone(enabled) {
         test-id="tariffs"
         :columns="tariffColumns"
         :rows="stations.tariffs"
-        row-key="adcode"
+        row-key="key"
         :loading="stations.tariffsLoading"
         :error="stations.tariffsError"
-        empty-text="暂无价格版本，可按行政区创建"
+        empty-text="暂无设备费率记录"
       />
     </section>
 
@@ -392,7 +420,7 @@ function statusTone(enabled) {
       v-if="editTarget"
       test-id="station-edit-dialog"
       :title="`编辑站点 ${editTarget.code}`"
-      hint="提交时携带当前 version，落后会返回 VERSION_CONFLICT 并自动刷新最新版本"
+      hint="仅可修改名称、地址与经纬度；站点编码与运营状态不在此处，状态用下方的启停操作"
       :fields="editFields"
       submit-label="保存修改"
       :loading="stations.saving"
@@ -416,9 +444,10 @@ function statusTone(enabled) {
     <FormDialog
       v-if="tariffOpen"
       test-id="tariff-create-dialog"
-      title="新建基础价格版本"
+      title="统一下发费率"
+      hint="一次写入全部电桩（含停用设备）；留空谷时字段即改为单一费率"
       :fields="tariffFields"
-      submit-label="创建版本"
+      submit-label="下发费率"
       :loading="stations.saving"
       :error="stations.error"
       @submit="submitTariff"

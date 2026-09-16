@@ -101,11 +101,11 @@
 | A18 | `ops.js:21 verifyBackup` | POST `/admin/backups/{backupNo}/verifications` | `{}`（幂等键） | — | — | 后端缺失 | 同上 |
 | A19 | `station.js:6 fetchStations` | GET `/admin/stations` | `{status, adcode, keyword, page, pageSize}` | `{items, meta}` | GET `/admin/stations` | 需改造 | 路径一致；`adcode` 不支持，其余参数待 B-01 对照 |
 | A20 | `station.js:11 createStation` | POST `/admin/stations` | 站点 + `initialCharger`（幂等键） | — | POST `/admin/stations` | 已匹配 | 路径与方法一致；body（含 `initialCharger` 结构）待 B-01 逐字段对照 |
-| A21 | `station.js:16 updateStation` | PUT `/admin/stations/{stationId}` | `{name?/address?/adcode?/latitudeE6?/longitudeE6?/businessHours?/version}`（幂等键） | — | — | 后端缺失 | Go 无修改站点端点 |
+| A21 | `station.js:39 updateStation` | PUT `/admin/stations/{stationId}` | `{name, address, latitudeE6, longitudeE6}` | 站点记录 | PUT `/admin/stations/{stationId}` | 已改造 | 路径与语义一致；**只支持名称/地址/经纬度**（编码是身份、状态有独立生命周期端点，均不接受）；`adcode`/`businessHours`/`version` 在 Go 契约中无对应列，前端表单已移除；服务端返回整条记录，前端只合并这四项 |
 | A22 | `station.js:23 setStationEnabled` | POST `/admin/stations/{stationId}/enable\|disable` | `{reason, version}`（幂等键） | — | PUT `/admin/stations/{stationId}/status` | 需改造 | B 线已实现：body 为 `{status: OPEN\|CLOSED\|DISABLED, reason}`，接受 OPEN↔CLOSED 等四种迁移；前端已接线（启停布尔映射 OPEN/DISABLED） |
-| A23 | `station.js:34 fetchTariffs` | GET `/admin/tariffs` | `{adcode, effectiveAt, page, pageSize}` | 价格版本列表 | — | 后端缺失 | 模型差异：Go 仅有设备级费率 `GET /admin/chargers/{chargerId}/tariff`，无行政区基础价格版本 |
-| A24 | `station.js:39 createTariff` | POST `/admin/tariffs` | 价格版本（幂等键） | — | — | 后端缺失 | 同上 |
-| A25 | `station.js:44 createPriceAdjustment` | POST `/admin/price-adjustments` | `{adjustmentBp…}`（幂等键） | — | — | 后端缺失 | Go 无服务费调整域 |
+| A23 | `station.js:59 fetchTariffs` | GET `/admin/tariffs` | — | 车队费率构成 | GET `/admin/tariffs` | 已改造 | **模型变更**：旧的行政区价格版本（adcode + 生效时间窗）未迁移，改为车队级视图——按配置分组、含数量、价格区间与分时/单一费率分布 |
+| A24 | `station.js:69 setGlobalTariff` | POST `/admin/tariffs` | 价格版本（幂等键） | — | PUT `/admin/tariffs` | 已改造 | 方法/语义变更：一次把完整费率写入**所有**电桩（含停用），原因必填并写审计；不带分时字段即改为单一费率，与设备级端点同一规则 |
+| A25 | `station.js:84 createPriceAdjustment` | POST `/admin/price-adjustments` | `{adjustmentBp…}`（幂等键） | — | — | 后端缺失 | 按桩型/比例的服务费调整未迁移；当前只有全局费率统一下发，按钮保留并提示"暂未提供" |
 | A26 | `stats.js:39 fetchRevenueStats` | GET `/admin/stats/revenue` | `{fromAt, toAt, stationId, bucket}` | `items[]/total*`（DTO 严格校验） | — | 后端缺失 | 统计属 A-07 |
 | A27 | `stats.js:68 fetchChargerStatusStats` | GET `/admin/stats/charger-status` | `{stationId?}` | 八个统计字段 | — | 后端缺失 | 同上 |
 | A28 | `user.js:9 fetchUsers` | GET `/admin/users` | `{status, phoneExact, phoneLast4, page, pageSize, sort}` | `{items, meta}` | GET `/admin/users` | 需改造 | 路径一致；Go 支持 `keyword/status`+分页；`phoneExact/phoneLast4/sort` 不支持（隐私口径一致：无模糊扫描） |
@@ -148,6 +148,10 @@
 | 管理端 | 34 | 1（A20） | 16 | 17 | 0 |
 | Agent | 1 | — | — | — | 1 |
 | 合计 | 66 | 1 | 41 | 22 | 2 |
+
+> 四轮更新（A 线站点编辑 + 全局费率后）：A21 站点编辑、A23/A24 费率查询与下发由"后端缺失"改为
+> "已改造"；A25 按桩型的服务费比例调整仍未迁移。旧 A23/A24 的行政区价格版本模型（adcode +
+> 生效时间窗）未迁移，改为车队级视图与统一下发。
 
 > 二轮更新（B 线第二批交付后）：U4 注册、U8/U9 头像 URL、A10 桩状态、A12 命令查询（commandId）、
 > A22 站点状态、A31 按用户订单由"后端缺失"改为"需改造"并已完成前端接线；A9/A21/A16-A18 等
