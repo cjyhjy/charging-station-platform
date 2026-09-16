@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import * as chargingApi from '@/api/charging'
+import * as orderApi from '@/api/order'
 import { randomId } from '@/api/http'
 import { formatDuration, formatEnergy, formatYuan } from '@/services/coordinate'
 import AppSkeleton from '@/components/AppSkeleton.vue'
@@ -110,7 +111,8 @@ async function runAction(action) {
 
 /** 小票：订单离开活动集合且终态为 COMPLETED 时展示；其余终态直接回空闲页。 */
 async function loadReceipt(orderNo) {
-  const detail = await chargingApi.fetchOrderReceipt(orderNo)
+  // 小票属于订单接口组（@/api/order，与"我的订单"页同一入口），不在 @/api/charging 中。
+  const detail = await orderApi.fetchOrderReceipt(orderNo)
   stopPolling()
   order.value = null
   if (detail?.status === 'COMPLETED') {
