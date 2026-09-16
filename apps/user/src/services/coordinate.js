@@ -104,6 +104,24 @@ export function formatEnergy(energyMwh) {
   return `${(energyMwh / 1e6).toFixed(2)} kWh`
 }
 
+/**
+ * Haversine 球面距离（米）。两端必须同一坐标系：站点坐标与换算后的用户位置
+ * 都是 GCJ-02，混用 WGS-84 与 GCJ-02 会带来数百米的系统性偏差。
+ */
+export function haversineMeter(latitudeA, longitudeA, latitudeB, longitudeB) {
+  if (![latitudeA, longitudeA, latitudeB, longitudeB].every(Number.isFinite)) {
+    throw new RangeError('坐标不合法')
+  }
+  const EARTH_RADIUS_METER = 6371008.8
+  const radians = degrees => (degrees / 180) * PI
+  const deltaLatitude = radians(latitudeB - latitudeA)
+  const deltaLongitude = radians(longitudeB - longitudeA)
+  const h =
+    Math.sin(deltaLatitude / 2) ** 2 +
+    Math.cos(radians(latitudeA)) * Math.cos(radians(latitudeB)) * Math.sin(deltaLongitude / 2) ** 2
+  return 2 * EARTH_RADIUS_METER * Math.asin(Math.min(1, Math.sqrt(h)))
+}
+
 /** UTC Unix 秒 -> 本地时间字符串；服务端只传秒，本地化在展示层完成。 */
 export function formatDateTime(unixSecond) {
   if (!Number.isFinite(unixSecond) || unixSecond <= 0) return '--'

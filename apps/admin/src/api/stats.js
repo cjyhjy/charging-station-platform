@@ -1,13 +1,16 @@
-import { api, STATS_TIMEOUT_MS } from './http'
+import { api } from './http'
 import { toInteger, toNumber } from '../utils/format'
 import { CHARGER_STATUS } from '../utils/domain'
 
 /**
- * 统计接口（接口文档 §8.3、§8.4）。
+ * 统计接口（Go 契约 GET /admin/stats/revenue 与 /admin/stats/chargers）。
  *
- * 服务端返回的统计响应字段全部是整数（分、毫瓦时、台数、百分比），
- * 这里在进入 store 之前做一次显式解析：字段缺失或类型不对时抛出 DtoError，
- * 由页面展示“统计响应字段不完整”，绝不把 NaN 渲染到 KPI 或图表上。
+ * 旧 Qt 管理端的统计来自服务端预计算的驾驶舱快照，Go 侧改为按需聚合：
+ * 营收按「已完成订单的冻结金额、归属停止充电时刻」统计，分桶对齐请求区间起点，
+ * 空区间也会返回零值桶，图表因此不会把安静的日子跳过。
+ *
+ * 服务端返回整数分与整数毫瓦时；这里只做契约校验，不做任何隐式换算，
+ * 单位换算全部留给展示层。
  */
 
 /** 响应体结构不符合契约时抛出的错误，携带可直接展示的 userMessage。 */
@@ -17,6 +20,20 @@ export class DtoError extends Error {
     this.name = 'DtoError'
     this.userMessage = message
   }
+}
+
+/**
+ * 营收统计：fromAt/toAt 为 UTC 秒且必填，单次区间上限 90 天；
+ * stationId 可选，bucket 为 day（趋势）或 hour（单日明细）。
+ * 解析交给 parseRevenueStats，使 DTO 校验只有一处。
+ */
+export function fetchRevenueStats({ fromAt, toAt, stationId, bucket } = {}) {
+  return api.get('/admin/stats/revenue', { fromAt, toAt, stationId, bucket })
+}
+
+/** 设备状态统计；stationId 可选。解析交给 parseChargerStatusStats。 */
+export function fetchChargerStatusStats({ stationId } = {}) {
+  return api.get('/admin/stats/chargers', { stationId })
 }
 
 function requireInteger(value, field) {
@@ -31,15 +48,7 @@ function requireNumber(value, field) {
   return parsed
 }
 
-/**
- * §8.3 营收统计。
- * @param {object} params fromAt、toAt、stationId、bucket=day|hour（时间范围最大 90 天）。
- */
-export function fetchRevenueStats(params = {}) {
-  return api.get('/admin/stats/revenue', params, { timeout: STATS_TIMEOUT_MS })
-}
-
-/** 解析 §8.3 响应：items 与三个总计字段都必须存在且为整数。 */
+/** 解析营收统计响应：items 与三个总计字段都必须存在且为整数。 */
 export function parseRevenueStats(data) {
   if (!data || typeof data !== 'object') throw new DtoError('营收统计响应为空')
   if (!Array.isArray(data.items)) throw new DtoError('营收统计响应缺少 items 列表')
@@ -60,15 +69,7 @@ export function parseRevenueStats(data) {
   }
 }
 
-/**
- * §8.4 设备状态统计。
- * @param {object} params stationId 可选。
- */
-export function fetchChargerStatusStats(params = {}) {
-  return api.get('/admin/stats/charger-status', params, { timeout: STATS_TIMEOUT_MS })
-}
-
-/** 解析 §8.4 响应：五种状态数量、可运营数、总数与健康度都必须存在。 */
+/** 解析设备状态统计响应：五种状态数量、可运营数、总数与健康度都必须存在。 */
 export function parseChargerStatusStats(data) {
   if (!data || typeof data !== 'object') throw new DtoError('设备状态统计响应为空')
   const stats = {

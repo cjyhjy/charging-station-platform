@@ -32,7 +32,7 @@ export const useAgentStore = defineStore('userAgent', {
 
   actions: {
     /**
-     * 发送一条消息。参数与 POST /user/agent/chat 契约一致：
+     * 发送一条消息。参数与 POST /agent/chat 契约一致：
      * message 必填；location 可选但必须成对；coordinateType 默认 gcj02。
      */
     async send(message, { location, coordinateType, chargerType } = {}) {
@@ -56,7 +56,13 @@ export const useAgentStore = defineStore('userAgent', {
         this.messages.push(assistantMessage(result?.reply || '已完成查询。', { result }))
         return true
       } catch (error) {
-        this.error = error?.userMessage || 'AI 助手暂时不可用，请稍后重试'
+        // 服务端不会因模型或地图不可用而失败——那种情况会带着 degraded 正常返回，
+        // 因此这里只处理真正的传输、会话与参数失败，不把降级伪装成故障。
+        if (error?.status === 401 || error?.status === 403) {
+          this.error = '登录已失效，请重新登录后再使用 AI 助手'
+        } else {
+          this.error = error?.userMessage || 'AI 助手暂时不可用，请稍后重试'
+        }
         return false
       } finally {
         this.loading = false

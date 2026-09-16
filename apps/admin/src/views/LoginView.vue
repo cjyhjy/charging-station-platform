@@ -15,7 +15,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-const username = ref('')
+const account = ref('')
 const password = ref('')
 const deviceId = ref(auth.deviceId)
 const currentPassword = ref('')
@@ -44,7 +44,7 @@ function redirectAfterLogin() {
 async function submitLogin() {
   if (auth.isLocked) return
   auth.deviceId = deviceId.value.trim() || 'ncs-admin-web'
-  const ok = await auth.login({ username: username.value.trim(), password: password.value })
+  const ok = await auth.login({ account: account.value.trim(), password: password.value })
   if (!ok) return
   if (auth.mustChangePassword) {
     // 首次登录：用刚输入的密码预填当前密码，减少一次输入。
@@ -98,7 +98,7 @@ async function submitChange() {
           <label class="field">
             <span>账号</span>
             <input
-              v-model="username"
+              v-model="account"
               type="text"
               autocomplete="username"
               placeholder="请输入管理员账号"

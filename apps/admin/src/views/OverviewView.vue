@@ -188,6 +188,7 @@ function selectDay(row) {
         label="设备健康度"
         test-id="overview-kpi-health"
         format="percent"
+        :digits="2"
         tone="accent"
         :value="dashboard.healthPercent"
         :loading="dashboard.loading && !hasData"
@@ -240,7 +241,7 @@ function selectDay(row) {
       >
         <template #actions>
           <span class="muted" data-testid="overview-health-label">
-            健康度 {{ formatPercent(dashboard.healthPercent) }}
+            健康度 {{ formatPercent(dashboard.healthPercent, { digits: 2 }) }}
           </span>
         </template>
       </ChartPanel>

@@ -5,7 +5,8 @@ import { useAuthStore } from './auth'
 
 /**
  * 运维状态：审计日志与备份（接口文档 §8.5–§8.8）。
- * 两类数据都需要 OWNER 权限；创建备份与隔离恢复验证属于敏感操作，先试后重新验证。
+ * 审计日志已迁到 Go（只读）；备份域 Go 契约暂未提供，api/ops.js 直接抛 unsupported。
+ * 创建备份与隔离恢复验证属于敏感操作，先试后重新验证。
  */
 export const useOpsStore = defineStore('adminOps', {
   state: () => ({
@@ -58,7 +59,7 @@ export const useOpsStore = defineStore('adminOps', {
         return true
       } catch (error) {
         this.audit.items = []
-        this.auditError = error?.userMessage || '审计日志加载失败（需要 OWNER 权限）'
+        this.auditError = error?.userMessage || '审计日志加载失败，请稍后重试'
         return false
       } finally {
         this.auditLoading = false
@@ -94,7 +95,7 @@ export const useOpsStore = defineStore('adminOps', {
         return true
       } catch (error) {
         this.backups = []
-        this.backupsError = error?.userMessage || '备份记录加载失败（需要 OWNER 权限）'
+        this.backupsError = error?.userMessage || '备份记录加载失败，请稍后重试'
         return false
       } finally {
         this.backupsLoading = false

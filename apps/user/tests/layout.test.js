@@ -148,13 +148,13 @@ describe('响应式布局：一套页面，两种呈现', () => {
 
   it('路由只有一套页面集合，没有移动端专用路由', () => {
     const paths = appRouter.getRoutes().map(route => route.path)
-    for (const path of ['/', '/stations/:stationId', '/charging', '/agent', '/orders', '/profile']) {
+    for (const path of ['/', '/stations/:stationId', '/stations/:stationId/navigation', '/charging', '/agent', '/orders', '/profile']) {
       expect(paths).toContain(path)
     }
     expect(paths.some(path => /mobile|m\/|wap|h5/i.test(path))).toBe(false)
     expect(paths).toContain('/:pathMatch(.*)*')
 
     const names = appRouter.getRoutes().map(route => route.name).filter(Boolean)
-    expect(names.sort()).toEqual(['agent', 'charging', 'home', 'orders', 'profile', 'station'])
+    expect(names.sort()).toEqual(['agent', 'charging', 'home', 'navigation', 'orders', 'profile', 'station'])
   })
 })

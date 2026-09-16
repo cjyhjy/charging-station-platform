@@ -1,27 +1,35 @@
-import { api } from './http'
+import { api, unsupported } from './http'
+import { flattenPage, mapAuditEntry } from './contract'
 
-/** 运维接口：审计日志与备份（接口文档 §8.5–§8.8）。审计与备份都需要 OWNER 权限。 */
+/** 运维接口（Go 契约）：目前仅审计日志；备份能力暂缺。 */
 
-/** §8.5 审计日志；参数 actorId、action、targetType、targetId、fromAt、toAt、page、pageSize。 */
+/** 审计日志；Go 契约参数为 actorId、action、resourceType、resourceId + 分页（无时间范围）。 */
 export function fetchAuditLogs(params = {}) {
-  return api.get('/admin/audit-logs', params)
+  const { actorId, action, targetType, targetId, page, pageSize } = params
+  return api
+    .get('/admin/audit', {
+      actorId,
+      action,
+      resourceType: targetType,
+      resourceId: targetId,
+      page,
+      pageSize
+    })
+    .then(flattenPage)
+    .then(data => ({ ...data, items: (Array.isArray(data.items) ? data.items : []).map(mapAuditEntry) }))
 }
 
-/** §8.7 备份记录：只返回编号、校验和、大小、状态与时间，不含可读文件路径。 */
+/** 备份记录：Go 契约暂无该域（待 B-06/部署线）。 */
 export function fetchBackups() {
-  return api.get('/admin/backups')
+  return unsupported('备份记录在 Go 后端暂未提供')
 }
 
-/** §8.6 创建一致性备份：需要重新验证与幂等键，返回 202 与 backupNo。 */
-export function createBackup({ idempotencyKey } = {}) {
-  return api.post('/admin/backups', {}, { idempotent: true, idempotencyKey })
+/** 创建一致性备份：Go 契约暂无。 */
+export function createBackup() {
+  return unsupported('创建备份在 Go 后端暂未提供')
 }
 
-/** §8.8 隔离恢复验证：使用独立临时路径，禁止覆盖当前数据库。 */
-export function verifyBackup(backupNo, { idempotencyKey } = {}) {
-  return api.post(
-    `/admin/backups/${encodeURIComponent(backupNo)}/verifications`,
-    {},
-    { idempotent: true, idempotencyKey }
-  )
+/** 隔离恢复验证：Go 契约暂无。 */
+export function verifyBackup() {
+  return unsupported('备份验证在 Go 后端暂未提供')
 }

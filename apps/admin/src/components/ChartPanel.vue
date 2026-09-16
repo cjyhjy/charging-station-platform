@@ -8,7 +8,7 @@
  * 3. 配色从设计令牌读取，跟随主题；
  * 4. 加载时显示同尺寸骨架，数据为空时显示空状态，画布本身始终保留 data-testid。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppSkeleton from './AppSkeleton.vue'
 import { chartAnimation, chartTheme, init as initChart } from '@/charts'
 import { onReducedMotionChange, prefersReducedMotion } from '@/composables/useReducedMotion'
@@ -76,15 +76,23 @@ function render() {
   }
 }
 
+/** 等 DOM 完成显示与布局后再初始化，避免 v-show/路由过渡期间拿到 0 宽度。 */
+function scheduleRender() {
+  nextTick(() => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(render)
+    else render()
+  })
+}
+
 function dispose() {
   if (chart) chart.dispose()
   chart = null
 }
 
 onMounted(() => {
-  render()
+  scheduleRender()
   if (typeof ResizeObserver === 'function' && container.value) {
-    observer = new ResizeObserver(() => render())
+    observer = new ResizeObserver(() => scheduleRender())
     observer.observe(container.value)
   }
   // 系统“减弱动态效果”切换时重新渲染，动画开关随之变化。
@@ -106,7 +114,7 @@ watch(
       dispose()
       return
     }
-    render()
+    scheduleRender()
   },
   { deep: true }
 )

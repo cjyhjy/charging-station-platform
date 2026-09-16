@@ -16,7 +16,7 @@ export const useFlowsStore = defineStore('adminFlows', {
     total: 0,
     page: 1,
     pageSize: 20,
-    filters: { status: null, stationId: '', chargerId: '', userId: '' },
+    filters: { status: null, orderNo: '' },
     loading: false,
     saving: false,
     error: '',
@@ -34,17 +34,11 @@ export const useFlowsStore = defineStore('adminFlows', {
   },
 
   actions: {
-    /** 数字过滤参数只接受正整数，其余按未提供处理。 */
+    /** 过滤参数：Go 契约仅支持订单号与状态过滤 + 分页。 */
     params() {
-      const numeric = value => {
-        const parsed = toInteger(typeof value === 'string' ? value.trim() || null : value)
-        return parsed === null || parsed < 1 ? undefined : parsed
-      }
       return {
+        orderNo: typeof this.filters.orderNo === 'string' && this.filters.orderNo.trim() ? this.filters.orderNo.trim() : undefined,
         status: this.filters.status === null ? undefined : this.filters.status,
-        stationId: numeric(this.filters.stationId),
-        chargerId: numeric(this.filters.chargerId),
-        userId: numeric(this.filters.userId),
         page: this.page,
         pageSize: this.pageSize
       }
@@ -76,7 +70,7 @@ export const useFlowsStore = defineStore('adminFlows', {
     },
 
     resetFilters() {
-      this.filters = { status: null, stationId: '', chargerId: '', userId: '' }
+      this.filters = { status: null, orderNo: '' }
       this.page = 1
       return this.load()
     },
@@ -96,7 +90,11 @@ export const useFlowsStore = defineStore('adminFlows', {
       return !!flow && FLOW_RELEASABLE_STATUS.includes(flow.status)
     },
 
-    /** §8.2 强制释放：原因、目标设备状态与流程版本一起提交，成功后就地更新该行。 */
+    /**
+     * 强制释放（Go 契约按设备执行）：POST /admin/chargers/{chargerId}/release，
+     * 要求原因与目标设备状态；Go 无版本乐观锁，flowVersion 不再提交。
+     * 成功后订单进入取消终态，就地更新该行并刷新设备观察结果。
+     */
     async forceRelease(flow, { reason, nextChargerStatus }) {
       const auth = useAuthStore()
       this.saving = true
@@ -105,25 +103,15 @@ export const useFlowsStore = defineStore('adminFlows', {
       this.conflict = ''
       try {
         const data = await auth.runWithReauth(({ idempotencyKey }) =>
-          forceReleaseFlow(
-            flow.flowNo,
-            { reason, nextChargerStatus, flowVersion: flow.version },
-            { idempotencyKey }
-          )
+          forceReleaseFlow(flow.chargerId, { reason, nextChargerStatus }, { idempotencyKey })
         )
         this.items = this.items.map(item =>
-          item.flowNo === flow.flowNo
-            ? { ...item, status: data.status, statusText: data.statusText, version: toInteger(data.version) ?? item.version }
-            : item
+          item.flowNo === flow.flowNo ? { ...item, status: 90, statusText: '已强制释放', version: 0 } : item
         )
-        this.notice = `流程 ${flow.flowNo} 已强制释放（${data.statusText || data.status}）`
+        const chargerText = data?.chargerCode || (flow.chargerId != null ? `#${flow.chargerId}` : '')
+        this.notice = `流程 ${flow.flowNo} 已强制释放（设备 ${chargerText} → ${data?.status === 'DISABLED' ? '已停用' : '空闲'}）`
         return true
       } catch (error) {
-        if (error?.code === ERROR_CODES.VERSION_CONFLICT) {
-          this.conflict = '该流程已被其他管理员处理，已刷新为最新状态'
-          await this.load()
-          return false
-        }
         if (error?.code === ERROR_CODES.INVALID_STATE_TRANSITION) {
           this.conflict = '当前流程状态不允许强制释放（充电中请使用设备重启的受控结算流程）'
           await this.load()

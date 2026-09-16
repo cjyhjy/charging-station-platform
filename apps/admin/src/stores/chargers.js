@@ -7,6 +7,7 @@ import {
   setChargerStatus
 } from '../api/charger'
 import { fetchStations } from '../api/station'
+import { isoToUnixSecond } from '../api/contract'
 import { ERROR_CODES } from '../api/http'
 import { toInteger } from '../utils/format'
 import { COMMAND_STATUS } from '../utils/domain'
@@ -28,7 +29,7 @@ export const useChargersStore = defineStore('adminChargers', {
     total: 0,
     page: 1,
     pageSize: 20,
-    filters: { stationId: null, status: null, chargerType: null, keyword: '' },
+    filters: { stationId: null, status: null },
     loading: false,
     saving: false,
     error: '',
@@ -53,11 +54,10 @@ export const useChargersStore = defineStore('adminChargers', {
 
   actions: {
     params() {
+      // Go 契约仅支持 stationId/status 过滤；keyword/chargerType 在契约补齐前不提交。
       return {
         stationId: this.filters.stationId === null ? undefined : this.filters.stationId,
         status: this.filters.status === null ? undefined : this.filters.status,
-        chargerType: this.filters.chargerType === null ? undefined : this.filters.chargerType,
-        keyword: this.filters.keyword.trim() || undefined,
         page: this.page,
         pageSize: this.pageSize
       }
@@ -101,7 +101,7 @@ export const useChargersStore = defineStore('adminChargers', {
     },
 
     resetFilters() {
-      this.filters = { stationId: null, status: null, chargerType: null, keyword: '' }
+      this.filters = { stationId: null, status: null }
       this.page = 1
       return this.load()
     },
@@ -163,7 +163,8 @@ export const useChargersStore = defineStore('adminChargers', {
           createChargersBatch({ stationId, chargers }, { idempotencyKey })
         )
         const created = Array.isArray(data.created) ? data.created : []
-        this.notice = `已创建设备 ${created.length} 台`
+        const count = toInteger(data.chargerCount) ?? created.length
+        this.notice = `已创建设备 ${count} 台`
         await this.load()
         return true
       } catch (error) {
@@ -174,7 +175,7 @@ export const useChargersStore = defineStore('adminChargers', {
       }
     },
 
-    /** §7.9 远程重启：创建命令后立刻开始轮询。 */
+    /** 远程重启（Go 契约）：202 返回 {commandId, status}，受理后轮询命令回执结果。 */
     async restart(charger, reason) {
       const auth = useAuthStore()
       this.saving = true
@@ -185,20 +186,18 @@ export const useChargersStore = defineStore('adminChargers', {
           createRestartCommand(charger.id, { reason }, { idempotencyKey })
         )
         this.command = {
-          commandNo: data.commandNo || '',
+          commandId: data.commandId || '',
           status: data.status || 'PENDING',
-          chargerStatus: toInteger(data.chargerStatus),
-          createdAt: toInteger(data.createdAt) ?? 0,
+          chargerStatus: null,
+          // 契约的受理响应只有 commandId + status（backend Command 结构），
+          // 没有受理时间：以前这里写 createdAt: toInteger(data.createdAt) ?? 0，
+          // 页面就会渲染成"提交于 —"。宁可不说，也不编一个 1970。
           completedAt: null,
           errorSummary: '',
           chargerCode: charger.code
         }
-        this.mergeRow(charger.id, {
-          status: toInteger(data.chargerStatus) ?? charger.status,
-          statusText: '重启中'
-        })
-        this.notice = `重启指令已提交（${data.commandNo || '无编号'}），正在等待设备响应`
-        if (this.command.commandNo) this.startPolling()
+        this.notice = `重启指令已受理（${data.commandId || '无编号'}），正在等待设备回执`
+        if (this.command.commandId) this.startPolling()
         return true
       } catch (error) {
         this.error = error?.userMessage || '远程重启失败'
@@ -208,15 +207,25 @@ export const useChargersStore = defineStore('adminChargers', {
       }
     },
 
-    /** §7.10 查询一次命令状态；终态时停止轮询并刷新设备列表。 */
+    /**
+     * 查询一次命令回执（GET /admin/device-commands/{commandId}）。
+     * Go 契约：回执未到达返回 404 —— 按"仍在等待"处理；回执到达后 result
+     * COMPLETED→SUCCEEDED、FAILED→FAILED，终态时停止轮询并刷新设备列表。
+     */
     async pollCommand() {
-      if (!this.command?.commandNo) return null
-      const data = await fetchDeviceCommand(this.command.commandNo)
+      if (!this.command?.commandId) return null
+      let data
+      try {
+        data = await fetchDeviceCommand(this.command.commandId)
+      } catch (error) {
+        if (error?.status === 404) return this.command
+        throw error
+      }
       this.command = {
         ...this.command,
-        status: data.status || this.command.status,
-        completedAt: toInteger(data.completedAt),
-        errorSummary: typeof data.errorSummary === 'string' ? data.errorSummary : ''
+        status: data.result === 'COMPLETED' ? 'SUCCEEDED' : data.result === 'FAILED' ? 'FAILED' : this.command.status,
+        completedAt: isoToUnixSecond(data.recordedAt),
+        errorSummary: data.result === 'FAILED' ? '设备回执报告重启失败' : ''
       }
       if (COMMAND_STATUS[this.command.status]?.terminal) {
         this.stopPolling()

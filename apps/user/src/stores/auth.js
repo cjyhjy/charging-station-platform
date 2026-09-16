@@ -4,8 +4,9 @@ import { fetchWallet } from '../api/charging'
 import { clearAccessToken, getAccessToken, setAccessToken, setSessionExpiredHandler } from '../api/http'
 
 /**
- * 认证状态：令牌只保存在这里并镜像到 sessionStorage（见 api/http.js 的说明），
- * 用户资料、钱包余额与欠费来自 /user/me 与 /user/wallet，均为整数分。
+ * 认证状态：令牌只保存在这里并镜像到 sessionStorage（见 api/http.js 的说明）。
+ * 资料由 api/auth.js 聚合 /me、/me/profile 与 /wallet 组成；Go 契约没有
+ * 欠费模型与资料乐观锁，余额以后端返回为准，昵称修改不再提交 version。
  */
 export const useAuthStore = defineStore('userAuth', {
   state: () => ({
@@ -30,7 +31,7 @@ export const useAuthStore = defineStore('userAuth', {
     availableCent: state => state.wallet?.availableCent ?? Math.max(0, (state.profile?.balanceCent ?? 0) - (state.profile?.debtCent ?? 0)),
     hasDebt: state => (state.profile?.debtCent ?? 0) > 0,
     hasActiveFlow: state => state.profile?.hasActiveFlow === true,
-    displayName: state => state.user?.nickname || state.user?.username || '未登录',
+    displayName: state => state.user?.displayName || state.user?.nickname || state.user?.username || '未登录',
     phoneMasked: state => state.user?.phoneMasked || '',
     avatarUrl: state => state.user?.avatarUrl || ''
   },
@@ -60,14 +61,14 @@ export const useAuthStore = defineStore('userAuth', {
       return session
     },
 
-    async requestCode(phone, purpose = 'LOGIN') {
+    async requestCode(phone) {
       this.codeLoading = true
       this.error = null
       this.notice = ''
       try {
-        const data = await authApi.sendSmsCode(phone, purpose)
+        const data = await authApi.sendSmsCode(phone)
         this.developmentCode = typeof data.developmentCode === 'string' ? data.developmentCode : ''
-        this.notice = data.retryAfterSec ? `验证码已发送，${data.retryAfterSec} 秒后可重新获取` : '验证码已发送'
+        this.notice = '验证码已发送'
         return data
       } catch (error) {
         this.handleError(error)
@@ -85,6 +86,7 @@ export const useAuthStore = defineStore('userAuth', {
       return this.runLogin(() => authApi.loginWithPassword({ loginName, password }))
     },
 
+    /** 用户名密码注册（Go 契约 201 返回登录会话，注册即登录）。 */
     async register({ username, phone, password, smsCode }) {
       return this.runLogin(() => authApi.registerAccount({ username, phone, password, smsCode }))
     },
@@ -131,15 +133,9 @@ export const useAuthStore = defineStore('userAuth', {
     },
 
     async updateNickname(nickname) {
-      if (!this.profile) await this.refreshProfile()
-      const version = this.profile?.version
-      if (!Number.isInteger(version)) {
-        this.error = '资料版本缺失，请刷新后重试'
-        return false
-      }
       this.loading = true
       try {
-        this.profile = await authApi.updateNickname(nickname, version)
+        this.profile = await authApi.updateNickname(nickname)
         if (this.profile?.user) this.user = this.profile.user
         this.notice = '昵称已更新'
         this.error = null
@@ -152,12 +148,13 @@ export const useAuthStore = defineStore('userAuth', {
       }
     },
 
-    async uploadAvatar(file) {
+    /** 头像地址（Go 契约 avatarUrl 字符串；无文件上传端点）。 */
+    async updateAvatarUrl(avatarUrl) {
       this.loading = true
       try {
-        const data = await authApi.uploadAvatar(file)
-        if (this.user) this.user = { ...this.user, avatarUrl: data.avatarUrl || this.user.avatarUrl }
-        this.notice = '头像已更新'
+        this.profile = await authApi.updateAvatarUrl(avatarUrl)
+        if (this.profile?.user) this.user = this.profile.user
+        this.notice = avatarUrl ? '头像地址已更新' : '已清除头像地址'
         this.error = null
         return true
       } catch (error) {

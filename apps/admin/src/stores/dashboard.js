@@ -12,7 +12,8 @@ import {
   nowSeconds,
   secondsOfRecentDays,
   startOfLocalDay,
-  toInteger
+  toInteger,
+  toNumber
 } from '../utils/format'
 
 /** 空营收汇总，保证页面结构在加载中与失败时不塌陷。 */
@@ -54,7 +55,12 @@ export const useDashboardStore = defineStore('adminDashboard', {
     hasRevenue: state => state.revenue.items.length > 0,
     isEmpty: state =>
       !state.loading && !state.error && state.revenue.items.length === 0 && state.chargerStatus.totalCount === 0,
-    healthPercent: state => toInteger(state.chargerStatus.healthPercent) ?? 0,
+    /**
+     * 健康度是小数（契约刻意保留两位：98.97 而不是 98，好让"少了一台设备"看得见）。
+     * 这里必须用 toNumber：toInteger 对非整数返回 null，再 ?? 0 会把 98.97 变成 0，
+     * 于是页面上"可运营 99004 / 总设备 100035"旁边写着 0.0%。
+     */
+    healthPercent: state => toNumber(state.chargerStatus.healthPercent) ?? 0,
     operationalCount: state => state.chargerStatus.operationalCount,
     totalChargers: state => state.chargerStatus.totalCount,
     /** 趋势图点位：时间为空或金额非法的记录直接跳过，不产生 NaN。 */
@@ -86,7 +92,9 @@ export const useDashboardStore = defineStore('adminDashboard', {
         this.loadUserTotal().catch(() => failures.push('注册用户数加载失败'))
       ]
       await Promise.all(tasks)
-      this.error = failures.join('；')
+      // 今日、本月和趋势都可能命中同一个未实现的统计能力；按文案去重，
+      // 避免总览页把同一条提示重复渲染多次。
+      this.error = [...new Set(failures)].join('；')
       this.loading = false
       return this.error === ''
     },

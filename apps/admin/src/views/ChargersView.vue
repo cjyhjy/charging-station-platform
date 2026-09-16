@@ -20,8 +20,6 @@ const chargers = useChargersStore()
 
 const stationId = ref(null)
 const statusFilter = ref(null)
-const typeFilter = ref(null)
-const keyword = ref('')
 
 const batchOpen = ref(false)
 const statusTarget = ref(null)
@@ -73,8 +71,7 @@ const batchFields = computed(() => [
     type: 'select',
     options: CHARGER_TYPES.map(item => ({ value: item.value, label: item.label }))
   },
-  { key: 'powerWatt', label: '单桩功率（W）', type: 'number', required: true, min: 1, max: 1000000, default: 120000 },
-  { key: 'connectorStandard', label: '接口标准', default: 'GB/T 20234.3', maxLength: 32 }
+  { key: 'powerWatt', label: '单桩功率（W）', type: 'number', required: true, min: 1, max: 1000000, default: 120000 }
 ])
 
 const hasOptions = computed(() => chargers.stationOptions.length > 0)
@@ -99,21 +96,17 @@ function statusTone(text) {
 function applyFilters() {
   chargers.setFilter({
     stationId: stationId.value,
-    status: statusFilter.value,
-    chargerType: typeFilter.value,
-    keyword: keyword.value
+    status: statusFilter.value
   })
 }
 
 function resetFilters() {
   stationId.value = null
   statusFilter.value = null
-  typeFilter.value = null
-  keyword.value = ''
   chargers.resetFilters()
 }
 
-/** 批量编号：与后端 `站点编码-DC/AC-两位序号` 规则一致，前端只做序号补齐。 */
+/** 批量编号：编号由调用方给出，服务端不生成；这里只按前缀与序号补齐两位。 */
 function buildCodes(prefix, startIndex, count) {
   const list = []
   for (let offset = 0; offset < count; offset += 1) {
@@ -129,8 +122,7 @@ async function submitBatch(values) {
     chargers: codes.map(code => ({
       code,
       chargerType: values.chargerType,
-      powerWatt: values.powerWatt,
-      connectorStandard: values.connectorStandard || 'GB/T 20234.3'
+      powerWatt: values.powerWatt
     }))
   })
   if (ok) batchOpen.value = false
@@ -188,17 +180,6 @@ async function submitRestart({ reason }) {
             <option :value="null">全部状态</option>
             <option v-for="item in CHARGER_STATUS" :key="item.value" :value="item.value">{{ item.label }}</option>
           </select>
-        </label>
-        <label class="field">
-          <span>类型</span>
-          <select v-model="typeFilter" data-testid="chargers-type">
-            <option :value="null">全部类型</option>
-            <option v-for="item in CHARGER_TYPES" :key="item.value" :value="item.value">{{ item.label }}</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>编号关键词</span>
-          <input v-model="keyword" type="search" placeholder="按电桩编号搜索" data-testid="chargers-keyword" />
         </label>
         <template #actions>
           <button type="button" class="btn" data-testid="chargers-reset" @click="resetFilters">重置</button>
@@ -280,7 +261,7 @@ async function submitRestart({ reason }) {
         <div>
           <h2>最近一次远程重启</h2>
           <p class="panel__hint">
-            命令编号 {{ chargers.command.commandNo }} · 提交于 {{ formatDateTime(chargers.command.createdAt) }}
+            命令编号 {{ chargers.command.commandId }}
           </p>
         </div>
         <div class="panel__row">
@@ -316,7 +297,7 @@ async function submitRestart({ reason }) {
       v-if="batchOpen"
       test-id="charger-batch-dialog"
       title="批量创建设备"
-      hint="一次最多 100 台，全部成功或全部回滚；编号由前缀与两位序号自动生成"
+      hint="一次最多 100 台，整批同事务：任一编号已存在则全部不创建；新设备为空闲状态，费率由费率接口下发"
       :fields="batchFields"
       submit-label="批量创建"
       :loading="chargers.saving"

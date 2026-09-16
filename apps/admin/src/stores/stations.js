@@ -2,9 +2,9 @@ import { defineStore } from 'pinia'
 import {
   createPriceAdjustment,
   createStation,
-  createTariff,
   fetchStations,
   fetchTariffs,
+  setGlobalTariff,
   setStationEnabled,
   updateStation
 } from '../api/station'
@@ -26,17 +26,16 @@ export const useStationsStore = defineStore('adminStations', {
     total: 0,
     page: 1,
     pageSize: 20,
-    filters: { status: null, adcode: '', keyword: '' },
+    filters: { keyword: '' },
     loading: false,
     saving: false,
     error: '',
     notice: '',
     conflict: '',
     selectedStationId: null,
+    /** 全局费率：每条配置一行，外加整支车队的汇总。 */
     tariffs: [],
-    tariffTotal: 0,
-    tariffPage: 1,
-    tariffPageSize: 10,
+    tariffSummary: null,
     tariffsLoading: false,
     tariffsError: ''
   }),
@@ -49,11 +48,13 @@ export const useStationsStore = defineStore('adminStations', {
   },
 
   actions: {
-    /** 查询参数：空字符串按未提供处理（§1.5）。 */
+    /**
+     * 查询参数：空字符串按未提供处理（§1.5）。
+     * Go 列表契约只有 keyword + 分页，所以这里也只产出这两项——
+     * 不再保留 status/adcode 这类服务端不认的字段，避免“看起来生效了”。
+     */
     params() {
       return {
-        status: this.filters.status === null ? undefined : this.filters.status,
-        adcode: this.filters.adcode.trim() || undefined,
         keyword: this.filters.keyword.trim() || undefined,
         page: this.page,
         pageSize: this.pageSize
@@ -87,7 +88,7 @@ export const useStationsStore = defineStore('adminStations', {
     },
 
     resetFilters() {
-      this.filters = { status: null, adcode: '', keyword: '' }
+      this.filters = { keyword: '' }
       this.page = 1
       return this.load()
     },
@@ -133,18 +134,25 @@ export const useStationsStore = defineStore('adminStations', {
       }
     },
 
-    /** §7.3 修改站点：只提交变更字段与当前 version。 */
+    /**
+     * §7.3 修改站点：只提交名称、地址与经纬度。
+     *
+     * 服务端返回整条记录，就地合并这四项——包括编码与状态在内的其他字段不在此
+     * 端点的职责内，直接覆盖整行反而会把别处刚改的字段写回旧值。
+     */
     async edit(station, patch) {
-      const auth = useAuthStore()
       this.saving = true
       this.error = ''
       this.notice = ''
       this.conflict = ''
       try {
-        const data = await auth.runWithReauth(({ idempotencyKey }) =>
-          updateStation(station.id, { ...patch, version: station.version }, { idempotencyKey })
-        )
-        this.mergeRow(station.id, { version: toInteger(data.version) ?? station.version })
+        const data = await updateStation(station.id, patch)
+        this.mergeRow(station.id, {
+          name: data?.name ?? patch.name,
+          address: data?.address ?? patch.address,
+          latitudeE6: data?.latitudeE6 ?? patch.latitudeE6,
+          longitudeE6: data?.longitudeE6 ?? patch.longitudeE6
+        })
         this.notice = '站点信息已更新'
         return true
       } catch (error) {
@@ -182,42 +190,61 @@ export const useStationsStore = defineStore('adminStations', {
       this.items = this.items.map(item => (item.id === stationId ? { ...item, ...patch } : item))
     },
 
-    /** §7.11 基础价格版本列表。 */
+    /**
+     * §7.11 全局费率：所有电桩当前的费率构成。
+     *
+     * 每行带一个稳定 key：返回的是「配置」而不是「记录」，同一组价格可能重复出现，
+     * 用价格字段当行键会在两行相同时让表格错位。
+     */
     async loadTariffs() {
       this.tariffsLoading = true
       this.tariffsError = ''
       try {
-        const data = await fetchTariffs({
-          adcode: this.filters.adcode.trim() || undefined,
-          page: this.tariffPage,
-          pageSize: this.tariffPageSize
-        })
-        this.tariffs = Array.isArray(data.items) ? data.items : []
-        this.tariffTotal = toInteger(data.total) ?? this.tariffs.length
+        const data = await fetchTariffs()
+        const configurations = Array.isArray(data?.configurations) ? data.configurations : []
+        this.tariffs = configurations.map(configuration => ({
+          ...configuration,
+          key: `${configuration.electricityPriceCentPerKwh}-${configuration.servicePriceCentPerKwh}` +
+            `-${configuration.offPeakElectricityPriceCentPerKwh ?? 'flat'}` +
+            `-${configuration.offPeakStartHour ?? ''}-${configuration.offPeakEndHour ?? ''}`
+        }))
+        this.tariffSummary = {
+          chargerCount: toInteger(data?.chargerCount) ?? 0,
+          configurationCount: toInteger(data?.configurationCount) ?? this.tariffs.length,
+          minElectricityPriceCentPerKwh: toInteger(data?.minElectricityPriceCentPerKwh) ?? 0,
+          maxElectricityPriceCentPerKwh: toInteger(data?.maxElectricityPriceCentPerKwh) ?? 0,
+          minServicePriceCentPerKwh: toInteger(data?.minServicePriceCentPerKwh) ?? 0,
+          maxServicePriceCentPerKwh: toInteger(data?.maxServicePriceCentPerKwh) ?? 0,
+          offPeakChargerCount: toInteger(data?.offPeakChargerCount) ?? 0,
+          flatChargerCount: toInteger(data?.flatChargerCount) ?? 0
+        }
         return true
       } catch (error) {
         this.tariffs = []
-        this.tariffTotal = 0
-        this.tariffsError = error?.userMessage || '价格版本加载失败'
+        this.tariffSummary = null
+        this.tariffsError = error?.userMessage || '费率加载失败'
         return false
       } finally {
         this.tariffsLoading = false
       }
     },
 
-    /** §7.12 创建基础价格版本（敏感操作：先试后验证）。 */
-    async createTariffVersion(payload) {
-      const auth = useAuthStore()
+    /** §7.12 全局下发费率：一次写入所有电桩，原因必填并写审计。 */
+    async setGlobalTariff(payload) {
       this.saving = true
       this.error = ''
       this.notice = ''
       try {
-        await auth.runWithReauth(({ idempotencyKey }) => createTariff(payload, { idempotencyKey }))
-        this.notice = '基础价格版本已创建'
+        const data = await setGlobalTariff(payload)
+        const affected = toInteger(data?.affectedChargers) ?? 0
+        const replaced = toInteger(data?.previousConfigurations) ?? 0
+        this.notice = replaced > 1
+          ? `费率已下发到 ${affected} 台设备（原 ${replaced} 种费率被统一）`
+          : `费率已确认：${affected} 台设备`
         await this.loadTariffs()
         return true
       } catch (error) {
-        this.error = error?.userMessage || '创建价格版本失败'
+        this.error = error?.userMessage || '费率下发失败'
         return false
       } finally {
         this.saving = false

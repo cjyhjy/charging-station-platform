@@ -6,8 +6,7 @@ import { useAuthStore } from './auth'
 
 /**
  * 管理员账号状态（接口文档 §6.8–§6.10）。
- * 列表与写入都需要 OWNER 权限；创建与停启用还需要重新验证（服务端返回 REAUTH_REQUIRED
- * 时由 auth store 弹窗后原幂等键重试）。
+ * 列表、创建与启停均由 Go 管理接口提供；写操作携带幂等键并使用版本号防止覆盖并发修改。
  */
 export const useAccountsStore = defineStore('adminAccounts', {
   state: () => ({
@@ -42,7 +41,7 @@ export const useAccountsStore = defineStore('adminAccounts', {
       } catch (error) {
         this.items = []
         this.total = 0
-        this.error = error?.userMessage || '管理员账号加载失败（需要 OWNER 权限）'
+        this.error = error?.userMessage || '管理员账号加载失败，请稍后重试'
         return false
       } finally {
         this.loading = false
@@ -78,7 +77,7 @@ export const useAccountsStore = defineStore('adminAccounts', {
       }
     },
 
-    /** §6.10 停用或启用：OWNER 不得停用本人，服务端会返回 VALIDATION_FAILED。 */
+    /** §6.10 停用或启用：不得停用本人账号，服务端会返回 VALIDATION_FAILED。 */
     async setStatus(account, status, reason) {
       const auth = useAuthStore()
       this.saving = true

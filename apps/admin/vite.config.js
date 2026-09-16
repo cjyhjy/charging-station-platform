@@ -7,7 +7,7 @@ const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url))
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, repositoryRoot, ['VITE_'])
-  const apiTarget = env.VITE_NCS_API_TARGET || 'https://127.0.0.1:8443'
+  const apiTarget = env.VITE_NCS_API_TARGET || 'http://127.0.0.1:8080'
 
   return {
     plugins: [vue()],
@@ -23,6 +23,13 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5174,
       open: false,
+      // 共享视觉层位于项目根之外：src/main.js 直接 import '../../shared/styles/ice-theme.css'，
+      // 而该 CSS 的 url('./landscape.svg') 会被 Vite 解析为 /@fs/<repo>/apps/shared/styles/landscape.svg。
+      // 默认的 serving allow list 只覆盖 apps/admin（最近的 package.json），因此该资源会被拒绝服务。
+      // 显式放行整棵仓库目录：它同时覆盖应用自身与 apps/shared，范围不超过本仓库。
+      fs: {
+        allow: [repositoryRoot]
+      },
       proxy: {
         '/api': {
           target: apiTarget,

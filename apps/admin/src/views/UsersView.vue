@@ -11,6 +11,7 @@ import AppSkeleton from '@/components/AppSkeleton.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import DataTable from '@/components/DataTable.vue'
 import FilterBar from '@/components/FilterBar.vue'
+import FormDialog from '@/components/FormDialog.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import { useUsersStore, USER_SORTS } from '@/stores/users'
 import { USER_STATUS } from '@/utils/domain'
@@ -18,12 +19,96 @@ import { formatAmount, formatDateTime, formatEnergy, formatInt } from '@/utils/f
 
 const users = useUsersStore()
 
-const phoneExact = ref('')
-const phoneLast4 = ref('')
+const keyword = ref('')
 const statusFilter = ref(null)
 const sort = ref('-registeredAt')
 
 const statusTarget = ref(null)
+
+const archiveOpen = ref(false)
+const batchArchiveOpen = ref(false)
+const archiveError = ref('')
+const rosterError = ref('')
+
+/** 建档手机号必须是可登录的手机号：与短信登录同一形状。 */
+const ARCHIVE_PHONE_PATTERN = /^1[3-9]\d{9}$/
+
+const archiveFields = [
+  { key: 'phone', label: '手机号', required: true, maxLength: 11, placeholder: '11 位手机号，建档后走短信登录' },
+  { key: 'displayName', label: '昵称（可选）', maxLength: 20, placeholder: '留空则默认“用户+手机号后四位”' }
+]
+
+const batchArchiveFields = [
+  {
+    key: 'roster',
+    label: '名单（每行一条：手机号[,昵称]）',
+    type: 'textarea',
+    required: true,
+    placeholder: '13912340000,老王\n13912340001\n13912340002,小李',
+    rows: 8
+  }
+]
+
+/**
+ * 名单解析：一页 1..1000 条；手机号页内唯一。解析失败时给出可定位的
+ * 行号，而不是让服务端的 400 代替表单校验。
+ */
+function parseRoster(raw) {
+  const entries = []
+  const seen = new Set()
+  const lines = String(raw || '').split(/\r?\n/)
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim()
+    if (!line) continue
+    const [phone, ...rest] = line.split(/[,，]/)
+    const displayName = rest.join(',').trim()
+    const normalized = phone.trim()
+    const where = `第 ${index + 1} 行`
+    if (!ARCHIVE_PHONE_PATTERN.test(normalized)) {
+      return { error: `${where}：${normalized || '（空）'} 不是可登录的手机号` }
+    }
+    if (displayName.length > 20) {
+      return { error: `${where}：昵称超过 20 字` }
+    }
+    if (seen.has(normalized)) {
+      return { error: `${where}：${normalized} 在名单中重复` }
+    }
+    seen.add(normalized)
+    entries.push({ phone: normalized, displayName })
+  }
+  if (entries.length === 0) {
+    return { error: '名单为空：每行一条“手机号[,昵称]”' }
+  }
+  if (entries.length > 1000) {
+    return { error: `一次最多 1000 个账号（当前 ${entries.length} 条），更大数据量请使用种子脚本` }
+  }
+  return { entries }
+}
+
+async function submitArchive({ phone, displayName }) {
+  if (!ARCHIVE_PHONE_PATTERN.test(phone.trim())) {
+    archiveError.value = '手机号必须是 1 开头的 11 位数字（与短信登录一致）'
+    return
+  }
+  const ok = await users.createUser({ phone: phone.trim(), displayName: displayName.trim() })
+  if (ok) {
+    archiveError.value = ''
+    archiveOpen.value = false
+  }
+}
+
+async function submitBatchArchive({ roster }) {
+  const { entries, error } = parseRoster(roster)
+  if (error) {
+    rosterError.value = error
+    return
+  }
+  const ok = await users.batchCreateUsers(entries)
+  if (ok) {
+    rosterError.value = ''
+    batchArchiveOpen.value = false
+  }
+}
 
 onMounted(() => {
   users.load()
@@ -65,18 +150,14 @@ function statusTone(text) {
 
 function applyFilters() {
   users.setFilter({
-    phoneExact: phoneExact.value,
-    phoneLast4: phoneLast4.value,
-    status: statusFilter.value,
-    sort: sort.value
+    keyword: keyword.value,
+    status: statusFilter.value
   })
 }
 
 function resetFilters() {
-  phoneExact.value = ''
-  phoneLast4.value = ''
+  keyword.value = ''
   statusFilter.value = null
-  sort.value = '-registeredAt'
   users.resetFilters()
 }
 
@@ -116,11 +197,11 @@ async function openOrders(row) {
       <FilterBar test-id="users-filter" :busy="users.loading" @submit="applyFilters">
         <label class="field">
           <span>完整手机号</span>
-          <input v-model="phoneExact" type="search" inputmode="numeric" placeholder="11 位手机号" data-testid="users-phone-exact" />
+          <input v-model="keyword" type="search" placeholder="按昵称关键字搜索" data-testid="users-keyword" />
         </label>
         <label class="field">
           <span>手机号后四位</span>
-          <input v-model="phoneLast4" type="search" inputmode="numeric" placeholder="4 位数字" data-testid="users-phone-last4" />
+
         </label>
         <label class="field">
           <span>账号状态</span>
@@ -148,6 +229,14 @@ async function openOrders(row) {
           <h2>用户列表</h2>
           <p class="panel__hint">共 {{ users.total }} 位用户 · 手机号已脱敏</p>
         </div>
+        <span class="row-actions">
+          <button type="button" class="btn btn--sm" data-testid="user-archive-batch" @click="batchArchiveOpen = true">
+            批量建档
+          </button>
+          <button type="button" class="btn btn--sm btn--primary" data-testid="user-archive" @click="archiveOpen = true">
+            建档
+          </button>
+        </span>
       </div>
 
       <DataTable
@@ -258,6 +347,32 @@ async function openOrders(row) {
         :row-test-id="row => `user-order-${row.orderNo}`"
       />
     </section>
+
+    <FormDialog
+      v-if="archiveOpen"
+      test-id="user-archive-dialog"
+      title="用户建档"
+      hint="账号出生即自注册形态：正常状态、零余额钱包、无密码；用户仍通过短信登录"
+      :fields="archiveFields"
+      submit-label="建档"
+      :loading="users.saving"
+      :error="archiveError || users.conflict || users.error"
+      @submit="submitArchive"
+      @cancel="archiveOpen = false"
+    />
+
+    <FormDialog
+      v-if="batchArchiveOpen"
+      test-id="user-archive-batch-dialog"
+      title="批量建档"
+      hint="一页最多 1000 个账号，整批同事务：任一手机号已注册则全部不创建"
+      :fields="batchArchiveFields"
+      submit-label="批量建档"
+      :loading="users.saving"
+      :error="rosterError || users.conflict || users.error"
+      @submit="submitBatchArchive"
+      @cancel="batchArchiveOpen = false"
+    />
 
     <ConfirmDialog
       v-if="statusTarget"

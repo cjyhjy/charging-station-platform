@@ -71,6 +71,12 @@ export const useAuthStore = defineStore('adminAuth', {
     isLoggedIn: state => !!state.token,
     displayName: state => state.admin?.username || '未登录',
     roles: state => (Array.isArray(state.admin?.roles) ? state.admin.roles : []),
+    /** Go 写角色：SUPER_ADMIN 与 OPERATOR 可执行运营写操作，AUDITOR 只读。 */
+    canWrite: state => {
+      const roles = Array.isArray(state.admin?.roles) ? state.admin.roles : []
+      return roles.includes('SUPER_ADMIN') || roles.includes('OPERATOR')
+    },
+    isSuperAdmin: state => (Array.isArray(state.admin?.roles) ? state.admin.roles.includes('SUPER_ADMIN') : false),
     isOwner: state => (Array.isArray(state.admin?.roles) ? state.admin.roles.includes('OWNER') : false),
     mustChangePassword: state => state.admin?.mustChangePassword === true,
     isLocked: state => state.lockedSeconds > 0
@@ -103,7 +109,7 @@ export const useAuthStore = defineStore('adminAuth', {
       return session
     },
 
-    async login({ username, password }) {
+    async login({ account, password }) {
       if (this.lockedSeconds > 0) {
         this.error = `账号已锁定，请 ${this.lockedSeconds} 秒后重试`
         return false
@@ -112,7 +118,9 @@ export const useAuthStore = defineStore('adminAuth', {
       this.error = ''
       this.notice = ''
       try {
-        const data = await authApi.login({ username, password, deviceId: this.deviceId })
+        // account 是 Go 契约的字段名（用户名为账号的一种）；deviceId 仅用于会话审计，
+        // 不在 Go 契约内，服务端会忽略未知字段。
+        const data = await authApi.login({ account, password, deviceId: this.deviceId })
         this.applySession(data)
         this.notice = this.mustChangePassword ? '首次登录，请先修改初始密码' : '登录成功'
         this.clearLock()
@@ -283,6 +291,14 @@ export const useAuthStore = defineStore('adminAuth', {
       if (!token) return false
       this.token = token
       this.admin = readProfile()
+      if (this.admin) return true
+      authApi.currentIdentity().then(identity => {
+        this.admin = identity
+        writeProfile(this.admin)
+      }).catch(() => {
+        // 令牌可能已过期；请求层会清理令牌并触发登录跳转。
+      })
+      // 令牌本身仍可用于路由守卫；身份资料会在请求完成后补齐。
       return true
     }
   }

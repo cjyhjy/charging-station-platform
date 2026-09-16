@@ -18,7 +18,7 @@ const EXPECTED_DESTINATIONS = [
   { key: 'chargers', to: '/chargers', label: '充电桩' },
   { key: 'users', to: '/users', label: '用户' },
   { key: 'flows', to: '/flows', label: '活动流程' },
-  { key: 'predictions', to: '/predictions', label: '智能预测' },
+  { key: 'appeals', to: '/appeals', label: '申诉管理' },
   { key: 'accounts', to: '/accounts', label: '管理员' },
   { key: 'ops', to: '/ops', label: '运维' }
 ]
@@ -59,9 +59,17 @@ async function mountShell({ desktop = true, authenticated = true } = {}) {
   router.beforeEach(authGuard)
   await router.push('/')
   await router.isReady()
-  const wrapper = mount(AdminShell, { global: { plugins: [pinia, router] } })
+  // stubs.transition=false 关掉 test-utils 对 <Transition> 的替身，让路由切换走真实过渡逻辑
+  const wrapper = mount(AdminShell, { global: { plugins: [pinia, router], stubs: { transition: false } } })
   await wrapper.vm.$nextTick()
   return { wrapper, router, auth, pinia }
+}
+
+/** 等待若干真实帧：CSS 过渡在下一帧推进，await nextTick() 等不到它结束。 */
+async function frames(times = 6) {
+  for (let index = 0; index < times; index += 1) {
+    await new Promise(resolve => requestAnimationFrame(resolve))
+  }
 }
 
 beforeEach(() => {
@@ -84,7 +92,7 @@ describe('唯一路由表', () => {
     const shell = routes.find(route => Array.isArray(route.children))
     expect(shell.path).toBe('/')
     expect(shell.children).toHaveLength(8)
-    expect(shell.children.map(child => child.path)).toEqual(['', 'stations', 'chargers', 'users', 'flows', 'predictions', 'accounts', 'ops'])
+    expect(shell.children.map(child => child.path)).toEqual(['', 'stations', 'chargers', 'users', 'flows', 'appeals', 'accounts', 'ops'])
     expect(routes[routes.length - 1].path).toBe('/:pathMatch(.*)*')
     expect(routes[routes.length - 1].redirect).toBe('/')
   })
@@ -133,6 +141,20 @@ describe('页面骨架与侧栏', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/components/AdminShell.vue'), 'utf8')
     expect(source).toContain('<Transition name="page" mode="out-in">')
     expect(source).toContain('<RouterView v-slot="{ Component, route: current }">')
+    // 关掉 CSS 过渡会让离场同步结束，out-in 的重渲染重入 patch 后内容会全部消失。
+    expect(source).not.toContain(':css="false"')
+  })
+
+  it('侧栏切换路由后新页面必须重新出现，而不是只剩空内容区', async () => {
+    const { wrapper, router } = await mountShell()
+    expect(wrapper.get('[data-testid="admin-content"]').find('[data-testid="page-stub"]').exists()).toBe(true)
+
+    for (const destination of ['/stations', '/chargers', '/accounts', '/']) {
+      await router.push(destination)
+      await frames()
+      expect(router.currentRoute.value.path).toBe(destination)
+      expect(wrapper.get('[data-testid="admin-content"]').find('[data-testid="page-stub"]').exists()).toBe(true)
+    }
   })
 
   it('窄屏（<1024px）侧栏收为抽屉，可由顶栏按钮开合并由遮罩关闭', async () => {
@@ -163,7 +185,7 @@ describe('页面骨架与侧栏', () => {
     await flush(6)
     await settle(2)
 
-    expect(harness.indexOf('POST', '/admin/auth/logout')).toBe(0)
+    expect(harness.indexOf('POST', '/auth/logout')).toBe(0)
     expect(auth.isLoggedIn).toBe(false)
     expect(auth.token).toBeNull()
     expect(sessionStorage.getItem('ncs.admin.accessToken')).toBeNull()

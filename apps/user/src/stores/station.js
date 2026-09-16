@@ -1,8 +1,12 @@
 import { defineStore } from 'pinia'
-import { fetchChargers, fetchQuote, fetchRoute, fetchStation, fetchStationReviews, fetchStations } from '../api/station'
+import { fetchChargers, fetchStation, fetchStationReviews, fetchStations } from '../api/station'
 import { getCurrentLocation, presetLocation, GeolocationError } from '../services/geolocation'
 
-/** 用户位置状态：unknown / loading / success / failed / unsupported。 */
+/**
+ * 站点与定位状态。经纬度始终是整数 E6 度；未知位置时不下发坐标参数。
+ * 旧契约的 /quote 与 /route 在 Go 契约中不存在（单价取站点详情、路线规划待 A-07），
+ * 因此这里不再维护 quote/route 状态。
+ */
 const createLocation = () => ({
   status: 'unknown',
   latitudeE6: null,
@@ -36,14 +40,8 @@ export const useStationStore = defineStore('userStation', {
     chargerTypeTab: 1,
     chargers: [],
     chargersLoading: false,
-    quote: null,
-    quoteLoading: false,
     reviews: [],
-    reviewsLoading: false,
-    route: null,
-    routeLoading: false,
-    routeError: '',
-    routeMode: 'driving'
+    reviewsLoading: false
   }),
 
   getters: {
@@ -157,21 +155,6 @@ export const useStationStore = defineStore('userStation', {
       }
     },
 
-    async loadQuote(stationId, chargerType) {
-      if (chargerType !== undefined) this.chargerTypeTab = chargerType
-      this.quoteLoading = true
-      try {
-        this.quote = await fetchQuote(stationId, { chargerType: this.chargerTypeTab })
-        return this.quote
-      } catch (error) {
-        this.quote = null
-        this.error = error?.userMessage || '预估价格查询失败'
-        return null
-      } finally {
-        this.quoteLoading = false
-      }
-    },
-
     async loadReviews(stationId) {
       this.reviewsLoading = true
       try {
@@ -183,30 +166,6 @@ export const useStationStore = defineStore('userStation', {
         return []
       } finally {
         this.reviewsLoading = false
-      }
-    },
-
-    /** 路线规划：起点来自定位或 keyword，绝不把目标电站坐标当作起点。 */
-    async loadRoute(stationId, { mode } = {}) {
-      if (mode) this.routeMode = mode
-      this.routeLoading = true
-      this.routeError = ''
-      const hasCoordinate = this.hasLocation
-      try {
-        this.route = await fetchRoute(stationId, {
-          latitudeE6: hasCoordinate ? this.location.latitudeE6 : undefined,
-          longitudeE6: hasCoordinate ? this.location.longitudeE6 : undefined,
-          keyword: hasCoordinate ? undefined : this.keyword || undefined,
-          mode: this.routeMode,
-          coordinateType: hasCoordinate ? this.location.coordinateType || 'wgs84' : undefined
-        })
-        return this.route
-      } catch (error) {
-        this.route = null
-        this.routeError = error?.userMessage || '路线规划失败，请重新定位或输入地址后重试'
-        return null
-      } finally {
-        this.routeLoading = false
       }
     }
   }

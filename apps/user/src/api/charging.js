@@ -1,62 +1,60 @@
 import { api } from './http'
+import { flattenPage, mapOrder, isActiveOrder } from './contract'
 
-/** 充电流程与钱包接口（接口文档 §3、§5）。所有写入都必须携带 Idempotency-Key。 */
+/**
+ * 订单生命周期与钱包接口（Go 契约）。
+ *
+ * Go 的充电模型用 CREATED 订单承载预约：
+ * 创建订单即绑定具体设备并保留 15 分钟，用户在充电页明确确认后才发送 START，
+ * START/STOP 是 202 异步设备命令，结算由设备回执驱动，
+ * 结束充电 = POST stop 后轮询订单至 COMPLETED 再取小票。
+ * 所有业务写入都必须携带 Idempotency-Key（超时重试复用同一键）。
+ */
 
-/** §5.1 请求充电或入队。 */
-export function requestFlow({ stationId, chargerType = 1, preferredChargerId = null }, idempotencyKey) {
-  return api.post('/user/flows', { stationId, chargerType, preferredChargerId }, { idempotent: true, idempotencyKey })
+/** 预约设备：按具体 chargerId 创建 CREATED 订单并返回 reservedUntil。 */
+export function createOrder({ chargerId }, idempotencyKey) {
+  return api.post('/orders', { chargerId }, { idempotent: true, idempotencyKey }).then(mapOrder)
 }
 
-/** §5.2 当前活动流程；登录、重连和刷新后恢复页面的唯一入口。 */
-export function fetchActiveFlow() {
-  return api.get('/user/flows/active')
+/** 当前活动订单：Go 无专用端点，取最近订单列表中第一个未终态的订单。 */
+export async function fetchActiveOrder() {
+  const data = await api.get('/orders', { page: 1, pageSize: 50 }).then(flattenPage)
+  const items = Array.isArray(data.items) ? data.items : []
+  const active = items.find(item => isActiveOrder(item.status))
+  return active ? mapOrder(active) : null
 }
 
-/** §5.3 流程详情（含待确认报价快照）。 */
-export function fetchFlow(flowNo) {
-  return api.get(`/user/flows/${encodeURIComponent(flowNo)}`)
+/** 订单详情（也是小票的数据源）。 */
+export function fetchOrder(orderNo) {
+  return api.get(`/orders/${encodeURIComponent(orderNo)}`).then(mapOrder)
 }
 
-/** §5.4 确认报价并预约。 */
-export function confirmQuote(flowNo, { quoteNo, flowVersion }, idempotencyKey) {
-  return api.post(`/user/flows/${encodeURIComponent(flowNo)}/quote-confirmations`, { quoteNo, flowVersion }, { idempotent: true, idempotencyKey })
+/** 取消订单：Go 仅允许尚未开始的订单取消。 */
+export function cancelOrder(orderNo, idempotencyKey) {
+  return api.post(`/orders/${encodeURIComponent(orderNo)}/cancel`, {}, { idempotent: true, idempotencyKey }).then(mapOrder)
 }
 
-/** §5.5 取消流程。 */
-export function cancelFlow(flowNo, { reasonCode = 'USER_CANCELLED', flowVersion }, idempotencyKey) {
-  return api.post(`/user/flows/${encodeURIComponent(flowNo)}/cancellations`, { reasonCode, flowVersion }, { idempotent: true, idempotencyKey })
+/** 开始充电：202 表示命令已受理，设备回执后才进入 CHARGING。 */
+export function startOrder(orderNo, idempotencyKey) {
+  return api.post(`/orders/${encodeURIComponent(orderNo)}/start`, {}, { idempotent: true, idempotencyKey }).then(mapOrder)
 }
 
-/** §5.6 开始充电。 */
-export function startFlow(flowNo, { flowVersion, targetAmountCent = null, balanceFloorCent = null }, idempotencyKey) {
-  return api.post(
-    `/user/flows/${encodeURIComponent(flowNo)}/start`,
-    { flowVersion, targetAmountCent, balanceFloorCent },
-    { idempotent: true, idempotencyKey }
-  )
+/** 停止充电：202 受理后由回执驱动结算，调用方轮询订单终态。 */
+export function stopOrder(orderNo, idempotencyKey) {
+  return api.post(`/orders/${encodeURIComponent(orderNo)}/stop`, {}, { idempotent: true, idempotencyKey }).then(mapOrder)
 }
 
-/** §5.7 充电进度；服务端按快照计算，客户端按秒轮询即可。 */
-export function fetchProgress(flowNo) {
-  return api.get(`/user/flows/${encodeURIComponent(flowNo)}/progress`)
-}
-
-/** §5.8 结束充电并结算，返回 SettlementReceipt。 */
-export function settleFlow(flowNo, { flowVersion, reasonCode = 'USER_STOPPED' }, idempotencyKey) {
-  return api.post(`/user/flows/${encodeURIComponent(flowNo)}/settlements`, { flowVersion, reasonCode }, { idempotent: true, idempotencyKey })
-}
-
-/** §3.1 钱包概览（金额均为整数分）。 */
+/** 钱包概览（整数分）。Go 契约没有欠费模型。 */
 export function fetchWallet() {
-  return api.get('/user/wallet')
+  return api.get('/wallet').then(data => ({ ...data, debtCent: 0, availableCent: data.balanceCent ?? 0 }))
 }
 
-/** §3.2 虚拟充值，amountCent 范围 1～1,000,000 分。 */
+/** 虚拟充值，amountCent 范围 1～1,000,000 分。 */
 export function rechargeWallet(amountCent, idempotencyKey) {
-  return api.post('/user/wallet/recharges', { amountCent }, { idempotent: true, idempotencyKey })
+  return api.post('/wallet/top-up', { amountCent }, { idempotent: true, idempotencyKey })
 }
 
-/** §3.3 钱包流水。 */
-export function fetchWalletTransactions({ type, fromAt, toAt, page, pageSize } = {}) {
-  return api.get('/user/wallet/transactions', { type, fromAt, toAt, page, pageSize })
+/** 钱包流水。 */
+export function fetchWalletTransactions({ type, page, pageSize } = {}) {
+  return api.get('/wallet/transactions', { type, page, pageSize }).then(flattenPage)
 }
