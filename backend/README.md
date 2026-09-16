@@ -18,7 +18,7 @@
   完成（会话级 advisory lock + 每文件独立事务），`NCS_POSTGRES_MAX_CONNS=1`
   也能安全启动。重复执行幂等，篡改已应用迁移会被拒绝。
 - 启动新 Worker 前必须先应用顺序迁移 `0007_charger_command_outcomes.sql`。
-  API 启动会自动执行迁移；独立部署时应先确认 `schema_migrations` 已包含版本 7。
+  API 启动会自动执行迁移；独立部署时应先确认 `schema_migrations` 已包含当前二进制嵌入的全部迁移（当前最高版本 12）。
 - 开发种子数据：`seeds/dev_seed.sql`，仅用于开发库，禁止用于预发/生产：
 
   ```bash
