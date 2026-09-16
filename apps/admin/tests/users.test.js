@@ -155,3 +155,74 @@ describe('冻结与解冻（Go 契约：两个 POST 端点，无 body）', () =>
     expect(users.error).toBe('用户不存在')
   })
 })
+
+describe('手工建档（Go 契约）', () => {
+  /** Go UserRecord 契约字段（POST /admin/users 的 201 响应）。 */
+  const GO_USER_RECORD = {
+    id: 31,
+    phone: '13912340000',
+    displayName: '老王',
+    status: 'ACTIVE',
+    balanceCent: 0
+  }
+
+  it('建档走 POST /admin/users；空昵称不下发，成功后重载列表', async () => {
+    harness = installFetch([okResponse(GO_USER_RECORD), okResponse(goPage([]))])
+
+    await expect(users.createUser({ phone: '13912340000', displayName: '' })).resolves.toBe(true)
+
+    const index = harness.indexOf('POST', '/admin/users')
+    expect(index).toBe(0)
+    // 空昵称不发送：昵称由服务端取注册默认（用户+手机号后四位）。
+    expect(harness.bodyOf(index)).toEqual({ phone: '13912340000' })
+    expect(harness.headersOf(index)['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/)
+    expect(users.notice).toContain('#31')
+  })
+
+  it('手机号已注册（409 ALREADY_EXISTS）按业务冲突提示', async () => {
+    harness = installFetch([failResponse({ status: 409, code: 5, userMessage: '该手机号已注册' })])
+
+    await expect(users.createUser({ phone: '13912340000', displayName: '老王' })).resolves.toBe(false)
+    expect(users.conflict).toContain('已注册')
+  })
+
+  it('批量建档走 POST /admin/users/batch，整页提交并按 userCount 提示', async () => {
+    harness = installFetch([
+      okResponse({
+        userCount: 2,
+        created: [
+          { id: 32, phone: '13912340001', displayName: '用户0001', status: 'ACTIVE', balanceCent: 0 },
+          { id: 33, phone: '13912340002', displayName: '小李', status: 'ACTIVE', balanceCent: 0 }
+        ]
+      }),
+      okResponse(goPage([]))
+    ])
+
+    await expect(
+      users.batchCreateUsers([
+        { phone: '13912340001', displayName: '' },
+        { phone: '13912340002', displayName: '小李' }
+      ])
+    ).resolves.toBe(true)
+
+    const index = harness.indexOf('POST', '/admin/users/batch')
+    expect(index).toBe(0)
+    expect(harness.bodyOf(index)).toEqual({
+      users: [
+        { phone: '13912340001', displayName: undefined },
+        { phone: '13912340002', displayName: '小李' }
+      ]
+    })
+    expect(harness.headersOf(index)['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/)
+    expect(users.notice).toContain('2')
+  })
+
+  it('批量页内存在已注册手机号（409）时整页拒绝', async () => {
+    harness = installFetch([failResponse({ status: 409, code: 5, userMessage: '页内存在已注册的手机号' })])
+
+    await expect(
+      users.batchCreateUsers([{ phone: '13912340000', displayName: '' }])
+    ).resolves.toBe(false)
+    expect(users.conflict).toContain('整页未创建')
+  })
+})

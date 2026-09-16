@@ -36,6 +36,37 @@ export function setUserStatus(userId, { status }, { idempotencyKey } = {}) {
     .then(mapUser)
 }
 
+/**
+ * 手工建档（POST /admin/users）：为用户名下的手机号建立账号。
+ *
+ * 账号出生即自注册形态：ACTIVE、零余额钱包、无密码——用户仍走短信登录，
+ * 因此这里不接受任何凭据；操作员替用户选的密码是用户从未同意过的凭据。
+ * 手机号已注册时服务端返回 409（ALREADY_EXISTS），不是可跳过的警告。
+ */
+export function createUser({ phone, displayName } = {}, { idempotencyKey } = {}) {
+  return api.post(
+    '/admin/users',
+    { phone, displayName: displayName || undefined },
+    { idempotent: true, idempotencyKey }
+  )
+}
+
+/**
+ * 批量建档（POST /admin/users/batch）：一次最多 1000 个账号，整批同事务。
+ * 页内任一手机号已存在（含页内重复）则全部不创建，服务端逐条点名不会发生，
+ * 因此页内查重在提交前由视图层完成。
+ */
+export function createUsersBatch({ users } = {}, { idempotencyKey } = {}) {
+  return api.post(
+    '/admin/users/batch',
+    { users: (Array.isArray(users) ? users : []).map(user => ({
+      phone: user.phone,
+      displayName: user.displayName || undefined
+    })) },
+    { idempotent: true, idempotencyKey }
+  )
+}
+
 /** 用户账务查询（A-04 第 7 步）：Go 契约 /admin/users/{userId}/transactions。 */
 export function fetchUserTransactions(userId, { type, page, pageSize } = {}) {
   return api

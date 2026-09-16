@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { fetchUser, fetchUserOrders, fetchUserTransactions, fetchUsers, setUserStatus } from '../api/user'
+import { createUser, createUsersBatch, fetchUser, fetchUserOrders, fetchUserTransactions, fetchUsers, setUserStatus } from '../api/user'
 import { ERROR_CODES } from '../api/http'
 import { toInteger } from '../utils/format'
 import { useAuthStore } from './auth'
@@ -179,6 +179,64 @@ export const useUsersStore = defineStore('adminUsers', {
     },
 
     /** §6.6 冻结或解冻：失败时若版本冲突则重载并提示。 */
+    /**
+     * 手工建档（POST /admin/users）：账号出生即自注册形态，成功后重载列表。
+     * 409（手机号已注册）按业务冲突提示，不提示重试。
+     */
+    async createUser({ phone, displayName }) {
+      const auth = useAuthStore()
+      this.saving = true
+      this.error = ''
+      this.notice = ''
+      this.conflict = ''
+      try {
+        const data = await auth.runWithReauth(({ idempotencyKey }) =>
+          createUser({ phone, displayName }, { idempotencyKey })
+        )
+        this.notice = `已建档 #${data.id}（${data.displayName || phone}），钱包余额 0.00 元`
+        await this.load()
+        return true
+      } catch (error) {
+        if (error?.code === ERROR_CODES.ALREADY_EXISTS) {
+          this.conflict = '该手机号已注册，不能重复建档'
+        }
+        this.error = error?.userMessage || '用户建档失败'
+        return false
+      } finally {
+        this.saving = false
+      }
+    },
+
+    /**
+     * 批量建档（POST /admin/users/batch）：一页 1..1000 个账号，整批同事务。
+     * 服务端 409 时整页不创建，提示保持页内手机号唯一后重交。
+     */
+    async batchCreateUsers(usersPayload) {
+      const auth = useAuthStore()
+      this.saving = true
+      this.error = ''
+      this.notice = ''
+      this.conflict = ''
+      try {
+        const data = await auth.runWithReauth(({ idempotencyKey }) =>
+          createUsersBatch({ users: usersPayload }, { idempotencyKey })
+        )
+        const created = Array.isArray(data.created) ? data.created : []
+        const count = toInteger(data.userCount) ?? created.length
+        this.notice = `已建档 ${count} 个账号，钱包余额均为 0.00 元`
+        await this.load()
+        return true
+      } catch (error) {
+        if (error?.code === ERROR_CODES.ALREADY_EXISTS) {
+          this.conflict = '页内存在已注册的手机号，整页未创建；请核对后重新提交'
+        }
+        this.error = error?.userMessage || '批量建档失败'
+        return false
+      } finally {
+        this.saving = false
+      }
+    },
+
     async setStatus(user, status, reason) {
       const auth = useAuthStore()
       this.saving = true
