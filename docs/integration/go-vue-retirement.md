@@ -8,8 +8,9 @@
 | 项目 | 值 |
 | --- | --- |
 | fork 分支 | `codex/go-vue-retirement`（fork 独占，不触碰负责人 `develop`） |
-| 上游基线 | `heguangV/charging-station-platform` 的 `develop`（本分支为其后 24 个提交） |
-| 上游提交 | 退役 PR 由项目负责人发起；合并与分支保护调整不在本分支范围内 |
+| 上游基线 | `heguangV/charging-station-platform` 的 `develop`（`422ee83`；本分支为其后 30 个提交） |
+| fork 合并目标 | `cjyhjy/charging-station-platform:develop`；用于 fork 自托管部署 |
+| 上游提交 | 如需回馈上游，由项目负责人另行审查退役范围；不得用本 PR 绕过上游分支保护 |
 | 运行入口 | `backend/cmd/{api,worker,outbox-publisher,mock-gateway}`、`apps/{user,admin,dashboard}` |
 | 归档目录 | `legacy/`（C++/Crow/Qt/SQLite、旧客户端、设备模拟器、旧 CMake 与旧运维脚本） |
 
@@ -48,16 +49,25 @@
 
 ### fork CI 运行结果
 
-推送分支 `codex/go-vue-retirement` 后，fork 的两个工作流均通过（不涉及上游 `develop`）：
+推送分支 `codex/go-vue-retirement` 后，fork 的三个工作流均通过（不涉及上游 `develop`）：
 
 | 工作流 | 运行 | 结果 |
 | --- | --- | --- |
-| Go integration | [35137501382](https://github.com/cjyhjy/charging-station-platform/actions/runs/35137501382) | 通过；`go-integration`、`dashboard`、`go-windows-build` 三个作业全部成功 |
-| Web clients | [35137501384](https://github.com/cjyhjy/charging-station-platform/actions/runs/35137501384) | 通过；`web (user)`、`web (admin)` 均成功 |
+| Go integration | [35180714372](https://github.com/cjyhjy/charging-station-platform/actions/runs/35180714372) | 通过；真实 PostgreSQL/Redis、1312 项测试及子用例、四进程闭环、备份恢复、Nginx 演练、Windows 构建、dashboard 浏览器测试均成功；Compose 实际启动与 Web/API 健康检查成功 |
+| Web clients | [35180714424](https://github.com/cjyhjy/charging-station-platform/actions/runs/35180714424) | 通过；`web (user)`、`web (admin)` 的测试与构建均成功 |
+| Container images | [35180714408](https://github.com/cjyhjy/charging-station-platform/actions/runs/35180714408) | 通过；API、Worker、Publisher、模拟网关及三套 Web 共 7 个镜像构建并发布到 GHCR |
 
 CI 证据（`go-integration` 作业上传的 `go-integration-evidence` 制品）：真实 PostgreSQL 18 与 Redis 7.4 上
 `1312 tests/subtests passed, 0 skipped, 0 failed`（20 个包，`-race`）；四进程充电闭环 `PASS`；
 备份恢复演练 `RESTORED_SCHEMA_VERSION=12`、`RTO_MINUTES=0.02`。
+
+## fork 负责人合并与部署步骤
+
+1. 在 `cjyhjy/charging-station-platform` 审查 `codex/go-vue-retirement` 到 `develop` 的 Pull Request，确认上述三个工作流在待合并提交上均为绿色。
+2. 合并后从 fork 的 `develop` 创建部署标签或固定提交 SHA；不要使用浮动分支作为生产回滚锚点。
+3. 按[自托管部署说明](../deployment-self-host.md)生成服务器专用 `.env`，先在只绑定回环地址的测试部署验收，再配置 HTTPS 域名入口。
+4. 旧 C++/Crow/Qt/SQLite 已在本分支移入 `legacy/` 并退出默认构建和 CI；fork 合并时无需再合入上游 #44，也不要重复 cherry-pick #44/#47/#48。上游 #44 的关闭与替代仍按[干净前端合并指南](frontend-clean-merge-guide.md)由上游项目负责人处理。
+5. 回滚应用时部署上一已验证提交；若需回滚代码合并，revert 本 PR 的合并提交。PostgreSQL 数据卷按备份/恢复流程单独处理，不能通过 Git 回滚。
 
 浏览器联调（真实 Go API + PostgreSQL + Redis + 模拟网关，非 mock 数据）：
 
