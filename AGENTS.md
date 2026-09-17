@@ -1,5 +1,9 @@
 # NCS 仓库 Agent 规则
 
+## 当前 fork 分支技术栈
+
+本分支经用户授权验证 Go/PostgreSQL/Redis + Vue 替代栈。正式源码位于 `backend/` 与 `apps/{user,admin,dashboard}`，厂商适配在 `backend/internal`，只读 Agent 边界保持。旧 C++/Qt/SQLite 与脚本归档至 `legacy/`，下文对应旧工程路径、CMake/CTest/clang 要求仅适用于历史版本；当前运行 `scripts/check.sh`、`scripts/test-backend.sh` 与各 Web 测试/构建。不得用归档旧测试代替 Go 功能覆盖，不得将迁移缺口标记完成。其他安全、需求与 Git 规则继续适用。
+
 ## 适用范围
 
 本文件适用于整个仓库。子目录可通过更具体的 `AGENTS.md` 补充局部规则，但不得降低本文件的要求。
@@ -49,6 +53,10 @@
 - UI 改动应按需检查加载、空数据、失败和恢复状态。
 - 数据库或协议改动应检查失败回滚、并发、幂等重试和兼容性。
 - 可执行目标发生变化时运行烟雾测试；每次修改均运行 `git diff --check`。
+- 提交前运行 `./scripts/check.sh`。脚本在本地检查相对 `HEAD` 的已暂存、未暂存和未跟踪
+  C/C++ 文件；复现 Pull Request 检查时通过 `NCS_CHECK_BASE_REF=<目标基线>` 覆盖完整变更集。
+- 批量运行 `clang-format` 前必须先把输入限制为 `.cpp`、`.h`，不得把 CMake、Python、文档或
+  其他格式文件交给 C++ 格式化器。
 - 工具链满足 Qt 6.2.x、CMake 3.24+、Ninja 和 GCC 11+ 时，优先执行：
 
 ```bash

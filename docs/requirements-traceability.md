@@ -1,6 +1,22 @@
-# 工程基础需求追踪
+# 需求追踪与阶段状态
 
-本表只追踪研发阶段一及项目治理基础，不替代完整需求矩阵。状态定义：完成 = 产物存在且已验证；部分完成 = 已有产物但仍有明确退出条件；未开始 = 尚无实现证据。
+## fork 退役候选状态
+
+本轮仅调整技术栈入口、源码归档和 CI，不改变完整需求矩阵各业务条目的状态。矩阵中的历史 SQLite、Qt、大屏和 ML 完成证据不等于 Go 等价验证；持续集成条目仍为进行中。当前证据与阻塞缺口见 [退役说明](integration/go-vue-retirement.md)。
+
+退役分支 `codex/go-vue-retirement` 已在 `cjyhjy` fork 推送并跑通 CI（Go 集成含真实 PostgreSQL/Redis、四进程闭环与备份恢复演练；三个 Web 客户端测试与构建），本机另完成车主端到管理端的浏览器端到端联调。仍未迁移并在退役说明中逐项记录的能力包括：运营大屏 `/api/v1/dashboard/*` 契约、行政区价格版本、管理端备份界面、管理员二次验证、服务端路线规划、ML 与大屏指标、真实设备协议与外部供应商服务。这些缺口的业务条目状态保持原样，未标记完成。
+
+本表按交付阶段汇总各模块的产物与验证证据，与完整需求矩阵（九列）同步维护。状态定义：完成 = 产物存在且已验证；部分完成 = 已有产物但仍有明确退出条件；未开始 = 尚无实现证据。逐条任务状态以 `docs/01需求矩阵-NCS充电桩管理平台.xls` 的 310 条明细为准，本表不重复其内容。
+
+## Go 迁移验证说明（2026-09-16）
+
+下列阶段表记录历史 C++/Qt/SQLite 交付，不能直接作为 Go/PostgreSQL/Web 的完成证明。
+当前隔离分支的 Go、Web、充电闭环及 Agent 超时降级证据见
+[后续验证](integration/codex-followup-verification.md)；本轮关联 NFR-U-01（失败须明确提示），
+未改变需求、业务规则或整体完成状态。完整矩阵中 NFR-U-01 仍为进行中，尚无独立 Agent 条目；
+外部服务实网验收与完整迁移追踪仍未完成。
+
+## 阶段一：工程基础（完成）
 
 | 项目 | 依据 | 产物 | 验证 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -8,11 +24,89 @@
 | 正式 CMake 目标 | 阶段一、NFR-C-01 | `ncs_user`、`ncs_admin`、`ncs_server`、公共库 | 严格警告构建 | 完成 |
 | 分层目录与边界 | 研发指南 §2-3 | `apps/`、`server/`、`core/`、`infrastructure/`、`tests/` | CMake 依赖复核 | 完成 |
 | 配置基础 | NFR-S-*、NFR-D-* | `ApplicationConfig`、`.env.example` | 有效配置与启动测试 | 完成 |
+| 本机开发 HTTP 联调 | NFR-D-01 | 客户端/服务端 `NCS_ALLOW_INSECURE_HTTP`、回环限制、传输日志 | 配置拒绝测试、真实 HTTP 客户端—服务端烟雾测试 | 完成；验收与生产仍强制 HTTPS/WSS |
 | 公共错误码 | 接口文档 §2 | `ErrorCode`、`AppError`、`Result` | 错误码单元测试 | 完成 |
 | 日志基础 | NFR-M-04 | `ApplicationLogger` | 文件、请求 ID、脱敏测试 | 完成 |
-| 测试框架 | 研发指南 §6 | CTest 与基础/烟雾测试 | 4 项测试通过 | 完成 |
-| 本机精确基线构建 | NFR-C-01 | Qt 6.2.x + CMake 3.24+ | 本机工具链报告 | 部分完成：Qt 6.2.4 构建通过；本机 CMake 3.22.1 低于正式门槛 |
-| 数据库与领域 | 阶段二 | schema、迁移、仓储、状态机 | 数据库测试 | 未开始 |
-| Crow 通信 | 阶段三 | REST/WebSocket、会话、调度 | 契约与集成测试 | 未开始 |
+| 测试框架 | 研发指南 §6 | CTest 与单元/数据库/契约/集成/烟雾测试 | 30 项 CTest 注册并运行 | 完成 |
+| 持续集成 | 阶段一 | `.github/workflows/ci.yml` | Ubuntu 全链路通过；Windows 检查修复中 | 部分完成 |
+| 分支与评审 | 研发指南 §7 | `CODEOWNERS`、PR/Issue 模板 | 已有 Pull Request 按模板评审合并 | 完成 |
+| 运行说明 | NFR-D-* | 运维手册、地图接入、发布指南 | 大屏与管理端运行说明待补 | 部分完成 |
+| 本机精确基线构建 | NFR-C-01 | Qt 6.2.x + CMake 3.24+ | 本机工具链报告 | 部分完成：Qt 6.2.4 构建通过；本机 CMake 3.22.1 低于正式门槛，CI 使用 3.24+ |
 
-完整业务、接口与数据库条目继续以项目需求矩阵和 SRS 第 9 节追踪，不得因本表“工程基础完成”而推断后续功能完成。
+## 阶段二：数据与领域（完成）
+
+| 项目 | 依据 | 产物 | 验证 | 状态 |
+| --- | --- | --- | --- | --- |
+| 数据库实现 | UC-D-01、UC-D-03 | `infrastructure/sqlite`（28 表、v1-v8 迁移、WAL、`BEGIN IMMEDIATE`、在线备份） | `ncs_sqlite_repository`：初始化、v5→v8 顺序升级保数据、线程级并发唯一性、幂等重放、整体回滚、重启恢复、备份隔离验证、180/90/30/365 天保留清理与损坏库错误路径 | 完成 |
+| 领域服务 | BR-01~BR-12 | `core/application`（充电流程、钱包、身份、幂等、价格、管理员服务） | `ncs_charge_flow_service`、`ncs_security_services`、`ncs_idempotency_service` 等逐条断言 BR 约束 | 完成 |
+| 完整演示种子 | UC-D-02 | v8 迁移：5 固定站点、48 桩（6 故障）、5 行政区电价、300 用户、90 天约 9000 单/约 900 充值（固定随机种子 `20260901`） | `ncs_sqlite_seed`：五站/设备/电价/历史分布逐条断言、重开幂等、v1→v8 升级与遗留站清理 | 完成 |
+
+## 阶段三：服务端通信（完成）
+
+| 项目 | 依据 | 产物 | 验证 | 状态 |
+| --- | --- | --- | --- | --- |
+| REST 契约 | 接口文档 §2-§12 | `server/controller` 71 个端点（`/api/v1` 受控注册） | `ncs_api_routes`、`ncs_admin_routes`、`ncs_user_identity_routes`、`ncs_user_business_routes`、`ncs_dashboard_ml_routes`、`ncs_common_http` | 完成 |
+| WebSocket 事件 | 接口文档 §13 | `server/websocket`（outbox 投递、进度推送、会话撤销、心跳） | `ncs_websocket_hub`、`ncs_websocket_dispatcher`、`ncs_websocket_routes` | 完成 |
+| 服务端端到端 | NFR-D-01 | `tests/server_smoke_test.py` 虚拟客户端 | 真实 TLS 起停、业务全流程、重启恢复 | 完成（服务端侧） |
+| 会话与验证码 | UC-D-01 | 内存会话/验证码服务（容量受限、不落库） | `ncs_security_services` | 完成 |
+
+## 阶段四：用户端（部分完成）
+
+| 项目 | 依据 | 产物 | 验证 | 状态 |
+| --- | --- | --- | --- | --- |
+| 用户端界面 | UC-U-01~UC-U-10 | `apps/user`（默认启动下首页、充电、订单、资料、头像、充值、登出、注销、导航均走真实 REST；`--mock-scenario` 才启用演示服务） | `ncs_user_net_tests`、`ncs_user_smoke`；服务端侧由 `ncs_user_business_routes` 覆盖；真实 REST GUI 证据待归档 | 部分完成：缺真实服务端联调与 UI 验收证据 |
+| 腾讯地图导航 | UC-U-02、UC-U-04 | 系统定位优先、WGS84 坐标转换、手动起点、退化路线检查、导航页与明确降级提示 | 2026-09-07：7 项导航/契约/烟雾测试通过；420×760 Qt 页面验证定位失败、模拟起点、路线摘要与空折线状态，见 [验证记录](navigation-fix-2026-09-07.md)。2026-09-05 的真实腾讯地图验收保留为历史证据 | 部分完成：修复与状态回归已验证；VM GeoClue 禁用定位，系统定位成功至真实腾讯底图的整条链路待实机验收 |
+| 拍照上传头像 | UC-U-11 | `apps/user` 已有头像 REST 链路；拍照对话框和 Qt Multimedia 采集仍待实现 | 图片处理、二进制网络、无设备 UI、有/无 Multimedia 构建和实机验收 | 部分完成：前置头像 REST 已就绪，仍缺摄像头采集 |
+| 订单评价与场站评论墙 | UC-U-12 | 后端 v9 `order_review` 迁移、`OrderReviewService`、`GET/POST /api/v1/user/orders/{orderNo}/review`（幂等作用域 `u{userId}:review:{orderNo}`）及 `GET /api/v1/user/stations/{id}/reviews` 评论墙（作者脱敏、倒序限量）；桌面端订单卡/小票评价入口、`ReviewDialog` 与场站详情评论板块在线拉取；安卓端订单评价入口与对话框及 `StationDetail` 评论板块（复用同一 REST 契约）；演示模式评论墙含本人评价 | `ncs_order_review_tests`（迁移、所有权、状态、唯一性、幂等、评论墙分组/隔离/排序/脱敏/注销展示/重启持久，标签 contract+integration）；安卓 arm64 debug APK 已重建（含评论墙），真机交互与 UI 验收证据待归档 | 部分完成：后端、桌面端与安卓端实现完成；安卓端待真机验收 |
+
+## 阶段五：管理端（部分完成）
+
+| 项目 | 依据 | 产物 | 验证 | 状态 |
+| --- | --- | --- | --- | --- |
+| 管理服务端 | UC-A-01~UC-A-08 | `server/controller` 管理路由（站点/设备/价格/用户/流程/统计/备份/ML）、登录锁定与二次验证 | `ncs_admin_routes` | 完成 |
+| 管理服务端（管理员账号） | UC-A-09 | 管理员账号列表、创建（OPERATOR）、启用/停用、本人改密，及首个 OWNER 一次性引导（`--bootstrap-owner` + `NCS_ADMIN_BOOTSTRAP_KEY`） | `ncs_admin_account_routes`、`ncs_sqlite_admin_accounts` | 后端部分完成（管理端界面未实现） |
+| 管理端界面 | UC-A-01~UC-A-08 | `apps/admin`（登录、总览、站点、充电桩、用户、预测五页；真实 REST、Bearer、幂等键、请求 ID、响应信封校验） | `ncs_admin_smoke`、`ncs_admin_ui_contract`、`ncs_admin_api_smoke` | 部分完成：缺独立状态表、部分站点/电桩管理动作、订单历史、历史预测对比图和总营收卡 |
+
+## 阶段六：大屏与机器学习（部分完成）
+
+| 项目 | 依据 | 产物 | 验证 | 状态 |
+| --- | --- | --- | --- | --- |
+| 大屏服务端 | UC-W-02、UC-W-04 | Dashboard 路由、分析快照、30 秒原子导出 `dashboard.json` | `ncs_dashboard_ml_routes` | 完成 |
+| 大屏前端 | UC-W-01~UC-W-04 | `apps/dashboard` Vue 大屏（ECharts 按需图表、登录/会话、受权数据与恢复） | 四分辨率 UI、非空 DTO、XSS 与单位回归（见下方大屏前端接入状态） | 部分完成：设备占比口径与受权快照接口待后端接入 |
+| ML 管线 | UC-M-01~UC-M-04 | `ml/`（训练/预测/worker）+ 子进程任务管理 | `ncs_ml_process_manager`、`ncs_periodic_scheduler`、`ncs_dashboard_ml_routes` | 部分完成：任务互斥与超时已验证；30/90 天保留由 `ncs_sqlite_repository` 保留清理块验证；训练/评估质量未验证 |
+
+### 大屏前端接入状态
+
+本节仅记录 `apps/dashboard/` 前端产物，不变更后端条目状态。详细证据见 [PR7 前端修复记录](dashboard-pr7-fixes.md)。
+
+| 项目 | 依据 | 产物 | 验证 | 状态 |
+| --- | --- | --- | --- | --- |
+| 大屏布局与图表 | UC-W-01、UC-W-03 | Vue 大屏、ECharts 按需图表、空态和安全 tooltip | 四分辨率 UI、非空 DTO、XSS 和单位回归 | 部分完成：设备数量占比与累计统计口径待后端接入 |
+| 受权数据与恢复 | UC-W-02 | 整数单位 DTO、受权 summary、当前会话内存过期提示 | 空数据、错误、恢复、契约测试 | 部分完成：受权文件快照接口及非公开导出目录待后端提供 |
+| 登录与会话 | UC-W-04 | 登录/退出、401/403 清空、请求取消、8 小时/30 分钟期限 | 单元/浏览器/CTest | 部分完成：Crow 页面鉴权和即时撤销通知待协作验收 |
+
+## 阶段八：新增增强任务（未开始）
+
+| 项目 | 依据 | 规划产物 | 验证 | 状态 |
+| --- | --- | --- | --- | --- |
+| 拍照头像 | UC-U-11 | `apps/user/avatar`、`AvatarCaptureDialog`、可选 Qt Multimedia 接入 | 专项实施路径 A0～A5 | 未开始 |
+| 设备通信模拟器 | UC-X-01 | `tools/device_link_sim` 独立 CMake、固定数组帧编解码和非法帧测试 | 独立 `device_link_core_test`；S1～S4 的连接、5 桩并发和 GUI 仍待实现 | 部分完成：通信帧核心已实现 |
+| 安卓用户端 | Android 用户端 | `apps/mobile` Qt Quick 用户端、真实 REST、短信登录、站点、订单、资料和拍照头像 | `tests/mobile` 独立契约/布局测试；APK 构建与真机验收分别记录 | 部分完成：已实现核心业务；2026-09-09 补充 GPS 坐标系与头像版本回归，见 [PR 补充验证](pr36-followup.md) |
+
+## 非功能需求状态
+
+| NFR 组 | 状态 | 证据 / 缺口 |
+| --- | --- | --- |
+| NFR-C-03、NFR-C-04、NFR-M-02、NFR-M-03、NFR-S-02~S-05、NFR-R-01、NFR-R-03 | 完成 | 编译选项与并发基元、分层 grep 无 SQL、458 处参数绑定、手机号脱敏、会话终端数、WS 无敏感数据、启动恢复、备份与 7 天/4 周保留均有测试 |
+| NFR-M-01 | 部分完成 | `scripts/check.sh` 行数门禁带存量例外清单，大文件待拆分 |
+| NFR-M-04 | 完成 | 结构化日志与脱敏已测；ops_log/device_command 180 天、outbox 7/30 天保留清理已实现并逐边界测试（含外键完整性门禁） |
+| NFR-S-01 | 部分完成 | PBKDF2-HMAC-SHA256（600k 次迭代、版本化摘要）代替规格首选 Argon2id，偏差已在安全基线记录 |
+| NFR-R-02 | 完成 | 打开失败、锁等待有处理与测试；损坏库三类错误路径（非 SQLite 文件、页 1 数据区破坏、截断）均断言明确报错（`ncs_sqlite_corruption`） |
+| NFR-U-01、NFR-U-02、NFR-C-01、NFR-C-02、NFR-D-01 | 部分完成 | 提示/窗口尺寸/跨平台/路径重定位有实现，缺系统性验收；Windows CI 修复中 |
+| NFR-P-02、NFR-P-04、NFR-P-05 | 完成 | 营收 30 天聚合微基准（`ncs_sqlite_revenue_bench`：中位 11.8ms、最差 14.3ms）；3000 账号/100 在线/50 排队/48 充电与 20rps 持续/50rps 峰值/100 WS 全量压测证据（`tests/performance/evidence/`，8/8 阈值通过） |
+| NFR-P-01、NFR-P-03、NFR-D-02 | 未开始 | 客户端页面刷新 CPU 与严格单机部署未验收 |
+
+## 维护规则
+
+- 状态变化先更新需求矩阵，再同步本表；标"完成"必须同时给出产物与验证证据。
+- 当前已知验收欠账：用户端真实联调、管理端 UI、大屏前端、NFR-P-01/P-03 客户端页面性能、NFR-D-02 严格单机部署验收。

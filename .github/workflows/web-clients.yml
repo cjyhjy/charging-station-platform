@@ -1,0 +1,32 @@
+name: Web clients
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main, 'codex/go-vue-retirement']
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        app: [user, admin]
+    defaults:
+      run:
+        working-directory: apps/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - run: npm run test
+      - run: npm run build

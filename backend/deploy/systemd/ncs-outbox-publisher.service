@@ -1,0 +1,26 @@
+# NCS Go Outbox Publisher（单活：PostgreSQL advisory lock）
+[Unit]
+Description=NCS Go Outbox Publisher
+After=network-online.target ncs-migrate.service ncs-api.service
+Requires=ncs-migrate.service ncs-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ncs
+Group=ncs
+EnvironmentFile=/etc/ncs/backend.env
+ExecStart=/usr/local/bin/ncs-outbox-publisher
+Restart=always
+RestartSec=2
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/ncs
+
+[Install]
+WantedBy=multi-user.target

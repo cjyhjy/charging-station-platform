@@ -1,0 +1,12 @@
+[Unit]
+Description=NCS restore drill timer
+
+[Timer]
+# Sunday 06:00, after the backup and its integrity check.
+OnCalendar=Sun *-*-* 06:00:00
+RandomizedDelaySec=1800
+Persistent=true
+Unit=ncs-restore-drill.service
+
+[Install]
+WantedBy=timers.target

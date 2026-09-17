@@ -4,7 +4,7 @@
 | --- | --- |
 | 文档版本 | V1.0 |
 | 接口版本 | `/api/v1` |
-| 通信 | HTTPS REST + JSON；实时事件使用鉴权 WebSocket |
+| 通信 | 默认及正式环境使用 HTTPS REST + JSON；实时事件使用鉴权 WebSocket；仅 NFR-D-01 允许的本机开发模式可使用 HTTP/WS |
 | 数据实现 | Crow Service → SQLite，客户端不得直接访问数据库 |
 | 适用模块 | Qt 用户端、Qt 管理端、Web 大屏、ML 子进程 |
 | 关联需求 | `UC-U`、`UC-A`、`UC-D`、`UC-W`、`UC-M`、`BR-01`～`BR-12` |
@@ -21,6 +21,8 @@
 ```text
 https://127.0.0.1:8443/api/v1
 ```
+
+本机联调可由服务端和客户端同时显式设置 `NCS_ALLOW_INSECURE_HTTP=true`，此时地址为 `http://127.0.0.1:8443/api/v1`，事件地址相应为 `ws://127.0.0.1:8443/api/v1/events`。该例外仅允许 `development` 和数字回环地址；测试、验收、生产或非回环地址必须拒绝明文模式。客户端不得忽略 HTTPS 证书错误。
 
 | 路由前缀 | 调用方 | 权限 |
 | --- | --- | --- |
@@ -110,7 +112,7 @@ Idempotency-Key: <uuid>
 
 ### 1.6 枚举
 
-状态值引用 SRS 的 `BR-12` 及相应用例，数据库约束引用[数据库设计](database-design.md)。电桩类型使用 `0/AC_SLOW`、`1/DC_FAST`。接口同时返回整数 `status` 与显示用 `statusText`；代码分支不得依赖翻译文本。
+状态值引用 SRS 的 `BR-12` 及相应用例，数据库约束引用[数据库设计](database-design.md)。活动流程的未完成/待恢复状态固定为 `10、20、30、40、50、80`，终态为 `60、70、90`；`/flows/active`、活动唯一性检查和注销拦截必须使用同一集合。电桩类型使用 `0/AC_SLOW`、`1/DC_FAST`。接口同时返回整数 `status` 与显示用 `statusText`；代码分支不得依赖翻译文本。
 
 ### 1.7 鉴权与会话
 
@@ -186,7 +188,7 @@ Idempotency-Key: <uuid>
 }
 ```
 
-`purpose` 可取 `LOGIN`、`REGISTER`、`RESET_PASSWORD`。重置密码只允许已绑定手机号。
+`purpose` 可取 `LOGIN`、`REGISTER`、`RESET_PASSWORD`。响应内容与手机号是否已注册无关，统一按冷却、每日上限和容量规则返回，不得暴露手机号是否存在（与 2.3 的防枚举要求一致）；`RESET_PASSWORD` 验证码只会被绑定该手机号的账号验证流程消费。
 
 响应 `data`：
 
@@ -215,7 +217,7 @@ Idempotency-Key: <uuid>
 }
 ```
 
-用户名 3～32 字符，只允许字母、数字和下划线；密码 10～128 字符。用户名和手机号分别唯一。
+用户名 3～32 字符，只允许字母、数字和下划线，且不能为纯数字（避免与手机号登录名混淆）；密码 10～128 字符。用户名和手机号分别唯一。
 
 响应 `data`：
 
@@ -331,7 +333,11 @@ Idempotency-Key: <uuid>
 }
 ```
 
-### 2.11 PUT `/me/credential` — 设置或修改用户名密码
+### 2.11 GET `/me/avatar/content` — 读取当前头像
+
+需要当前用户 Token，只返回当前用户自己的头像内容。成功响应使用服务端保存的真实 `Content-Type`，支持 `ETag` 和条件请求；未设置头像时返回 `NOT_FOUND`。响应不得暴露服务端文件路径，注销后的已删除头像不得继续访问。
+
+### 2.12 PUT `/me/credential` — 设置或修改用户名密码
 
 请求：
 
@@ -346,7 +352,7 @@ Idempotency-Key: <uuid>
 
 已有密码时必须提供 `currentPassword`；无密码或忘记密码时使用已绑定手机号验证码。成功后撤销除当前会话外的其他会话。
 
-### 2.12 DELETE `/me` — 申请注销
+### 2.13 DELETE `/me` — 申请注销
 
 请求：
 
@@ -437,7 +443,7 @@ Idempotency-Key: <uuid>
 
 ### 4.1 GET `/stations` — 附近站点
 
-参数：`latitudeE6`、`longitudeE6`、`keyword`、`chargerType`、`page`、`pageSize`。经纬度缺失时使用演示默认位置并在响应中返回 `locationFallback=true`。
+参数：`latitudeE6`、`longitudeE6`、`keyword`、`chargerType`、`page`、`pageSize`。`keyword` 是待地理编码的当前位置地址，不作为电站名称过滤条件；解析成功后按所得坐标排序全部匹配类型的电站。经纬度缺失且地址解析失败时使用演示默认位置并在响应中返回 `locationFallback=true`。
 
 响应项：
 
@@ -486,6 +492,44 @@ Idempotency-Key: <uuid>
 
 该接口仅供展示，不能作为结算价格承诺；活动流程报价以 §5.3 返回的 `quoteNo` 和快照为准。
 
+### 4.5 GET `/stations/{stationId}/route` — 腾讯地图路线规划
+
+需要用户会话。参数：`latitudeE6`、`longitudeE6`、`keyword`、`mode`、可选 `coordinateType`（`gcj02` 默认，或 `wgs84`）。`mode` 必填且仅允许 `driving`、`walking`、`transit`；经纬度必须成对出现。这里的坐标和 `keyword` 均代表起点，禁止填入目标电站坐标或地址。客户端选择预设模拟位置时传坐标，输入自定义地址时省略经纬度并只传 `keyword`。服务端已有有效坐标时优先使用坐标，否则尝试地理编码 `keyword`，最后才使用演示默认位置。
+
+系统自动定位必须传成对坐标与 `coordinateType=wgs84`；服务端先调用腾讯固定 HTTPS 坐标转换端点（type=1），将 WGS84 转为 GCJ-02 后规划。响应与浏览器 URL 均使用转换后的坐标。坐标类型非法或 WGS84 缺少坐标返回 422；转换失败返回 503（错误码 12），客户端提示重新定位或输入地址，不使用默认位置掩盖转换失败。
+
+服务端使用 `TENCENT_MAP_SERVER_KEY` 请求固定的腾讯地图 HTTPS 路线规划端点；Key 不得出现在响应、URL 日志或客户端配置中。腾讯调用在有界阻塞工作队列执行，超时、无 Key、配额或响应异常时返回成功的降级结果，而不阻断导航页面。
+
+响应 `data`：
+
+```json
+{
+  "stationId": 1,
+  "stationName": "NCS 中关村充电站",
+  "destinationAddress": "北京市海淀区中关村大街 27 号",
+  "mode": "driving",
+  "originLatitudeE6": 39977680,
+  "originLongitudeE6": 116316417,
+  "destinationLatitudeE6": 39983700,
+  "destinationLongitudeE6": 116315200,
+  "distanceMeter": 2300,
+  "durationSecond": 480,
+  "provider": "TENCENT_MAP",
+  "locationFallback": false,
+  "routeFallback": false,
+  "polyline": [
+    {"latitudeE6": 39977680, "longitudeE6": 116316417},
+    {"latitudeE6": 39983700, "longitudeE6": 116315200}
+  ],
+  "steps": [
+    {"instruction": "向东行驶", "distanceMeter": 300, "durationSecond": 60}
+  ],
+  "browserUrl": "https://apis.map.qq.com/uri/v1/routeplan?..."
+}
+```
+
+腾讯路线有效时 `provider=TENCENT_MAP`、`routeFallback=false`。起终点直线距离 ≤5 米，或返回距离 ≤1 米、预计时长 ≤0、折线不足两个有效且不同的点，均视为退化结果，按下述本地降级返回，不能仅凭第三方 status=0 标记成功。腾讯能力不可用时返回 `provider=LOCAL_FALLBACK`、`routeFallback=true`、`durationSecond=0`，`polyline` 只含起终点并以 Haversine 计算 `distanceMeter`；`browserUrl` 仅作为最终用户操作入口。`locationFallback` 只表示起点定位是否退回默认坐标，与路线服务是否降级相互独立。
+
 ## 5. 充电流程接口（`/api/v1/user`）
 
 ### 5.1 POST `/flows` — 请求充电或入队
@@ -524,6 +568,8 @@ Idempotency-Key: <uuid>
 ```
 
 ### 5.2 GET `/flows/active` — 获取当前活动流程
+
+本接口把 `status IN (10,20,30,40,50,80)` 视为未完成或待恢复流程；同一用户最多返回一个。状态 60、70、90 不返回。
 
 无活动流程时返回：
 
@@ -682,7 +728,23 @@ Idempotency-Key: <uuid>
 
 订单、钱包、欠费、钱包流水、设备释放、设备累计值、流程状态和通知 outbox 必须在同一事务完成。重复请求返回同一小票。
 
-## 6. 管理员认证与用户管理（`/api/v1/admin`）
+### 5.9 订单评价（UC-U-12）
+
+`GET /api/v1/user/orders/{orderNo}/review`：Bearer 用户令牌必填，仅可查询本人订单。成功 `data` 为 `{"review":null}`（尚未评价），或 `{"review":{"orderNo":"OR...","rating":5,"content":"充电方便","createdAt":1788825600}}`。不存在或非本人订单均返回 `404 / code=4`。
+
+`POST /api/v1/user/orders/{orderNo}/review`：Bearer 与 UUID `Idempotency-Key` 必填，JSON 白名单仅 `rating`（必填整数 1～5）、`content`（必填字符串，首尾空白移除后 1～500 个 Unicode 码点，不允许 NUL）。业务资格、可见范围和不可修改规则见 SRS `UC-U-12`。
+
+成功 `data` 直接为 `{orderNo,rating,content,createdAt}`，不含 `userId` 等内部信息。使用统一信封、请求 ID 和错误映射。非法字段 `422 / code=2`；状态不允许 `409 / code=15`；已评价且内容不同 `409 / code=5`；相同幂等键的请求体不同 `409 / code=14`。同单相同星级和标准化文字，无论是否换键均返回原记录和原时间。
+
+幂等作用域为 `u{userId}:review:{orderNo}`，永久保存成功响应。写入在 `BEGIN IMMEDIATE` 内核查订单、读取已有评价并插入，数据库主键保证每单唯一；读取和写入均交给阻塞线程池，不占用 Crow 事件循环。评价文本按纯文本显示，不解释为 HTML。
+
+### 5.10 场站评论墙（UC-U-12）
+
+`GET /api/v1/user/stations/{id}/reviews`：Bearer 用户令牌必填。成功 `data` 为 `{"items":[{"author":"张**","rating":5,"content":"充电方便","createdAt":1788825600}]}`，按 `createdAt` 倒序，只读展示所属场站已完成订单的评价，服务端最多返回最新 200 条。`author` 为作者昵称；昵称为空或账号已注销时返回掩码手机号或“已注销用户”。响应不含 `userId`、`orderNo`、完整手机号等个人信息。
+
+场站不存在返回 `404 / code=4`；未登录返回 `401`。查询在阻塞线程池执行，不占用 Crow 事件循环；评价文本按纯文本显示，不解释为 HTML。评论墙为只读视图，不提供编辑、删除或独立写入入口。
+
+## 6. 管理员认证、账号与用户管理（`/api/v1/admin`）
 
 ### 6.1 POST `/auth/login` — 管理员登录
 
@@ -734,6 +796,72 @@ Idempotency-Key: <uuid>
 
 参数与用户端订单列表相同。管理员访问必须写审计日志。
 
+管理员账号管理（SRS `UC-A-09`）使用统一 `AdminAccount` 响应体，只返回 `id`、`username`、`roles`、`status`、`mustChangePassword` 和 `version`，不返回密码、口令哈希或演示密钥：
+
+```json
+{
+  "id": 2,
+  "username": "ops_wang",
+  "roles": ["OPERATOR"],
+  "status": 1,
+  "mustChangePassword": true,
+  "version": 1
+}
+```
+
+账号名只接受 3～32 位字母、数字或下划线并全局唯一；口令只接受 10～128 位，服务端按 NFR-S-01 保存专用哈希。登录锁定沿用 SRS `UC-A-01`：账号或密码错误统一提示且不区分原因，任一账号连续失败 5 次锁定 30 秒，各账号独立计数。演示账号 `admin/123456` 的登录与开发种子行为不受影响。
+
+### 6.8 GET `/accounts` — 管理员账号列表
+
+需要 `OWNER` 权限。参数：`page`、`pageSize`。返回 `items`、`total`、`page`、`pageSize`；演示账号与真实账号一并列出，但本接口不区分演示来源，也不提供账号删除能力。
+
+### 6.9 POST `/accounts` — 创建管理员账号
+
+需要 `OWNER` 权限、重新验证和 `Idempotency-Key`。新建账号角色固定为运营管理员 `OPERATOR`（不授予 `OWNER`/`VIEWER`），状态正常、非演示账号、`mustChangePassword=true`。
+
+请求：
+
+```json
+{
+  "username": "ops_wang",
+  "password": "ncs-Initial-2026",
+  "reason": "新入职运营专员"
+}
+```
+
+- `username`：3～32 位，仅限字母、数字和下划线，全局唯一；
+- `password`：10～128 位，仅用于首次登录，服务端只保存专用哈希；
+- `reason`：2～200 个可见字符，写入审计原因。
+
+响应 HTTP 201 返回 `AdminAccount`。账号名重复返回 `ALREADY_EXISTS`；字段不合规返回 `VALIDATION_FAILED`；权限不足返回 `FORBIDDEN`；超过 15 分钟未重新验证返回 `REAUTH_REQUIRED`。审计动作 `ADMIN_CREATED`（targetType `ADMIN`，targetId 为新建账号 id）。
+
+### 6.10 PUT `/accounts/{adminId}/status` — 停用或启用管理员
+
+需要 `OWNER` 权限、重新验证和 `Idempotency-Key`。请求：
+
+```json
+{
+  "status": 0,
+  "reason": "该管理员离岗",
+  "version": 3
+}
+```
+
+`status`：0 停用、1 启用；`reason` 必填，2～200 个可见字符。停用立即撤销该账号全部会话并阻止登录；启用恢复登录且口令保持不变；OWNER 不得停用本人账号。账号不存在返回 `NOT_FOUND`；`version` 过期返回 `VERSION_CONFLICT`；停用自己或字段不合规返回 `VALIDATION_FAILED`。审计动作 `ADMIN_DISABLED` / `ADMIN_ENABLED`。
+
+### 6.11 PUT `/me/password` — 修改本人密码
+
+需要管理员（`OPERATOR`/`OWNER`）登录，无需 `Idempotency-Key`。请求：
+
+```json
+{
+  "currentPassword": "example-old-password",
+  "newPassword": "example-new-password-2026"
+}
+```
+
+`newPassword` 10～128 位。校验当前密码成功后更新口令、清除 `mustChangePassword` 并返回最新 `AdminAccount`；当前密码错误返回 `UNAUTHORIZED`。成功后当前会话保持，该管理员其他终端会话立即失效。审计动作 `ADMIN_PASSWORD_CHANGED`（targetType `ADMIN`）。
+
 ## 7. 管理员站点、设备与价格（`/api/v1/admin`）
 
 ### 7.1 GET `/stations` — 站点列表
@@ -741,6 +869,8 @@ Idempotency-Key: <uuid>
 参数：`status`、`adcode`、`keyword`、`page`、`pageSize`。
 
 ### 7.2 POST `/stations` — 新增站点
+
+需要 `Idempotency-Key`。请求中的初始设备配置用于完成 SRS `UC-A-06` 的组合创建：
 
 请求：
 
@@ -752,13 +882,21 @@ Idempotency-Key: <uuid>
   "adcode": "110108",
   "latitudeE6": 39977680,
   "longitudeE6": 116316417,
-  "businessHours": "00:00-24:00"
+  "businessHours": "00:00-24:00",
+  "initialCharger": {
+    "count": 4,
+    "chargerType": 1,
+    "powerWatt": 60000,
+    "connectorStandard": "GB/T 20234.3"
+  }
 }
 ```
 
+`initialCharger` 必填，`count` 为 1～100；服务端使用站点 `code` 按 `站点编码-DC/AC-两位序号` 生成不重复设备编号。站点和初始设备必须在同一事务中全部创建或全部回滚。`adcode` 必须存在当前生效的区域基础价格版本；本接口不直接创建或修改价格。
+
 ### 7.3 PUT `/stations/{stationId}` — 修改站点
 
-请求字段同创建，并必须带 `version`。不允许通过该接口直接修改价格。
+请求只允许包含 `name`、`address`、`adcode`、`latitudeE6`、`longitudeE6`、`businessHours` 和当前 `version`；不得包含 `initialCharger`。不允许通过该接口直接修改价格，行政区变化后必须能解析到生效的区域基础价格版本。
 
 ### 7.4 POST `/stations/{stationId}/disable` — 停用站点
 
@@ -825,10 +963,12 @@ Idempotency-Key: <uuid>
 {
   "commandNo": "CMD202609020001",
   "status": "PENDING",
-  "chargerStatus": 3,
+  "chargerStatus": 4,
   "createdAt": 1788235200
 }
 ```
+
+`chargerStatus` 为设备实时状态：0 闲置、1 在用、2 故障、3 已停用、4 重启中。创建命令成功后设备立即进入"重启中"，两秒模拟执行期内不可再分配给用户。
 
 充电中设备必须先受控结束并幂等结算，任一步失败均不得直接释放设备。
 
@@ -947,7 +1087,25 @@ Idempotency-Key: <uuid>
 
 ## 10. Web 大屏接口（`/api/v1/dashboard`）
 
-### 10.1 GET `/summary` — 大屏完整快照
+### 10.1 POST `/auth/login` — 大屏登录
+
+不开放注册。运营管理员和决策查看者使用管理员凭据体系登录；请求：
+
+```json
+{
+  "username": "viewer_001",
+  "password": "example-password",
+  "deviceId": "dashboard-browser-a1"
+}
+```
+
+服务端只允许状态正常且具有 `OPERATOR`、`OWNER` 或 `VIEWER` 角色的账号登录。响应返回一次性 `accessToken`、`expiresAt`、`sessionId`、脱敏账号资料和角色列表。Dashboard Token 只允许访问 `/api/v1/dashboard/*` 和 WebSocket，不得调用 `/api/v1/admin/*` 修改接口；账号不存在和密码错误统一返回 `UNAUTHORIZED`。会话最长8小时，连续空闲30分钟后失效。
+
+### 10.2 POST `/auth/logout` — 大屏退出
+
+需要 Dashboard Token。重复退出幂等成功；退出后立即撤销当前会话并停止该会话的 WebSocket 推送。
+
+### 10.3 GET `/summary` — 大屏完整快照
 
 需要运营管理员或决策查看者 Token。响应：
 
@@ -984,9 +1142,11 @@ Idempotency-Key: <uuid>
 
 参数：`taskNo`、`fromAt`、`toAt`、`stationId`、`cursor`、`limit`。`limit` 最大 5000，使用游标分页，不使用大偏移量分页。
 
+响应条目包含 `stationId`、`stationName`、`bucketAt`、`energyMwh`、`orderCount`、`fastOrderCount`、`slowOrderCount`、`operationalChargerCount` 和 `busyDeviceSeconds`；无订单小时也返回零值。响应的 `nextCursor` 为 `null` 时分页结束。
+
 ### 11.2 POST `/model-versions` — 登记模型版本
 
-提交算法、特征 schema 版本、固定随机种子、训练区间、MAE/RMSE/MAPE/WAPE、排除样本数和产物校验和。模型产物路径由服务端生成，ML 不得提交任意文件路径。
+提交 `taskNo`、算法、特征 schema 版本、固定随机种子、训练区间、MAE/RMSE/MAPE/WAPE、朴素基线 MAE/RMSE、排除样本数和产物校验和。服务端以 MAE 与 RMSE 均优于基线判定 `qualified`。模型产物路径由服务端生成，ML 不得提交任意文件路径；产物写入任务专属暂存文件，摘要校验且任务成功后才原子激活。
 
 ### 11.3 POST `/predictions/batch` — 批量回写预测
 
@@ -1014,7 +1174,7 @@ Idempotency-Key: <uuid>
 
 ### 11.4 POST `/tasks/{taskNo}/completion` — 完成任务
 
-请求包含成功状态或安全错误摘要。失败时保留最近成功模型和预测，并标记过期。
+请求包含 `status=SUCCEEDED|FAILED`、可选 `modelVersionNo`、指标摘要和安全错误摘要。成功训练必须引用该任务已登记的模型版本；完成后立即撤销任务令牌。失败时保留最近成功模型和预测，并标记过期。
 
 ## 12. 系统接口（`/api/v1/system`）
 
@@ -1034,17 +1194,29 @@ Idempotency-Key: <uuid>
 wss://127.0.0.1:8443/api/v1/events
 ```
 
-Token 通过握手 `Authorization: Bearer <token>` 传递，不放入 URL。连接成功后服务端发送：
+### 13.1 握手与鉴权
+
+Token 通过握手 `Authorization: Bearer <token>` 传递，不放入 URL。允许用户、管理员和大屏令牌；ML 任务令牌不得连接。握手拒绝以普通 HTTP 响应返回，不升级连接：缺失或格式错误的凭证、未知/过期/已撤销的令牌返回 401；ML 令牌或超出连接数上限（默认 100，可配置）返回 403。服务端限制单条入站消息最大 64 KiB（可配置），超限由服务端以 1009 关闭。同一会话（同一令牌）已有连接时，新连接取代旧连接：旧连接以 1001 关闭，不影响新连接接收事件（断线重连无需等待心跳清理）。
+
+### 13.2 事件信封
+
+连接成功后服务端立即发送 `session.ready`：
 
 ```json
 {
   "type": "session.ready",
-  "eventId": "EV202609020001",
+  "eventId": "EV2026090200000001",
   "sequence": 1832,
   "occurredAt": 1788235200,
   "data": {}
 }
 ```
+
+- `type`：事件类型，`session.ready` 或下表六类业务事件之一。
+- `eventId`：`EV` + UTC `YYYYMMDD` + 8 位日序号，进程内唯一；UTC 零点日序号重置。日序号每天最多 10⁸ 条，超出后取模回绕。
+- `sequence`：全局 `uint64`，跨全部连接和事件类型严格递增，进程内从 1 开始；`session.ready` 同样消耗一个序号。进程重启后序号重置，客户端必须按断线处理并重新执行 REST 快照恢复。
+- `occurredAt`：业务事件发生的 UTC Unix 秒（outbox 事件为业务写入时刻，不是投递时刻）。
+- `data`：见 13.3 各事件白名单。
 
 事件类型：
 
@@ -1057,7 +1229,99 @@ Token 通过握手 `Authorization: Bearer <token>` 传递，不放入 URL。连�
 | `dashboard.refresh` | 大屏角色 | 通知拉取新版本快照 |
 | `session.revoked` | 对应会话 | 立即退出 |
 
-每个事件包含单调递增 `sequence`。客户端发现序号跳跃、断线或重连时，必须调用相应 REST 快照接口恢复，不得假设增量事件完整。通知不得包含完整手机号、钱包余额、令牌、验证码或完整订单。
+### 13.3 各事件 `data` 白名单
+
+**`flow.updated`**（对应用户与全部管理员）：
+
+```json
+{
+  "flowNo": "FL202609020001",
+  "fromStatus": 10,
+  "toStatus": 20,
+  "statusText": "待报价",
+  "reasonCode": "CREATED",
+  "stationId": 1,
+  "stationName": "NCS 中关村充电站",
+  "chargerCode": "ZGC-DC-01",
+  "queuePosition": 3
+}
+```
+
+前五个字段始终存在；`stationId`、`stationName`、`chargerCode`、`queuePosition` 为尽力补充字段，未知时省略；`queuePosition` 仅当流程处于排队状态时出现。
+
+**`charge.progress`**（对应用户，约每秒一次，可丢弃）：字段与 §5.7 进度 DTO 一致：
+
+```json
+{
+  "flowNo": "FL202609020001",
+  "orderNo": "OR202609020001",
+  "status": 40,
+  "statusText": "充电中",
+  "durationSec": 3720,
+  "energyMwh": 12345678,
+  "amountCent": 1234,
+  "powerWatt": 60000,
+  "simulatedSoc": 36,
+  "calculatedAt": 1788235200
+}
+```
+
+进度按充电开始快照与时间倍率计算，推送节奏不改变业务数据语义。
+
+**`charger.statusChanged`**（全部管理员）：
+
+```json
+{
+  "chargerId": 3,
+  "chargerCode": "ZGC-DC-03",
+  "stationId": 1,
+  "fromStatus": 0,
+  "toStatus": 1,
+  "reason": "ALLOCATED"
+}
+```
+
+状态值：0 闲置、1 在用、2 故障、3 停用、4 重启中。
+
+投递时若设备记录已不可查（如随后被清理），事件会省略 `chargerCode` 与 `stationId` 字段；客户端不得假设这两个字段必然存在，设备以 `chargerId` 为准。
+
+**`order.settled`**（对应用户与全部管理员，不含完整小票）：
+
+```json
+{
+  "orderNo": "OR202609020001",
+  "flowNo": "FL202609020001",
+  "amountCent": 1234,
+  "energyMwh": 12345678,
+  "settledAt": 1788235200,
+  "status": 60
+}
+```
+
+明确不含 `paidCent`、`debtAddedCent`、`balanceAfterCent`、`debtAfterCent`、价格与站点字段。
+
+**`dashboard.refresh`**（大屏）：`data` 为 `{}`。客户端收到后通过 `GET /api/v1/dashboard/summary` 重新获取完整快照，快照的 `dataVersion` 等于本帧的 `sequence`。
+
+**`session.revoked`**（仅该会话）：`data` 为 `{"reason":"revoked"}`，服务端随后立即以 4001 关闭连接。
+
+### 13.4 心跳与关闭码
+
+服务端在连接静默（未收到 pong）30 秒后发送应用层帧 `{"type":"ping"}`，客户端必须回复 `{"type":"pong"}`；60 秒未收到 pong 时服务端以 4000 关闭连接。客户端发送的协议级 ping 由服务端按 RFC 6455 自动回 pong。心跳回复同时刷新会话空闲计时。
+
+| 关闭码 | 含义 |
+| --- | --- |
+| 1000 | 客户端正常关闭 |
+| 1001 | 服务端关闭（含同一会话被新连接取代） |
+| 1013 | 服务端积压溢出或连接数达到上限 |
+| 4000 | 心跳超时 |
+| 4001 | 会话已撤销（紧随 `session.revoked` 之后） |
+| 4002 | 会话已过期或失效 |
+
+### 13.5 积压与投递语义
+
+服务端对每个连接限制 60 秒滑动窗口内的投递量：默认 256 帧或 1 MiB（可配置）。窗口溢出时先放弃窗口内已计入的 `charge.progress` 帧腾出容量；仍溢出时丢弃新到的 `charge.progress` 帧，其他帧则导致连接以 1013 关闭。客户端不得把任何推送帧视为持久数据。
+
+投递为至少一次：进程运行期间同一事件不重复投递；进程重启后未投递完成的事件会以新的 `eventId` 和 `sequence`、原始 `occurredAt` 重新投递。投递失败的行按指数退避重试（首次约 5 秒，上限 300 秒），累计十次失败后转为死信不再投递。每个事件包含单调递增 `sequence`；客户端发现序号跳跃、断线或重连时，必须调用相应 REST 快照接口恢复，不得假设增量事件完整。通知不得包含完整手机号、钱包余额、令牌、验证码或完整订单。
 
 ## 14. 接口实现边界
 
@@ -1079,3 +1343,21 @@ Token 通过握手 `Authorization: Bearer <token>` 传递，不放入 URL。连�
 5. 每个写接口至少测试正常流、权限、字段边界、非法状态、并发、幂等重试和事务回滚。
 6. 每个查询接口至少测试空数据、分页上限、过滤、排序白名单、权限和性能预算。
 7. 接口实现完成以自动化契约测试和端到端证据为准，文档存在不代表功能已经实现。
+
+
+## 2026-09-09：UC-U-09 用户确认扣款与申诉（v10）
+
+本节替代原结束充电接口的“立即扣款”语义；业务规则以需求规格 UC-U-09 为准。
+
+| 接口（前缀 `/api/v1`） | 请求与权限 | 成功结果 |
+| --- | --- | --- |
+| POST `/user/flows/{flowNo}/settlements` | 保持原 `flowVersion`、`reasonCode` 和幂等键 | 停止计费、冻结金额、释放设备；小票 `status=100`、`settledAt=null`、`paidCent=0`，钱包不变 |
+| POST `/user/orders/{orderNo}/confirmation` | 当前订单所有人；JSON `{}`；Idempotency-Key 必填 | 按冻结金额扣款，返回 `status=60` 小票，随后可调用现有评价接口 |
+| POST `/user/orders/{orderNo}/appeals` | 当前订单所有人；JSON `{"reason":"申诉原因"}`；Idempotency-Key 必填 | 1～500 个 Unicode 码点、去除首尾空白、拒绝 NUL；返回 `status=110` 小票及 `appealReason` |
+| GET `/admin/order-appeals?page=1&pageSize=20` | OPERATOR 或 OWNER | `items/total/page/pageSize`；按申诉时间从早到晚，同时间按订单号排序；每项 `orderNo/stationName/chargerCode/amountCent/reason/appealAt` |
+| POST `/admin/order-appeals/{orderNo}/approval` | OPERATOR 或 OWNER；JSON `{"confirmed":true}`；Idempotency-Key 必填 | 审核通过取消订单，返回 `status=70` 小票；`settledAt=null`，无扣款和欠费 |
+
+- 100/110 均可在现有用户订单列表中过滤，列表和小票使用对应 `statusText`。活动流程仍返回这些状态，以恢复订单处理入口。
+- 确认、申诉和审核的幂等作用域分别为 `u{id}:order-confirm:{orderNo}`、`u{id}:order-appeal:{orderNo}`、`a{id}:appeal-approve:{orderNo}`。业务事务也拒绝重复收费；失败可用新键重试。相同申诉内容重试返回已有结果，不同内容返回 AlreadyExists。
+- 沿用现有错误码：Unauthorized/Forbidden、NotFound（包括非本人订单）、ValidationFailed、InvalidStateTransition、AlreadyExists、TransactionFailed。旧订单及旧评论数据不变；客户端与服务端必须配套升级，旧客户端不得把停止充电响应当作支付成功。
+- 新增 WebSocket 事件 `order.ready`、`order.appealed`、`order.cancelled`，复用 `order.settled` 的最小字段结构及“本人 + 管理员”的发送范围；不推送申诉自由文本、余额和完整小票。客户端从授权 REST 读取详情，断线后刷新订单可恢复。`order.settled` 仅在用户确认完成扣款后发送。

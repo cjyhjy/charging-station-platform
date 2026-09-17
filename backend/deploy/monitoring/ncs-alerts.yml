@@ -1,0 +1,127 @@
+# NCS 告警规则（B-06 裁决 ③ 的初始阈值）
+#
+# 用法：由监控系统按部署环境加载（Prometheus rule_files 或等价系统）。阈值来自集成人员的批准表，
+# 本文件是那份表的可执行形式；改阈值必须先改裁定，再改这里。
+#
+# 抓取目标（见 backend/deploy/README.md）：
+#   Go API       127.0.0.1:9090
+#   Worker       127.0.0.1:9091
+#   Publisher    127.0.0.1:9092
+#
+# 两条判断口径写在这里，避免实现时走偏：
+#   1. "最近成功时间"不能在完全空闲时误报。空库、无事件、无 Pending 时 Worker 本来就没有"成功"可记。
+#      因此陈旧判断一律与"确实有活干"（未发布 Outbox 或 Pending）取交集。
+#   2. 指标只在 PostgreSQL 可达时更新（依赖不可用时保留上次数值）。依赖是否可用只看 ncs_dependency_up，
+#      不要用 backlog / 时间戳判断存活。
+groups:
+  - name: ncs-availability
+    rules:
+      - alert: NCSDependencyDown
+        expr: ncs_dependency_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.dependency }} 不可达（{{ $labels.job }}）"
+          description: |-
+            {{ $labels.dependency }} 已连续 2 分钟无应答。API 会因此报 503 并由负载均衡摘除；
+            session/lock 为 fail-closed，Redis 不可用时业务写入会被拒绝。Redis 仍是可恢复基础设施，
+            恢复后由 PostgreSQL 的 Outbox / Pending 继续推进。
+
+  - name: ncs-outbox
+    rules:
+      - alert: NCSOutboxBacklogWarning
+        expr: ncs_pg_outbox_unpublished > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox 未发布积压超过 100（持续 5 分钟）"
+          description: "当前 {{ $value }} 条未发布。先看 Publisher 是否在运行、是否持有 advisory lock。"
+      - alert: NCSOutboxBacklogCritical
+        expr: ncs_pg_outbox_unpublished > 1000
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox 未发布积压超过 1000（持续 15 分钟）"
+          description: "当前 {{ $value }} 条未发布。业务事务已提交但事件没有进入 Stream，下游全部滞后。"
+      - alert: NCSOutboxOldestWarning
+        expr: ncs_pg_outbox_oldest_unpublished_seconds > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "最老的未发布 Outbox 记录已等待超过 2 分钟"
+          description: "最老一条已等待 {{ $value }} 秒。积压数量不大但最老记录很旧，通常意味着 Publisher 在运行却推不动。"
+      - alert: NCSOutboxOldestCritical
+        expr: ncs_pg_outbox_oldest_unpublished_seconds > 900
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "最老的未发布 Outbox 记录已等待超过 15 分钟"
+          description: "最老一条已等待 {{ $value }} 秒。订单事件长时间没有进入 Stream（订单会停在 STARTING/STOPPING）。"
+      - alert: NCSPublisherNotPublishing
+        # 只有确实有未发布记录时才判断 Publisher 是否"卡住"：空 Outbox 时它本来就无事可做。
+        expr: (time() - ncs_publisher_last_publish_timestamp_seconds > 600) and on() (ncs_pg_outbox_unpublished > 0)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Publisher 超过 10 分钟没有成功发布，且存在未发布记录"
+          description: "可能是 Publisher 未运行、未取得 advisory lock（看 ncs_publisher_standby 与失锁计数）或 Redis 写入失败。"
+      - alert: NCSPublisherStalledCritical
+        expr: (time() - ncs_publisher_last_publish_timestamp_seconds > 1800) and on() (ncs_pg_outbox_unpublished > 0)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Publisher 超过 30 分钟没有成功发布，且存在未发布记录"
+          description: "订单与设备命令链路已经停摆；先确认 Publisher 进程与 advisory lock，再看 Redis 是否可达。"
+
+  - name: ncs-worker
+    rules:
+      - alert: NCSWorkerNotConsuming
+        # 空闲不算故障：只有 Pending 或待发布记录存在时，陈旧的"最近成功时间"才是问题。
+        expr: (time() - ncs_worker_last_success_timestamp_seconds > 600) and on() (sum(ncs_stream_pending) > 0 or ncs_pg_outbox_unpublished > 0)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Worker 超过 10 分钟没有成功处理事件，且存在待处理任务"
+          description: "检查 Worker 是否在运行、消费组是否有成员、依赖是否可达（ncs_dependency_up）。"
+      - alert: NCSWorkerStalledCritical
+        expr: (time() - ncs_worker_last_success_timestamp_seconds > 1800) and on() (sum(ncs_stream_pending) > 0 or ncs_pg_outbox_unpublished > 0)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker 超过 30 分钟没有成功处理事件，且存在待处理任务"
+          description: "事件闭环停摆：订单状态不会被推进，设备命令不会被下发。"
+      - alert: NCSPendingGrowing
+        expr: deriv(ncs_stream_pending[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Stream {{ $labels.stream }} 的 Pending 持续增长（10 分钟）"
+          description: "投递了但未被 ACK 的条目在增加：消费变慢、处理失败重试，或消费者反复崩溃。"
+      - alert: NCSDeadLettersPresent
+        expr: ncs_stream_dead_letter_length > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "死信流中存在 {{ $value }} 条未处理事件"
+          description: |-
+            死信意味着有事件既没有成功处理、也不会再自动重试。每条都要有人看：查 event_consumptions 的
+            outcome=DEAD_LETTERED 记录与 Worker 日志中的 reason。死信不清理会一直计在这里。
+      - alert: NCSDeadLetterWritten
+        expr: increase(ncs_worker_dead_lettered_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "最近 5 分钟有事件进入死信"
+          description: "新产生的死信比存量更值得立刻看：它说明刚刚有一条链路失败并放弃了重试。"

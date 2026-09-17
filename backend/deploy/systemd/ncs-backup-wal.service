@@ -1,0 +1,26 @@
+# Continuous WAL archiving: this is the unit that makes "RPO <= 15 minutes" true (in practice far
+# smaller, since segments are streamed as the server completes them). It runs always, not on a timer.
+#
+# Enabling the slot consumes WAL retention on the server: a stopped archive fills pg_wal. Keep the
+# disk alert on pg_wal and on this service's state (see deploy/README.md).
+[Unit]
+Description=NCS WAL archiving (pg_receivewal)
+After=network-online.target postgresql.service ncs-migrate.service
+Requires=ncs-migrate.service
+
+[Service]
+Type=simple
+User=ncs
+Group=ncs
+EnvironmentFile=/etc/ncs/backend.env
+ExecStart=/opt/ncs/backend/scripts/wal-archive.sh
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/ncs
+
+[Install]
+WantedBy=multi-user.target
