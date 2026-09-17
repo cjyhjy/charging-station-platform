@@ -1,7 +1,7 @@
 FROM node:22-alpine AS builder
 
 WORKDIR /src
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@10.15.1 --activate
 COPY apps/shared ./apps/shared
 COPY apps/user/package.json apps/user/package-lock.json ./apps/user/
 COPY apps/admin/package.json apps/admin/package-lock.json ./apps/admin/
