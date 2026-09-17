@@ -18,8 +18,8 @@ COPY apps/user ./apps/user
 COPY apps/admin ./apps/admin
 COPY apps/dashboard ./apps/dashboard
 RUN case "$NCS_WEB_APP" in \
-      user|admin) cd "apps/$NCS_WEB_APP" && npm run build ;; \
-      dashboard) cd apps/dashboard && pnpm run build ;; \
+      user|admin) npm --prefix "apps/$NCS_WEB_APP" run build ;; \
+      dashboard) pnpm --dir apps/dashboard run build ;; \
     esac && mkdir -p /out && cp -R "apps/$NCS_WEB_APP/dist/." /out/
 
 FROM nginx:1.27-alpine
