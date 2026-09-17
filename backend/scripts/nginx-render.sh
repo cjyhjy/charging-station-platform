@@ -38,6 +38,17 @@ done
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { printf '\n=== %s ===\n' "$*"; }
+find_mime_types() {
+    local candidate="/etc/nginx/mime.types" conf_path
+    if [[ -f "${candidate}" ]]; then
+        printf '%s\n' "${candidate}"
+        return
+    fi
+    conf_path="$(nginx -V 2>&1 | sed -n 's/.*--conf-path=\([^ ]*\).*/\1/p')"
+    candidate="$(dirname "${conf_path:-/etc/nginx/nginx.conf}")/mime.types"
+    [[ -f "${candidate}" ]] || fail "nginx mime.types not found beside ${conf_path:-the configured nginx.conf}"
+    printf '%s\n' "${candidate}"
+}
 
 [[ -f "${template}" ]] || fail "template not found: ${template}"
 
@@ -72,7 +83,6 @@ if [[ "${drill}" == "true" ]]; then
     export NCS_HTTPS_PORT="8443"
     export NCS_STATIC_ROOT="${static_root}"
     export NCS_API_UPSTREAM="${NCS_API_UPSTREAM:-127.0.0.1:8080}"
-export NCS_METRICS_UPSTREAM="${NCS_METRICS_UPSTREAM:-127.0.0.1:9090}"
     export NCS_METRICS_UPSTREAM="${NCS_METRICS_UPSTREAM:-127.0.0.1:9090}"
     export NCS_TLS_CERT="${cert}" NCS_TLS_KEY="${key}"
     export NCS_GATEWAY_ALLOW="10.20.30.0/24"
@@ -81,13 +91,14 @@ export NCS_METRICS_UPSTREAM="${NCS_METRICS_UPSTREAM:-127.0.0.1:9090}"
     export NCS_ERROR_LOG="${work_dir}/prefix/logs/error.log"
 
     render > "${work_dir}/site.conf"
+    mime_types="$(find_mime_types)"
     cat > "${work_dir}/nginx.conf" <<CONF
 worker_processes 1;
 error_log ${work_dir}/prefix/logs/error.log warn;
 pid ${work_dir}/prefix/logs/nginx.pid;
 events { worker_connections 64; }
 http {
-    include /etc/nginx/mime.types;
+    include ${mime_types};
     default_type application/octet-stream;
     client_body_temp_path ${work_dir}/prefix/temp/client;
     proxy_temp_path ${work_dir}/prefix/temp/proxy;
@@ -148,6 +159,7 @@ step "render the site"
 export NCS_HTTP_PORT="${NCS_HTTP_PORT:-80}"
 export NCS_HTTPS_PORT="${NCS_HTTPS_PORT:-443}"
 export NCS_API_UPSTREAM="${NCS_API_UPSTREAM:-127.0.0.1:8080}"
+export NCS_METRICS_UPSTREAM="${NCS_METRICS_UPSTREAM:-127.0.0.1:9090}"
 export NCS_ACCESS_LOG="${NCS_ACCESS_LOG:-/var/log/nginx/ncs-access.log}"
 export NCS_ERROR_LOG="${NCS_ERROR_LOG:-/var/log/nginx/ncs-error.log}"
 

@@ -195,6 +195,12 @@ fi
 
 if [[ "${with_nginx}" == "true" ]]; then
     step "render and start nginx"
+    mime_types="/etc/nginx/mime.types"
+    if [[ ! -f "${mime_types}" ]]; then
+        nginx_conf_path="$(nginx -V 2>&1 | sed -n 's/.*--conf-path=\([^ ]*\).*/\1/p')"
+        mime_types="$(dirname "${nginx_conf_path:-/etc/nginx/nginx.conf}")/mime.types"
+    fi
+    [[ -f "${mime_types}" ]] || fail "nginx mime.types not found"
     mkdir -p "${run_dir}/nginx-prefix/logs" "${run_dir}/nginx-prefix/temp" "${run_dir}/certs"
     [[ -f "${run_dir}/certs/ncs.crt" ]] || openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
         -subj "/CN=localhost" -keyout "${run_dir}/certs/ncs.key" -out "${run_dir}/certs/ncs.crt" >/dev/null 2>&1
@@ -212,7 +218,7 @@ error_log ${run_dir}/nginx-prefix/logs/error.log warn;
 pid ${run_dir}/nginx-prefix/logs/nginx.pid;
 events { worker_connections 128; }
 http {
-    include /etc/nginx/mime.types;
+    include ${mime_types};
     default_type application/octet-stream;
     client_body_temp_path ${run_dir}/nginx-prefix/temp/client;
     proxy_temp_path ${run_dir}/nginx-prefix/temp/proxy;

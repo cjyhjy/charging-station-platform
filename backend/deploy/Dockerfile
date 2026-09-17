@@ -5,7 +5,7 @@
 #
 # 运行时用 alpine：容器内保留 shell，便于编排平台做 HTTP 健康检查；
 # 若需最小化攻击面，可把最后一级换成 gcr.io/distroless/static，并把健康检查交给平台探针。
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /src
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download

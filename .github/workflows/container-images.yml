@@ -1,0 +1,67 @@
+name: Container images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/go-vue-retirement']
+    paths:
+      - 'backend/**'
+      - 'apps/**'
+      - '.github/workflows/container-images.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: containers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - name: api
+            target: cmd/api
+          - name: worker
+            target: cmd/worker
+          - name: outbox-publisher
+            target: cmd/outbox-publisher
+          - name: mock-gateway
+            target: cmd/mock-gateway
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/deploy/Dockerfile
+          build-args: NCS_TARGET=${{ matrix.target }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/ncs-${{ matrix.name }}:retirement
+
+  web:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        app: [user, admin, dashboard]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/deploy/Web.Dockerfile
+          build-args: NCS_WEB_APP=${{ matrix.app }}
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/ncs-${{ matrix.app }}-web:retirement

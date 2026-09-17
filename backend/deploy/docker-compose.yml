@@ -1,13 +1,14 @@
-# NCS Go 后端本地/单机编排（B-06 交付物，草稿）
+# NCS Go/Vue 单机编排
 #
-# 用途：一键起 PostgreSQL、Redis、Go API、Worker、Publisher、Nginx（含 H5 静态通路），
-#       用于本地联调与故障演练；生产部署用 systemd 单元（见 deploy/systemd/）。
+# 用途：一键起 PostgreSQL、Redis、Go API、Publisher 和两个 Web 客户端。
+#       mock profile 增加 Worker 与模拟设备；dashboard profile 增加尚待 Go 契约迁移的大屏。
+#       Web 端口默认只绑定 127.0.0.1，公网部署必须再接 TLS 入口。
 #
 # 用法：
 #   cd backend/deploy
-#   cp .env.example .env    # 填 NCS_CHARGER_GATEWAY_TOKEN 等
+#   cp .env.example .env    # 填数据库口令与 NCS_CHARGER_GATEWAY_TOKEN
 #   docker compose up -d
-#   docker compose --profile mock up -d mock-gateway     # 开发用模拟设备网关
+#   docker compose --profile mock up -d  # 增加完整模拟充电闭环
 #
 # 迁移：api 容器启动时由进程内的迁移 runner 执行（0001..0012），无需手工 psql。
 
@@ -15,7 +16,7 @@ name: ncs-backend
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${NCS_DB_USER:-ncs}
@@ -48,21 +49,23 @@ services:
 
   # 迁移门禁：先应用顺序迁移并核对版本，成功退出后 API / Worker / Publisher 才启动。
   migrate:
+    image: ${NCS_IMAGE_REGISTRY:-ghcr.io}/${NCS_IMAGE_OWNER:-cjyhjy}/ncs-api:${NCS_IMAGE_TAG:-retirement}
     build:
       context: ../..
       dockerfile: backend/deploy/Dockerfile
       args:
         NCS_TARGET: cmd/api
-    command: ["-migrate-only"]
     restart: "no"
     environment:
       NCS_POSTGRES_DSN: postgres://${NCS_DB_USER:-ncs}:${NCS_DB_PASSWORD}@postgres:5432/${NCS_DB_NAME:-ncs_dev}?sslmode=disable
       NCS_CHARGER_GATEWAY_TOKEN: ${NCS_CHARGER_GATEWAY_TOKEN:?set NCS_CHARGER_GATEWAY_TOKEN}
+      NCS_MIGRATE_ONLY: "true"
     depends_on:
       postgres:
         condition: service_healthy
 
   api:
+    image: ${NCS_IMAGE_REGISTRY:-ghcr.io}/${NCS_IMAGE_OWNER:-cjyhjy}/ncs-api:${NCS_IMAGE_TAG:-retirement}
     build:
       context: ../..
       dockerfile: backend/deploy/Dockerfile
@@ -75,6 +78,17 @@ services:
       NCS_REDIS_REQUIRED: "true"
       NCS_CHARGER_GATEWAY_TOKEN: ${NCS_CHARGER_GATEWAY_TOKEN:?set NCS_CHARGER_GATEWAY_TOKEN}
       NCS_HTTP_ADDR: 0.0.0.0:8080
+      NCS_ENV: ${NCS_ENV:-development}
+      NCS_SMS_MOCK: ${NCS_SMS_MOCK:-true}
+      NCS_SMS_SENDER_URL: ${NCS_SMS_SENDER_URL:-}
+      NCS_SMS_SENDER_TOKEN: ${NCS_SMS_SENDER_TOKEN:-}
+      TENCENT_MAP_SERVER_KEY: ${TENCENT_MAP_SERVER_KEY:-}
+      TENCENT_MAP_BASE_URL: ${TENCENT_MAP_BASE_URL:-https://apis.map.qq.com}
+      AI_PROVIDER: ${AI_PROVIDER:-openai-compatible}
+      AI_MODEL: ${AI_MODEL:-}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_TIMEOUT_MS: ${AI_TIMEOUT_MS:-15000}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -91,6 +105,8 @@ services:
       - "8080"
 
   worker:
+    profiles: ["mock", "worker"]
+    image: ${NCS_IMAGE_REGISTRY:-ghcr.io}/${NCS_IMAGE_OWNER:-cjyhjy}/ncs-worker:${NCS_IMAGE_TAG:-retirement}
     build:
       context: ../..
       dockerfile: backend/deploy/Dockerfile
@@ -101,7 +117,7 @@ services:
       NCS_POSTGRES_DSN: postgres://${NCS_DB_USER:-ncs}:${NCS_DB_PASSWORD}@postgres:5432/${NCS_DB_NAME:-ncs_dev}?sslmode=disable
       NCS_REDIS_ADDR: redis:6379
       NCS_REDIS_REQUIRED: "true"
-      NCS_CHARGER_GATEWAY_URL: ${NCS_CHARGER_GATEWAY_URL:-http://mock-gateway:8090}
+      NCS_CHARGER_GATEWAY_URL: ${NCS_CHARGER_GATEWAY_URL:?set NCS_CHARGER_GATEWAY_URL}
       NCS_CHARGER_GATEWAY_TIMEOUT: 5s
       NCS_WORKER_CONSUMER: worker-compose
     depends_on:
@@ -109,10 +125,9 @@ services:
         condition: service_completed_successfully
       api:
         condition: service_healthy
-      mock-gateway:
-        condition: service_started
 
   outbox-publisher:
+    image: ${NCS_IMAGE_REGISTRY:-ghcr.io}/${NCS_IMAGE_OWNER:-cjyhjy}/ncs-outbox-publisher:${NCS_IMAGE_TAG:-retirement}
     build:
       context: ../..
       dockerfile: backend/deploy/Dockerfile
@@ -133,6 +148,7 @@ services:
 
   mock-gateway:
     profiles: ["mock"]
+    image: ${NCS_IMAGE_REGISTRY:-ghcr.io}/${NCS_IMAGE_OWNER:-cjyhjy}/ncs-mock-gateway:${NCS_IMAGE_TAG:-retirement}
     build:
       context: ../..
       dockerfile: backend/deploy/Dockerfile
@@ -150,22 +166,49 @@ services:
     expose:
       - "8090"
 
-  nginx:
-    image: nginx:1.24-alpine
+  user-web:
+    image: ${NCS_IMAGE_REGISTRY:-ghcr.io}/${NCS_IMAGE_OWNER:-cjyhjy}/ncs-user-web:${NCS_IMAGE_TAG:-retirement}
+    build:
+      context: ../..
+      dockerfile: backend/deploy/Web.Dockerfile
+      args:
+        NCS_WEB_APP: user
     restart: unless-stopped
     ports:
-      - "${NCS_NGINX_HTTP_PORT:-8088}:80"
-      - "${NCS_NGINX_HTTPS_PORT:-8443}:443"
-    volumes:
-      - ../..:/repo:ro
-      - ./nginx/rendered:/etc/nginx/conf.d:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
-      - h5-static:/srv/h5:ro
+      - "${NCS_BIND_ADDRESS:-127.0.0.1}:${NCS_USER_PORT:-8088}:80"
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
+
+  admin-web:
+    image: ${NCS_IMAGE_REGISTRY:-ghcr.io}/${NCS_IMAGE_OWNER:-cjyhjy}/ncs-admin-web:${NCS_IMAGE_TAG:-retirement}
+    build:
+      context: ../..
+      dockerfile: backend/deploy/Web.Dockerfile
+      args:
+        NCS_WEB_APP: admin
+    restart: unless-stopped
+    ports:
+      - "${NCS_BIND_ADDRESS:-127.0.0.1}:${NCS_ADMIN_PORT:-8089}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  dashboard-web:
+    profiles: ["dashboard"]
+    image: ${NCS_IMAGE_REGISTRY:-ghcr.io}/${NCS_IMAGE_OWNER:-cjyhjy}/ncs-dashboard-web:${NCS_IMAGE_TAG:-retirement}
+    build:
+      context: ../..
+      dockerfile: backend/deploy/Web.Dockerfile
+      args:
+        NCS_WEB_APP: dashboard
+    restart: unless-stopped
+    ports:
+      - "${NCS_BIND_ADDRESS:-127.0.0.1}:${NCS_DASHBOARD_PORT:-8091}:80"
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   postgres-data:
   redis-data:
-  h5-static:

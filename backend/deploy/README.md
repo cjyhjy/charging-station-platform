@@ -64,13 +64,17 @@ systemctl enable --now ncs-migrate.service ncs-api.service ncs-worker.service nc
 docker build -f backend/deploy/Dockerfile --build-arg NCS_TARGET=cmd/api -t ncs-api:$(git rev-parse --short HEAD) .
 # 单进程运行
 docker run --rm -e NCS_POSTGRES_DSN=... -e NCS_REDIS_ADDR=... -e NCS_CHARGER_GATEWAY_TOKEN=... ncs-api:dev
-# 或者用编排（需要 docker compose 插件）
-cd backend/deploy && cp systemd/ncs-backend.env.example .env && docker compose up -d
+# 或者用编排（需要 Docker Compose v2）
+cd backend/deploy
+cp .env.example .env
+chmod 600 .env
+docker compose --profile mock up -d --build --wait
 ```
 
-**注意**：验证 B-06 的这台机器上**没有安装 docker compose 插件**（`docker` 可用、`docker-compose`
-与 `compose` 子命令不可用），因此 compose 路径只做了结构校验与文档说明，**没有作为验收证据**；
-验收以 systemd 与脚本路径为准。使用 compose 前请确认 `docker compose version` 可用。
+Compose 默认启动 API、Publisher、PostgreSQL、Redis、车主端和管理端；`mock` profile 再启动
+Worker 与模拟设备网关。Web 端口默认只绑定 `127.0.0.1`，公开环境必须在其前方配置 HTTPS。
+CI 会实际构建并启动该编排，而不只检查 YAML。完整步骤见
+[`docs/deployment-self-host.md`](../../docs/deployment-self-host.md)。
 
 ## 密钥与证书注入（B-06 裁决 ②）
 

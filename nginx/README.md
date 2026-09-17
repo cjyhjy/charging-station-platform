@@ -12,7 +12,8 @@ Nginx 负责 H5 静态资源、Go API 反向代理和后续 SSE 入口。
 | `../backend/scripts/nginx-render.sh` | 渲染模板并用 `nginx -t` 校验；`--drill` 用 8443/8088 与自签证书在本机跑通一遍 |
 | `../backend/scripts/local-stack.sh` | 一键起后端全栈并联调（含 Nginx 通路验证） |
 
-旧 C++ 服务的站点不在本目录：迁移期间两套站点并存，切换由集成人员按发布计划执行。
+本目录是当前生产站点配置：模板服务于 Go API 与 H5 静态资源。
+旧 C++/Crow 服务的站点配置已随退役提交移除，历史实现见 `../legacy/server/`。
 
 ## 端口与域名（B-06 裁决）
 

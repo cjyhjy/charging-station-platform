@@ -21,6 +21,7 @@ NCS_TEST_PG_DSN='<test DSN>' NCS_REDIS_TEST_ADDR=127.0.0.1:6379 NCS_REDIS_TEST_D
 ## 文档与协作
 
 - [fork 验证、旧栈退役边界与合并步骤](docs/integration/go-vue-retirement.md)
+- [fork 自托管部署](docs/deployment-self-host.md)
 - [需求基线](docs/01-requirements-specification.md)、[需求追踪](docs/requirements-traceability.md)
 - [Go OpenAPI](api/openapi.yaml)、[接口对接](docs/api-integration.md)
 - [研发流程](docs/development-guide.md)、[安全要求](SECURITY.md)

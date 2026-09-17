@@ -46,12 +46,14 @@ jobs:
       - name: Install PostgreSQL 18 client and Redis CLI
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-common redis-tools
+          sudo apt-get install -y postgresql-common redis-tools nginx gettext-base openssl
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y postgresql-client-18
           echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
       - name: Repository checks
         run: ./scripts/check.sh
+      - name: Nginx deployment drill
+        run: backend/scripts/nginx-render.sh --drill
       - name: Real PostgreSQL and Redis tests (no skipped tests)
         run: ./scripts/test-backend.sh
       - name: Four-process charging closed loop
@@ -113,3 +115,31 @@ jobs:
         with:
           name: dashboard-test-results
           path: apps/dashboard/test-results/
+
+  deployment-compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate the complete compose model
+        working-directory: backend/deploy
+        run: |
+          cp .env.example .env
+          docker compose --profile mock --profile dashboard config --quiet
+      - name: Build and start the deployable stack
+        working-directory: backend/deploy
+        run: docker compose --profile mock up --detach --build --wait
+      - name: Verify both active Web entry points
+        working-directory: backend/deploy
+        run: |
+          curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:8088/healthz
+          curl --fail --retry 10 --retry-delay 2 http://127.0.0.1:8089/healthz
+          docker compose exec -T api wget -q -O /dev/null http://127.0.0.1:8080/readyz
+      - name: Capture compose state
+        if: always()
+        working-directory: backend/deploy
+        run: docker compose --profile mock ps && docker compose --profile mock logs --no-color --tail 100
+      - name: Stop the disposable stack
+        if: always()
+        working-directory: backend/deploy
+        run: docker compose --profile mock down --volumes --remove-orphans
