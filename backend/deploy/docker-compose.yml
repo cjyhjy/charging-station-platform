@@ -23,7 +23,9 @@ services:
       POSTGRES_PASSWORD: ${NCS_DB_PASSWORD:?set NCS_DB_PASSWORD}
       POSTGRES_DB: ${NCS_DB_NAME:-ncs_dev}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # PostgreSQL 18 stores clusters under a versioned subdirectory. Mount the
+      # parent so pg_upgrade can link across versions without a mount boundary.
+      - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${NCS_DB_USER:-ncs} -d ${NCS_DB_NAME:-ncs_dev}"]
       interval: 5s

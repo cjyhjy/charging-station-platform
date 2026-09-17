@@ -15,6 +15,9 @@ cp .env.example .env
 chmod 600 .env
 ```
 
+本编排使用 PostgreSQL 18 的新版卷布局。已有 PostgreSQL 16 容器卷不能直接挂载升级；旧部署必须先备份，
+再按 PostgreSQL 官方 `pg_upgrade` 或 dump/restore 流程迁移，不能复用旧卷强行启动。
+
 至少修改 `.env` 中的数据库口令和设备网关令牌。测试环境可以保留
 `NCS_ENV=development` 与 `NCS_SMS_MOCK=true`；这会在登录接口响应中返回模拟验证码，不能用于公开生产环境。
 
